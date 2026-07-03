@@ -1,0 +1,39 @@
+# Build artifacts & toolchain output
+/dist/
+/bin/
+/build/
+/defqon-recorder
+/external tools/
+
+# Runtime data
+/recordings/
+/docker-recordings/
+/data/
+*.mp3
+*.m4a
+*.mp4
+*.mkv
+*.ts
+*.part
+*.log
+
+# VCS & metadata
+/.git/
+/.gitignore
+/.dockerignore
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Docs and local media not needed in image
+*.png
+README.md
+CHANGELOG.md
+LICENSE
+
+# Legacy
+node_modules/
+bun.lockb

@@ -1,0 +1,42 @@
+# syntax=docker/dockerfile:1.7
+
+# ---- Build stage ----
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+# Cache dependencies first.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+ARG APP=web
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/defqon-recorder ./cmd/${APP}
+
+# ---- Runtime stage ----
+FROM alpine:3.20
+
+# streamlink handles Twitch/YouTube/etc; FFmpeg records/transcodes raw streams;
+# rclone provides optional Dropbox/Google Drive/S3-compatible backups.
+RUN apk add --no-cache ca-certificates ffmpeg streamlink rclone tzdata \
+    && addgroup -S app && adduser -S -G app app
+
+WORKDIR /app
+COPY --from=builder /out/defqon-recorder /usr/local/bin/defqon-recorder
+COPY dq-timetable.json /app/dq-timetable.json
+
+USER app
+
+ENV HTTP_ADDR=:8080
+ENV CONFIG_PATH=/data/config/config.json
+ENV FINISHED_DIR=/data/recordings
+ENV TEMP_DIR=/data/incomplete
+ENV LOG_DIR=/data/logs
+VOLUME ["/data"]
+EXPOSE 8080
+
+ENTRYPOINT ["defqon-recorder"]

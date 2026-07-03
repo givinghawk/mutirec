@@ -1,0 +1,24 @@
+services:
+  recorder:
+    build:
+      context: .
+      args:
+        APP: web
+    image: ghcr.io/your-github-user/defqon-stream-recorder:local
+    container_name: defqon-stream-recorder
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TZ: Europe/Amsterdam
+      CONFIG_PATH: /data/config/config.json
+      FINISHED_DIR: /data/recordings
+      TEMP_DIR: /data/incomplete
+      LOG_DIR: /data/logs
+    volumes:
+      - ./data:/data
+      # SMB/NFS option: mount the share on the host, then bind it here.
+      # - /mnt/defqon-recordings:/data/recordings
+      # rclone option: mount your rclone.conf for backups.
+      # - ~/.config/rclone/rclone.conf:/home/app/.config/rclone/rclone.conf:ro
+

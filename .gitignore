@@ -1,0 +1,23 @@
+# Go build artifacts
+/defqon-recorder
+/bin/
+/dist/
+
+# Test / coverage
+*.out
+coverage.txt
+
+# Runtime data
+/recordings/
+*.mp3
+*.log
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Legacy Node.js / Bun (kept for reference but not used by the Go build)
+node_modules/
+bun.lockb
