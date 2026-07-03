@@ -18,12 +18,13 @@ RUN CGO_ENABLED=0 go build \
     -o /out/defqon-recorder ./cmd/${APP}
 
 # ---- Runtime stage ----
-FROM alpine:3.20
+FROM ubuntu:22.04
 
 # streamlink handles Twitch/YouTube/etc; FFmpeg records/transcodes raw streams;
 # rclone provides optional Dropbox/Google Drive/S3-compatible backups.
-RUN apk add --no-cache ca-certificates ffmpeg streamlink rclone tzdata \
-    && addgroup -S app && adduser -S -G app app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates ffmpeg streamlink rclone tzdata \
+    && groupadd -S app && useradd -S -G app app
 
 WORKDIR /app
 COPY --from=builder /out/defqon-recorder /usr/local/bin/defqon-recorder
