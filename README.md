@@ -1,7 +1,7 @@
 # Defqon Stream Recorder
 
 Docker-based automatic stream recorder with a dark Tailwind WebUI. It is built
-for DEFQON.1-style multi-stage recording, but it can record any Twitch,
+for multi-user recording, but it can record any Twitch,
 YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 
 ## Features
