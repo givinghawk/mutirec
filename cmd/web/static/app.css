@@ -81,3 +81,11 @@ a { color: #67e8f9; }
 .source-row-chevron { display: inline-block; transition: transform .15s ease; color: #a1a1aa; }
 .source-row.open .source-row-chevron { transform: rotate(90deg); }
 .source-row.now-playing .source-row-head { box-shadow: inset 0 0 0 1px var(--accent, #ef4444); }
+
+/* Theme switcher */
+.color-input { cursor: pointer; height: 42px; }
+.color-input::-webkit-color-swatch-wrapper { padding: 2px; }
+.color-input::-webkit-color-swatch { border: 1px solid rgb(255 255 255 / .12); border-radius: 4px; }
+.preset-theme-btn { border: 2px solid transparent; border-radius: 8px; padding: 8px 12px; font-size: 13px; background: rgb(255 255 255 / .06); color: #f4f4f5; cursor: pointer; transition: all .15s ease; }
+.preset-theme-btn:hover { background: rgb(255 255 255 / .12); }
+.preset-theme-btn.active { border-color: var(--accent, #ef4444); background: rgb(255 255 255 / .15); }

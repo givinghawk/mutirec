@@ -72,7 +72,6 @@ function renderVersion() {
 
 function applyTheme() {
   document.body.className = `min-h-screen text-zinc-100 theme-${config.ui.theme || 'midnight'} bg-zinc-950`;
-  document.documentElement.style.setProperty('--accent', accents[config.ui.accent] || accents.red);
   $('app-name').textContent = config.ui.appName || 'Defqon Stream Recorder';
   $('custom-css').textContent = config.ui.customCss || '';
   if (config.ui.logoUrl) {
@@ -80,6 +79,12 @@ function applyTheme() {
     $('logo').classList.remove('hidden');
   } else {
     $('logo').classList.add('hidden');
+  }
+
+  if (config.ui.themeColors) {
+    applyThemeColors(config.ui.themeColors);
+  } else {
+    document.documentElement.style.setProperty('--accent', accents[config.ui.accent] || accents.red);
   }
 }
 
@@ -328,8 +333,6 @@ function fillSettings() {
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
-  $('uiTheme').value = ui.theme || 'midnight';
-  $('uiAccent').value = ui.accent || 'red';
   $('uiCustomCss').value = ui.customCss || '';
   $('discordWebhook').value = s.notifications.discordWebhook || '';
   $('smtpEnabled').checked = !!s.notifications.smtp.enabled;
@@ -340,6 +343,11 @@ function fillSettings() {
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
   $('wave-toggle').checked = !!s.enableWaveform;
+
+  if (ui.themeColors) {
+    updateColorInputs(ui.themeColors);
+  }
+  renderFestivalPresets();
 }
 
 function readSettings() {
@@ -347,7 +355,7 @@ function readSettings() {
   ['finishedDir','tempDir','logDir'].forEach(k => s[k] = $(k).value);
   ['checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
-  config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, theme: $('uiTheme').value, accent: $('uiAccent').value, customCss: $('uiCustomCss').value };
+  config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
   s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
@@ -858,6 +866,124 @@ function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
+
+// --- Theme Switcher ---
+
+const festivalThemes = {
+  'defqon': { name: 'Defqon.1', colors: { primary: '#ef4444', secondary: '#dc2626', bg: '#09090b', accent: '#ef4444', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'qlimax': { name: 'Qlimax', colors: { primary: '#7c3aed', secondary: '#6d28d9', bg: '#0a0a0a', accent: '#ec4899', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'defqon-pink': { name: 'Defqon Pink', colors: { primary: '#ec4899', secondary: '#be185d', bg: '#0f0a0a', accent: '#ec4899', text: '#fce7f3', textMuted: '#be185d' } },
+  'defqon-cyan': { name: 'Defqon Cyan', colors: { primary: '#06b6d4', secondary: '#0891b2', bg: '#000d0f', accent: '#06b6d4', text: '#cffafe', textMuted: '#0a7ea4' } },
+  'defqon-gold': { name: 'Defqon Gold', colors: { primary: '#f59e0b', secondary: '#d97706', bg: '#0b0803', accent: '#fbbf24', text: '#f9f5f0', textMuted: '#92400e' } },
+  'xtreme': { name: 'Xtreme (Lime)', colors: { primary: '#84cc16', secondary: '#65a30d', bg: '#0a0a0a', accent: '#84cc16', text: '#f4f4f5', textMuted: '#4b5320' } },
+  'mysteryland': { name: 'Mysteryland', colors: { primary: '#a855f7', secondary: '#9333ea', bg: '#0d0010', accent: '#d946ef', text: '#f4f4f5', textMuted: '#8b5cf6' } },
+  'tomorrowland': { name: 'Tomorrowland', colors: { primary: '#3b82f6', secondary: '#1d4ed8', bg: '#000812', accent: '#0ea5e9', text: '#f4f4f5', textMuted: '#60a5fa' } },
+};
+
+function renderFestivalPresets() {
+  const presetsContainer = $('festival-presets');
+  if (!presetsContainer) return;
+  const currentTheme = config.ui.customTheme || 'midnight';
+  presetsContainer.innerHTML = Object.entries(festivalThemes).map(([key, theme]) => {
+    const isActive = currentTheme === key;
+    return `<button type="button" class="preset-theme-btn ${isActive ? 'active' : ''}" onclick="applyFestivalTheme('${key}')" title="${theme.name}">${theme.name}</button>`;
+  }).join('');
+}
+
+function applyFestivalTheme(themeKey) {
+  const theme = festivalThemes[themeKey];
+  if (!theme) return;
+
+  config.ui.customTheme = themeKey;
+  config.ui.themeColors = theme.colors;
+
+  updateColorInputs(theme.colors);
+  applyThemeColors(theme.colors);
+  renderFestivalPresets();
+  toast(`Applied "${theme.name}" theme`, 'info');
+}
+
+function updateColorInputs(colors) {
+  $('colorPrimary').value = rgbToHex(colors.primary) || colors.primary;
+  $('colorSecondary').value = rgbToHex(colors.secondary) || colors.secondary;
+  $('colorBg').value = rgbToHex(colors.bg) || colors.bg;
+  $('colorAccent').value = rgbToHex(colors.accent) || colors.accent;
+  $('colorText').value = rgbToHex(colors.text) || colors.text;
+  $('colorTextMuted').value = rgbToHex(colors.textMuted) || colors.textMuted;
+}
+
+function readCustomTheme() {
+  return {
+    primary: $('colorPrimary').value,
+    secondary: $('colorSecondary').value,
+    bg: $('colorBg').value,
+    accent: $('colorAccent').value,
+    text: $('colorText').value,
+    textMuted: $('colorTextMuted').value,
+  };
+}
+
+function applyThemeColors(colors) {
+  const css = `
+    :root {
+      --color-primary: ${colors.primary};
+      --color-secondary: ${colors.secondary};
+      --color-bg: ${colors.bg};
+      --color-accent: ${colors.accent};
+      --color-text: ${colors.text};
+      --color-text-muted: ${colors.textMuted};
+    }
+    body { background: var(--color-bg); color: var(--color-text); }
+    .panel { background: rgb(${hexToRgb(colors.bg).join(' ')} / .72); }
+    .accent-color { color: var(--color-accent); }
+    .btn.primary, .nav.active { background: var(--color-accent); }
+    .source-card { border-left-color: var(--color-accent); }
+    .nav { color: var(--color-text-muted); }
+    label { color: var(--color-text-muted); }
+  `;
+  const styleEl = document.getElementById('custom-css');
+  if (styleEl) {
+    styleEl.textContent = config.ui.customCss + '\n' + css;
+  }
+  document.documentElement.style.setProperty('--accent', colors.accent);
+}
+
+function rgbToHex(rgb) {
+  if (!rgb) return '';
+  if (rgb.startsWith('#')) return rgb;
+  const match = rgb.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+  if (match) {
+    return '#' + [parseInt(match[1]), parseInt(match[2]), parseInt(match[3])].map(x => {
+      const h = x.toString(16);
+      return h.length === 1 ? '0' + h : h;
+    }).join('');
+  }
+  return '';
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)];
+}
+
+$('applyCustomTheme').onclick = async () => {
+  const colors = readCustomTheme();
+  config.ui.customTheme = 'custom';
+  config.ui.themeColors = colors;
+  applyThemeColors(colors);
+  renderFestivalPresets();
+  toast('Custom theme applied', 'info');
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['colorPrimary', 'colorSecondary', 'colorBg', 'colorAccent', 'colorText', 'colorTextMuted'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('change', () => {
+      const colors = readCustomTheme();
+      applyThemeColors(colors);
+    });
+  });
+});
 
 refresh();
 setInterval(refresh, 5000);

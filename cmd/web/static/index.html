@@ -223,9 +223,26 @@
             <div class="panel-head"><h2>Branding</h2></div>
             <label>App name<input id="uiAppName" class="input"></label>
             <label>Logo URL<input id="uiLogoUrl" class="input"></label>
-            <label>Theme<select id="uiTheme" class="input"><option>midnight</option><option>graphite</option><option>contrast</option></select></label>
-            <label>Accent<select id="uiAccent" class="input"><option>red</option><option>cyan</option><option>lime</option><option>amber</option><option>pink</option></select></label>
             <label>Custom CSS<textarea id="uiCustomCss" class="codebox h-40"></textarea></label>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Theme</h2></div>
+            <div class="mb-4">
+              <p class="text-sm text-zinc-400 mb-3">Festival Presets:</p>
+              <div class="grid gap-2 grid-cols-2 md:grid-cols-3 mb-4" id="festival-presets"></div>
+            </div>
+            <div class="border-t border-white/10 pt-4">
+              <p class="text-sm text-zinc-400 mb-3">Custom Colors:</p>
+              <div class="grid gap-3 md:grid-cols-2">
+                <label>Primary<input id="colorPrimary" type="color" class="input color-input"></label>
+                <label>Secondary<input id="colorSecondary" type="color" class="input color-input"></label>
+                <label>Background<input id="colorBg" type="color" class="input color-input"></label>
+                <label>Accent<input id="colorAccent" type="color" class="input color-input"></label>
+                <label>Text<input id="colorText" type="color" class="input color-input"></label>
+                <label>Text muted<input id="colorTextMuted" type="color" class="input color-input"></label>
+              </div>
+              <button type="button" id="applyCustomTheme" class="btn primary mt-3">Apply Custom Theme</button>
+            </div>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Notifications</h2></div>
