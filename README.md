@@ -28,7 +28,7 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
 - Delete and duplicate buttons for sources, plus validation on required fields.
 - Toast notifications surface API/server errors directly in the WebUI.
-- HTTP Basic Auth in front of the whole app (WebUI and API).
+- Session-based login page in front of the whole app (WebUI and API).
 
 ## Quick Start
 
@@ -270,14 +270,15 @@ Environment variables:
 | `FINISHED_DIR` | `/data/recordings` | Finished recordings |
 | `TEMP_DIR` | `/data/incomplete` | Active partial recordings |
 | `LOG_DIR` | `/data/logs` | Per-recording logs |
-| `AUTH_USERNAME` | `admin` | WebUI/API login username |
-| `AUTH_PASSWORD` | *(random, printed to logs on startup)* | WebUI/API login password |
+| `AUTH_USERNAME` | `admin` | Login page username |
+| `AUTH_PASSWORD` | *(random, printed to logs on startup)* | Login page password |
 
 ## Security
 
-The entire WebUI and API sit behind HTTP Basic Auth. Set `AUTH_USERNAME` and
-`AUTH_PASSWORD` explicitly (for example in `docker-compose.yml`) for any
-deployment reachable outside your own machine:
+The entire WebUI and API sit behind a login page (`/login`) backed by a
+session cookie. Set `AUTH_USERNAME` and `AUTH_PASSWORD` explicitly (for
+example in `docker-compose.yml`) for any deployment reachable outside your
+own machine:
 
 ```yaml
 environment:
