@@ -28,7 +28,7 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
 - Delete and duplicate buttons for sources, plus validation on required fields.
 - Toast notifications surface API/server errors directly in the WebUI.
-- Session-based login page in front of the whole app (WebUI and API).
+- Session-based login page in front of the whole app (WebUI and API), with a one-time setup wizard on first run - no environment variables required unless you want them.
 
 ## Quick Start
 
@@ -41,6 +41,11 @@ Open:
 ```text
 http://localhost:8080
 ```
+
+You'll land on a one-time setup page to choose a username and password -
+nothing to configure by hand first. You can change these credentials any
+time from Settings → Account. See [Authentication](#authentication) below if
+you'd rather manage credentials via environment variables instead.
 
 On first start the app creates:
 
@@ -266,31 +271,46 @@ Environment variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | Web server listen address |
-| `CONFIG_PATH` | `/data/config/config.json` | Persistent config path |
-| `FINISHED_DIR` | `/data/recordings` | Finished recordings |
-| `TEMP_DIR` | `/data/incomplete` | Active partial recordings |
-| `LOG_DIR` | `/data/logs` | Per-recording logs |
-| `AUTH_USERNAME` | `admin` | Login page username |
-| `AUTH_PASSWORD` | *(random, printed to logs on startup)* | Login page password |
+| `CONFIG_PATH` | `/data/config/config.json` (Docker) or `./config/config.json` (native) | Persistent config path |
+| `FINISHED_DIR` | `/data/recordings` (Docker) or `./data/recordings` (native) | Finished recordings |
+| `TEMP_DIR` | `/data/incomplete` (Docker) or `./data/incomplete` (native) | Active partial recordings |
+| `LOG_DIR` | `/data/logs` (Docker) or `./data/logs` (native) | Per-recording logs |
+| `AUTH_USERNAME` | *(none — see Authentication)* | Login username, optional |
+| `AUTH_PASSWORD` | *(none — see Authentication)* | Login password, optional |
 
-## Security
+Outside of Docker (e.g. `go run ./cmd/web` or a native binary on Windows/macOS/Linux),
+the `/data` and `/app` defaults above are automatically swapped for paths
+relative to the working directory, so the app has somewhere to write without
+any of these variables being set.
+
+## Authentication
 
 The entire WebUI and API sit behind a login page (`/login`) backed by a
-session cookie. Set `AUTH_USERNAME` and `AUTH_PASSWORD` explicitly (for
-example in `docker-compose.yml`) for any deployment reachable outside your
-own machine:
+session cookie. There are two ways to manage credentials, and neither
+requires editing files or environment variables unless you want to:
 
-```yaml
-environment:
-  AUTH_USERNAME: yourname
-  AUTH_PASSWORD: a-long-random-password
-```
+- **Setup wizard (default).** On first run, with no `AUTH_USERNAME`/
+  `AUTH_PASSWORD` set, the app redirects to a one-time `/setup` page where you
+  choose a username and password directly in the browser. They're hashed
+  with bcrypt and saved to `auth.json` next to your config file. Change them
+  any time from **Settings → Account** — no restart or redeploy needed.
+- **Environment variables (for automated/Docker deployments).** Set
+  `AUTH_USERNAME` and `AUTH_PASSWORD` explicitly (for example in
+  `docker-compose.yml`) if you'd rather pin credentials externally:
 
-If `AUTH_PASSWORD` is left unset, a random one is generated on every start and
-printed once to the container logs (`docker compose logs recorder`) — it is
-not persisted, so it changes on every restart. This keeps a bare first run
-from being wide open, but you should set real credentials before exposing the
-port beyond localhost.
+  ```yaml
+  environment:
+    AUTH_USERNAME: yourname
+    AUTH_PASSWORD: a-long-random-password
+  ```
+
+  When these are set, they always take priority over any saved credentials,
+  and the Account settings form becomes read-only (change the environment
+  variables and restart instead).
+
+Either way, don't expose the port beyond localhost until credentials are in
+place — the setup wizard is only reachable until you complete it once, so
+there's no window where the app runs with a default or guessable password.
 
 Source `streamlinkArgs`/`ffmpegArgs` are passed straight to those tools, so
 treat WebUI access as equivalent to shell access to `streamlink`/`ffmpeg` on

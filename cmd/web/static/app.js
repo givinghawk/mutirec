@@ -158,55 +158,87 @@ function renderEditors() {
     drawSourceEditor();
     $('timetable-json').value = JSON.stringify(config.timetable, null, 2);
     fillSettings();
+    loadAccount();
     renderVisualTimetable();
     renderLinkedBadge();
     loadLolEvents();
   }
 }
 
+// openSourceIds tracks which accordion rows are expanded, keyed by source
+// id, so the layout survives the periodic re-renders triggered by refresh().
+let openSourceIds = new Set();
+
+function toggleSourceRow(id) {
+  if (openSourceIds.has(id)) openSourceIds.delete(id); else openSourceIds.add(id);
+  drawSourceEditor();
+}
+
 function drawSourceEditor() {
   config.sources = config.sources || [];
   $('source-count-pill').textContent = `${config.sources.length} source${config.sources.length === 1 ? '' : 's'}`;
   if (!config.sources.length) {
-    $('source-editor').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one above.</p>';
+    $('source-editor').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — click "+ Add Source" above.</p>';
     return;
   }
-  $('source-editor').innerHTML = config.sources.map((s, i) => `
-    <div class="source-card-edit grid gap-2 rounded border border-white/10 p-3 md:grid-cols-4" data-source="${i}" data-id="${escapeAttr(s.id || '')}">
-      <div class="col-span-full flex items-center justify-between">
-        <h3 class="font-semibold">${escapeHtml(s.name || 'Untitled source')}</h3>
-        <span class="save-hint hidden">Unsaved changes</span>
+  $('source-editor').innerHTML = config.sources.map((s, i) => {
+    const open = openSourceIds.has(s.id);
+    return `
+    <div class="source-row ${open ? 'open' : ''}" data-source="${i}" data-id="${escapeAttr(s.id || '')}">
+      <div class="source-row-head" style="border-left-color:${s.color || 'var(--accent)'}" onclick="toggleSourceRow('${escapeAttr(s.id || '')}')">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="source-row-chevron">&#9656;</span>
+          <span class="truncate font-semibold">${escapeHtml(s.name || 'Untitled source')}</span>
+          <span class="hidden text-xs text-zinc-400 sm:inline">${escapeHtml(s.type)} · ${escapeHtml(s.quality || 'best')} · ${escapeHtml(s.container || 'mkv')}</span>
+        </div>
+        <div class="flex flex-shrink-0 items-center gap-2 text-xs">
+          ${s.enabled ? '' : '<span class="pill status-disabled">disabled</span>'}
+          ${s.record ? '<span class="pill status-recording">auto-record</span>' : ''}
+          <span class="save-hint hidden">Unsaved</span>
+        </div>
       </div>
-      <label>Name<input class="input src-name" value="${escapeAttr(s.name)}"></label>
-      <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
-      <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
-      <label>Quality<input class="input src-quality" value="${escapeAttr(s.quality || 'best')}"></label>
-      <label>Container<input class="input src-container" value="${escapeAttr(s.container || 'mkv')}"></label>
-      <label>HW accel<select class="input src-hw"><option ${sel(s.hardwareAccel,'')}>none</option><option ${sel(s.hardwareAccel,'cuda')}>cuda</option><option ${sel(s.hardwareAccel,'qsv')}>qsv</option><option ${sel(s.hardwareAccel,'vaapi')}>vaapi</option></select></label>
-      <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
-      <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
-      <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
-      <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
-      <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
-      <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
-      <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
-      <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
-      <div class="col-span-full flex flex-wrap items-center gap-2 pt-1">
-        <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
-        <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
-        <button type="button" class="btn" onclick="duplicateSource(${i})">Duplicate</button>
-        <button type="button" class="btn" style="color:#fda4af" onclick="deleteSource(${i})">Delete</button>
-        <span class="test-result text-sm text-zinc-400" id="test-result-${i}"></span>
+      <div class="source-row-body ${open ? '' : 'hidden'}">
+        <div class="grid gap-2 md:grid-cols-4">
+          <label>Name<input class="input src-name" value="${escapeAttr(s.name)}"></label>
+          <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
+          <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
+          <label>Quality<input class="input src-quality" value="${escapeAttr(s.quality || 'best')}"></label>
+          <label>Container<input class="input src-container" value="${escapeAttr(s.container || 'mkv')}"></label>
+          <label>HW accel<select class="input src-hw"><option ${sel(s.hardwareAccel,'')}>none</option><option ${sel(s.hardwareAccel,'cuda')}>cuda</option><option ${sel(s.hardwareAccel,'qsv')}>qsv</option><option ${sel(s.hardwareAccel,'vaapi')}>vaapi</option></select></label>
+          <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
+          <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
+          <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
+          <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
+          <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
+          <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
+          <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
+          <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 pt-2">
+          <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
+          <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
+          <button type="button" class="btn" onclick="duplicateSource(${i})">Duplicate</button>
+          <button type="button" class="btn" style="color:#fda4af" onclick="deleteSource(${i})">Delete</button>
+          <span class="test-result text-sm text-zinc-400" id="test-result-${i}"></span>
+        </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
-  document.querySelectorAll('.source-card-edit').forEach(el => {
+  document.querySelectorAll('.source-row').forEach(el => {
     el.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => markCardUnsaved(el)));
   });
 
   if (highlightSourceId) {
-    const el = [...document.querySelectorAll('.source-card-edit')].find(c => c.dataset.id === highlightSourceId);
-    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('now-playing'); setTimeout(() => el.classList.remove('now-playing'), 2000); }
+    openSourceIds.add(highlightSourceId);
+    const el = [...document.querySelectorAll('.source-row')].find(c => c.dataset.id === highlightSourceId);
+    if (el) {
+      el.classList.add('open');
+      el.querySelector('.source-row-body').classList.remove('hidden');
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('now-playing');
+      setTimeout(() => el.classList.remove('now-playing'), 2000);
+    }
     highlightSourceId = null;
   }
 }
@@ -232,7 +264,7 @@ function readSourceCard(el) {
   };
 }
 
-function sourceCardEl(i) { return document.querySelector(`.source-card-edit[data-source="${i}"]`); }
+function sourceCardEl(i) { return document.querySelector(`.source-row[data-source="${i}"]`); }
 
 async function saveSourceCard(i) {
   const el = sourceCardEl(i);
@@ -328,6 +360,36 @@ async function saveConfig() {
   await refresh();
 }
 
+async function loadAccount() {
+  let acct;
+  try {
+    acct = await api('/api/account');
+  } catch {
+    return;
+  }
+  $('acct-username').value = acct.username || '';
+  if (acct.managedByEnv) {
+    $('account-note').textContent = `Signed in as "${acct.username}". Credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD environment variables and can't be changed here.`;
+    $('account-form').classList.add('hidden');
+  } else {
+    $('account-note').textContent = `Signed in as "${acct.username}".`;
+    $('account-form').classList.remove('hidden');
+  }
+}
+
+$('acct-save').onclick = async () => {
+  const currentPassword = $('acct-current').value;
+  const username = $('acct-username').value.trim();
+  const password = $('acct-password').value;
+  if (!username || password.length < 8) { toast('A username and a password of at least 8 characters are required', 'error'); return; }
+  try {
+    await api('/api/account', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword, username, password }) });
+    toast('Credentials updated — use them next time you sign in', 'info');
+    $('acct-current').value = '';
+    $('acct-password').value = '';
+  } catch { /* toast already shown */ }
+};
+
 async function start(id) { try { await api(`/api/record/${id}`, { method: 'POST' }); } catch { return; } await refresh(); }
 async function stopRec(id, name) {
   if (!confirm(`Stop recording "${name || 'this source'}"? The file recorded so far will be kept.`)) return;
@@ -416,21 +478,124 @@ $('logout-btn').onclick = async () => {
   window.location.href = '/login';
 };
 
-$('qa-add').onclick = async () => {
-  const name = $('qa-name').value.trim();
-  const type = $('qa-type').value;
-  const url = $('qa-url').value.trim();
-  if (!name || !url) { toast('Give the source a name and a URL first', 'error'); return; }
-  const payload = { name, type, url, enabled: true, record: false, quality: 'best', container: 'mkv' };
+// --- Add Source wizard ---
+
+const wizardStepIds = ['wizard-step-type', 'wizard-step-details', 'wizard-step-review'];
+let wizardStep = 0;
+let wizardType = null;
+
+function openWizard() {
+  wizardStep = 0;
+  wizardType = null;
+  $('wiz-name').value = '';
+  $('wiz-url').value = '';
+  $('wiz-quality').value = 'best';
+  $('wiz-test-result').textContent = '';
+  document.querySelectorAll('.wizard-type-card').forEach(c => c.classList.remove('selected'));
+  $('wizard-error').classList.add('hidden');
+  renderWizardStep();
+  $('wizard-overlay').classList.remove('hidden');
+}
+
+function closeWizard() {
+  $('wizard-overlay').classList.add('hidden');
+}
+
+function wizardShowError(msg) {
+  $('wizard-error').textContent = msg;
+  $('wizard-error').classList.remove('hidden');
+}
+
+function renderWizardStep() {
+  wizardStepIds.forEach((id, i) => $(id).classList.toggle('hidden', i !== wizardStep));
+  $('wizard-steps').innerHTML = wizardStepIds.map((_, i) =>
+    `<span class="wizard-dot ${i === wizardStep ? 'active' : i < wizardStep ? 'done' : ''}"></span>`
+  ).join('');
+  $('wizard-back').classList.toggle('hidden', wizardStep === 0);
+  $('wizard-next').textContent = wizardStep === wizardStepIds.length - 1 ? 'Create Source' : 'Next';
+  if (wizardStep === 2) renderWizardReview();
+}
+
+function renderWizardReview() {
+  const typeLabel = { youtube: 'YouTube', twitch: 'Twitch', http: 'Raw HTTP/HLS' }[wizardType] || wizardType;
+  $('wizard-review').innerHTML = `
+    <div><span class="text-zinc-400">Type:</span> ${escapeHtml(typeLabel)}</div>
+    <div><span class="text-zinc-400">Name:</span> ${escapeHtml($('wiz-name').value.trim())}</div>
+    <div class="break-all"><span class="text-zinc-400">URL:</span> ${escapeHtml($('wiz-url').value.trim())}</div>
+    <div><span class="text-zinc-400">Quality:</span> ${escapeHtml($('wiz-quality').value.trim() || 'best')}</div>`;
+}
+
+$('open-wizard').onclick = openWizard;
+$('wizard-close').onclick = closeWizard;
+$('wizard-overlay').addEventListener('click', (e) => { if (e.target.id === 'wizard-overlay') closeWizard(); });
+
+document.querySelectorAll('.wizard-type-card').forEach(card => card.onclick = () => {
+  wizardType = card.dataset.type;
+  document.querySelectorAll('.wizard-type-card').forEach(c => c.classList.remove('selected'));
+  card.classList.add('selected');
+});
+
+$('wizard-back').onclick = () => {
+  if (wizardStep === 0) return;
+  wizardStep--;
+  $('wizard-error').classList.add('hidden');
+  renderWizardStep();
+};
+
+$('wizard-next').onclick = async () => {
+  $('wizard-error').classList.add('hidden');
+  if (wizardStep === 0) {
+    if (!wizardType) { wizardShowError('Choose a source type to continue'); return; }
+    wizardStep++;
+    renderWizardStep();
+    return;
+  }
+  if (wizardStep === 1) {
+    if (!$('wiz-name').value.trim() || !$('wiz-url').value.trim()) { wizardShowError('Give the source a name and a URL'); return; }
+    wizardStep++;
+    renderWizardStep();
+    return;
+  }
+  const payload = {
+    name: $('wiz-name').value.trim(),
+    type: wizardType,
+    url: $('wiz-url').value.trim(),
+    enabled: true,
+    record: false,
+    quality: $('wiz-quality').value.trim() || 'best',
+    container: 'mkv'
+  };
   try {
     const created = await api('/api/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    toast(`Added "${name}" — fine-tune it below if needed`, 'info');
-    $('qa-name').value = '';
-    $('qa-url').value = '';
+    toast(`Added "${payload.name}" — fine-tune it below if needed`, 'info');
     highlightSourceId = created.id;
+    closeWizard();
     $('source-editor').dataset.loaded = '';
     await refresh();
-  } catch { /* toast already shown */ }
+  } catch {
+    wizardShowError('Could not create the source — see the notification for details');
+  }
+};
+
+$('wiz-test').onclick = async () => {
+  $('wizard-error').classList.add('hidden');
+  if (!wizardType) { wizardShowError('Choose a source type first'); return; }
+  const url = $('wiz-url').value.trim();
+  if (!url) { wizardShowError('Enter a URL first'); return; }
+  const label = $('wiz-test-result');
+  label.textContent = 'Testing…';
+  label.className = 'text-sm text-zinc-400';
+  try {
+    const result = await api('/api/sources/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: wizardType, url, quality: $('wiz-quality').value.trim() || 'best' })
+    });
+    label.textContent = result.ok ? 'Resolved OK' : `Failed: ${result.error}`;
+    label.className = `text-sm ${result.ok ? 'text-emerald-300' : 'text-rose-300'}`;
+  } catch {
+    label.textContent = 'Test request failed';
+  }
 };
 $('save-timetable').onclick = async () => {
   try {

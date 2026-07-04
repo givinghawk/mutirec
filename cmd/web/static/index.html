@@ -80,27 +80,70 @@
       </section>
 
       <section id="sources" class="view hidden space-y-4">
-        <div class="panel quick-add-panel">
-          <div class="panel-head"><h2>Add a Source</h2></div>
-          <div class="grid gap-2 md:grid-cols-[1fr_160px_2fr_auto]">
-            <label>Name<input id="qa-name" class="input" placeholder="e.g. Main Stage"></label>
-            <label>Type<select id="qa-type" class="input">
-              <option value="youtube">YouTube</option>
-              <option value="twitch">Twitch</option>
-              <option value="http">Raw HTTP/HLS</option>
-            </select></label>
-            <label>URL<input id="qa-url" class="input" placeholder="https://..."></label>
-            <label class="self-end"><button type="button" id="qa-add" class="btn primary w-full">Add Source</button></label>
+        <div class="panel quick-add-panel flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 class="text-base font-semibold">Sources</h2>
+            <p class="mt-1 text-xs text-zinc-500">Add a new stream to record, or expand one below to edit it.</p>
           </div>
-          <p id="qa-hint" class="mt-1 text-xs text-zinc-500">Pick a type, paste the channel/stream URL, and name it — you can fine-tune quality, container, transcoding, and more below after it's created.</p>
+          <button type="button" id="open-wizard" class="btn primary">+ Add Source</button>
         </div>
 
         <div class="panel">
           <div class="panel-head"><h2>Source Manager</h2><span class="pill" id="source-count-pill">0 sources</span></div>
-          <div id="source-editor" class="space-y-3"></div>
+          <div id="source-editor" class="space-y-2"></div>
           <datalist id="timetable-stage-names"></datalist>
         </div>
       </section>
+
+      <div id="wizard-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Add a Source</h2>
+            <button type="button" id="wizard-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <div id="wizard-steps" class="mb-4 flex gap-2"></div>
+
+          <div id="wizard-step-type" class="wizard-step">
+            <p class="mb-3 text-sm text-zinc-400">What kind of source is this?</p>
+            <div class="grid gap-2 md:grid-cols-3">
+              <button type="button" class="wizard-type-card" data-type="youtube">
+                <div class="font-semibold">YouTube</div>
+                <div class="text-xs text-zinc-400">Channel or video URL</div>
+              </button>
+              <button type="button" class="wizard-type-card" data-type="twitch">
+                <div class="font-semibold">Twitch</div>
+                <div class="text-xs text-zinc-400">Channel URL</div>
+              </button>
+              <button type="button" class="wizard-type-card" data-type="http">
+                <div class="font-semibold">Raw HTTP/HLS</div>
+                <div class="text-xs text-zinc-400">Direct stream/manifest URL</div>
+              </button>
+            </div>
+          </div>
+
+          <div id="wizard-step-details" class="wizard-step hidden space-y-1">
+            <label>Name<input id="wiz-name" class="input" placeholder="e.g. Main Stage"></label>
+            <label>URL<input id="wiz-url" class="input" placeholder="https://..."></label>
+            <label>Quality<input id="wiz-quality" class="input" value="best"></label>
+            <div class="mb-2 flex items-center gap-2">
+              <button type="button" id="wiz-test" class="btn">Test Stream</button>
+              <span id="wiz-test-result" class="text-sm text-zinc-400"></span>
+            </div>
+          </div>
+
+          <div id="wizard-step-review" class="wizard-step hidden space-y-1 text-sm">
+            <div id="wizard-review" class="space-y-1"></div>
+            <p class="mt-2 text-xs text-zinc-500">You can fine-tune quality, container, transcoding, and more after it's created.</p>
+          </div>
+
+          <p id="wizard-error" class="mt-3 hidden text-sm text-rose-300"></p>
+
+          <div class="mt-4 flex justify-between">
+            <button type="button" id="wizard-back" class="btn">Back</button>
+            <button type="button" id="wizard-next" class="btn primary">Next</button>
+          </div>
+        </div>
+      </div>
 
       <section id="recordings" class="view hidden">
         <div class="panel">
@@ -203,6 +246,16 @@
             <label class="mt-3 inline-flex items-center gap-2 text-sm"><input id="backupAfterComplete" type="checkbox" class="accent-red-500"> Run after each recording</label>
             <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/defqon or gdrive:recordings"></label>
             <label>Extra rclone args, one per line<textarea id="rcloneArgs" class="codebox h-32"></textarea></label>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Account</h2></div>
+            <p id="account-note" class="mb-3 text-sm text-zinc-400"></p>
+            <div id="account-form">
+              <label>Current password<input id="acct-current" type="password" class="input" autocomplete="current-password"></label>
+              <label>New username<input id="acct-username" class="input" autocomplete="username"></label>
+              <label>New password<input id="acct-password" type="password" class="input" autocomplete="new-password" placeholder="at least 8 characters"></label>
+              <button type="button" id="acct-save" class="btn primary mt-2">Update credentials</button>
+            </div>
           </div>
         </div>
         <button id="save-settings" class="btn primary mt-4">Save Settings</button>

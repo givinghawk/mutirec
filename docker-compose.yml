@@ -15,11 +15,13 @@ services:
       FINISHED_DIR: /data/recordings
       TEMP_DIR: /data/incomplete
       LOG_DIR: /data/logs
-      # Set real credentials before exposing this beyond localhost. If left
-      # unset, a random password is generated and printed to the logs on
-      # every restart (`docker compose logs recorder`).
-      AUTH_USERNAME: admin
-      AUTH_PASSWORD: change-me
+      # Credentials are optional here: leave AUTH_USERNAME/AUTH_PASSWORD unset
+      # and the app walks you through a one-time setup wizard in the browser
+      # on first start instead (saved to /data/config/auth.json). Uncomment
+      # these only if you'd rather pin credentials externally - when set,
+      # they always take priority and can't be changed from the UI.
+      # AUTH_USERNAME: yourname
+      # AUTH_PASSWORD: a-long-random-password
     volumes:
       - ./data:/data
       # SMB/NFS option: mount the share on the host, then bind it here.

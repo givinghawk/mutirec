@@ -30,6 +30,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"defqon-stream-recorder/internal/disk"
 )
 
@@ -194,7 +196,6 @@ type recording struct {
 	source    Source
 	ctx       context.Context
 	cancel    context.CancelFunc
-	cmds      []*exec.Cmd
 	startedAt time.Time
 	tempPath  string
 	finalPath string
@@ -215,22 +216,23 @@ type App struct {
 	lastFinished  map[string]string
 	authUser      string
 	authPass      string
+	authFile      string
 	remindersSent map[string]time.Time
 
 	sessMu   sync.Mutex
 	sessions map[string]time.Time
+
+	credMu     sync.RWMutex
+	credUser   string
+	credHash   []byte
+	needsSetup bool
 }
 
 const sessionCookieName = "dqr_session"
 const sessionTTL = 30 * 24 * time.Hour
 
 func main() {
-	configPath := env("CONFIG_PATH", "/app/config/config.json")
-	if runtime.GOOS == "windows" && strings.HasPrefix(configPath, "/app/") {
-		configPath = filepath.Join(".", strings.TrimPrefix(configPath, "/app/"))
-	} else if runtime.GOOS == "windows" && strings.HasPrefix(configPath, "/data/") {
-		configPath = filepath.Join(".", strings.TrimPrefix(configPath, "/data/"))
-	}
+	configPath := localizePath(env("CONFIG_PATH", "/app/config/config.json"))
 	app, err := NewApp(configPath)
 	if err != nil {
 		log.Fatal(err)
@@ -283,38 +285,144 @@ func NewApp(configPath string) (*App, error) {
 	return app, nil
 }
 
-// setupAuth loads AUTH_USERNAME/AUTH_PASSWORD from the environment. If no
-// password is configured, a random one is generated and printed once so the
-// UI is never reachable without credentials, even on a bare first run.
-func (a *App) setupAuth() {
-	a.authUser = env("AUTH_USERNAME", "admin")
-	a.authPass = os.Getenv("AUTH_PASSWORD")
-	if a.authPass == "" {
-		var b [12]byte
-		_, _ = rand.Read(b[:])
-		a.authPass = hex.EncodeToString(b[:])
-		log.Printf("AUTH_PASSWORD not set - generated a one-time password for this run.")
-		log.Printf("Login with username %q and password %q (set AUTH_USERNAME/AUTH_PASSWORD to persist credentials).", a.authUser, a.authPass)
-	}
+// storedCredentials is the on-disk shape of auth.json: a username and a
+// bcrypt hash, written by the in-browser setup wizard or the account
+// settings form so nobody has to touch environment variables by hand.
+type storedCredentials struct {
+	Username     string `json:"username"`
+	PasswordHash string `json:"passwordHash"`
 }
 
-// publicPaths lists the handful of routes reachable without a session, so the
-// login page itself (and the request that submits it) don't get redirected
-// back to the login page.
+// setupAuth decides how this instance authenticates, in priority order:
+//  1. AUTH_USERNAME/AUTH_PASSWORD from the environment, for Docker-style
+//     deployments that prefer to manage credentials externally.
+//  2. Credentials previously saved to auth.json by the setup wizard or the
+//     account settings form.
+//  3. Neither: needsSetup is set, and the web UI serves a one-time setup
+//     wizard instead of ever generating or printing a throwaway password.
+func (a *App) setupAuth() {
+	a.authFile = filepath.Join(filepath.Dir(a.config), "auth.json")
+	a.authUser = os.Getenv("AUTH_USERNAME")
+	a.authPass = os.Getenv("AUTH_PASSWORD")
+	if a.authPass != "" {
+		if a.authUser == "" {
+			a.authUser = "admin"
+		}
+		log.Printf("Using AUTH_USERNAME/AUTH_PASSWORD from the environment.")
+		return
+	}
+	a.authUser = ""
+
+	if creds, err := loadStoredCredentials(a.authFile); err == nil {
+		a.credUser = creds.Username
+		a.credHash = []byte(creds.PasswordHash)
+		log.Printf("Using saved credentials from %s (change them any time from Settings).", a.authFile)
+		return
+	}
+
+	a.credMu.Lock()
+	a.needsSetup = true
+	a.credMu.Unlock()
+	log.Printf("No credentials configured yet - open the web UI to finish setup and choose a username/password.")
+}
+
+func loadStoredCredentials(path string) (storedCredentials, error) {
+	var creds storedCredentials
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return creds, err
+	}
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return creds, err
+	}
+	if creds.Username == "" || creds.PasswordHash == "" {
+		return creds, errors.New("incomplete credentials file")
+	}
+	return creds, nil
+}
+
+// setCredentials hashes and persists a new username/password to auth.json,
+// used by both the first-run setup wizard and the account settings form.
+func (a *App) setCredentials(username, password string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(storedCredentials{Username: username, PasswordHash: string(hash)}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(a.authFile), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(a.authFile, data, 0o600); err != nil {
+		return err
+	}
+	a.credMu.Lock()
+	a.credUser = username
+	a.credHash = hash
+	a.needsSetup = false
+	a.credMu.Unlock()
+	return nil
+}
+
+func (a *App) isSetupNeeded() bool {
+	a.credMu.RLock()
+	defer a.credMu.RUnlock()
+	return a.needsSetup
+}
+
+// checkCredentials verifies a login attempt against whichever credential
+// source setupAuth selected: env vars (plain constant-time compare) or a
+// saved bcrypt hash.
+func (a *App) checkCredentials(username, password string) bool {
+	if a.authPass != "" {
+		userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.authUser)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.authPass)) == 1
+		return userMatch && passMatch
+	}
+	a.credMu.RLock()
+	credUser, credHash := a.credUser, a.credHash
+	a.credMu.RUnlock()
+	if len(credHash) == 0 {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(username), []byte(credUser)) != 1 {
+		return false
+	}
+	return bcrypt.CompareHashAndPassword(credHash, []byte(password)) == nil
+}
+
+// isPublicPath lists the handful of routes reachable without a session, so
+// the login/setup pages (and the requests that submit them) don't get
+// redirected back to themselves.
 func isPublicPath(p string) bool {
 	switch p {
-	case "/login", "/api/login", "/app.css":
+	case "/login", "/api/login", "/setup", "/api/setup", "/app.css":
 		return true
 	}
 	return false
 }
 
 // requireAuth gates every request (UI and API) behind a session cookie set by
-// a real login page (see handleLogin), redirecting page loads to /login and
-// returning 401 JSON for API calls when the session is missing or expired.
+// a real login page (see handleLogin), redirecting page loads to /setup or
+// /login as appropriate and returning error JSON for API calls when the
+// session is missing, expired, or credentials haven't been chosen yet.
 func (a *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicPath(r.URL.Path) || a.validSession(r) {
+		if isPublicPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if a.isSetupNeeded() {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				http.Error(w, "setup required", http.StatusUnauthorized)
+				return
+			}
+			http.Redirect(w, r, "/setup", http.StatusFound)
+			return
+		}
+		if a.validSession(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -374,27 +482,30 @@ func (a *App) destroySession(r *http.Request) {
 	a.sessMu.Unlock()
 }
 
-// handleLoginPage serves the standalone login page, unauthenticated.
+// handleLoginPage serves the standalone login page, unauthenticated. Visitors
+// who haven't chosen credentials yet are sent to the setup wizard instead.
 func (a *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	data, err := staticFiles.ReadFile("static/login.html")
-	if err != nil {
-		http.NotFound(w, r)
+	if a.isSetupNeeded() {
+		http.Redirect(w, r, "/setup", http.StatusFound)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(data)
+	serveStaticPage(w, r, "static/login.html")
 }
 
-// handleLogin verifies AUTH_USERNAME/AUTH_PASSWORD and, on success, starts a
-// session so the rest of the app is reachable without re-authenticating on
-// every request.
+// handleLogin verifies the configured credentials (env vars or a saved
+// bcrypt hash) and, on success, starts a session so the rest of the app is
+// reachable without re-authenticating on every request.
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.isSetupNeeded() {
+		http.Error(w, "setup required", http.StatusConflict)
 		return
 	}
 	var req struct {
@@ -405,9 +516,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	userMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(a.authUser)) == 1
-	passMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(a.authPass)) == 1
-	if !userMatch || !passMatch {
+	if !a.checkCredentials(req.Username, req.Password) {
 		http.Error(w, "invalid username or password", http.StatusUnauthorized)
 		return
 	}
@@ -423,6 +532,117 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	a.destroySession(r)
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleSetupPage serves the first-run setup wizard. Once credentials exist
+// it redirects to /login instead, so the wizard can't be replayed to hijack
+// an already-configured instance.
+func (a *App) handleSetupPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isSetupNeeded() {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	serveStaticPage(w, r, "static/setup.html")
+}
+
+// handleSetup completes first-run setup by saving the chosen username and
+// password, then immediately starts a session. Only reachable once, before
+// any credentials exist - afterwards use handleAccount to change them.
+func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isSetupNeeded() {
+		http.Error(w, "setup has already been completed", http.StatusConflict)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if req.Username == "" || len(req.Password) < 8 {
+		http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
+		return
+	}
+	if err := a.setCredentials(req.Username, req.Password); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	a.event("info", fmt.Sprintf("Initial setup completed for user %q", req.Username))
+	a.createSession(w)
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// handleAccount lets a signed-in user view or change their credentials from
+// the Settings tab, so nothing ever has to be edited by hand on disk or in
+// the environment - unless this deployment pins credentials via
+// AUTH_USERNAME/AUTH_PASSWORD, in which case they're read-only here.
+func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
+	managedByEnv := a.authPass != ""
+	switch r.Method {
+	case http.MethodGet:
+		username := a.authUser
+		if !managedByEnv {
+			a.credMu.RLock()
+			username = a.credUser
+			a.credMu.RUnlock()
+		}
+		writeJSON(w, map[string]any{"username": username, "managedByEnv": managedByEnv})
+	case http.MethodPost:
+		if managedByEnv {
+			http.Error(w, "credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD and can't be changed here", http.StatusConflict)
+			return
+		}
+		var req struct {
+			CurrentPassword string `json:"currentPassword"`
+			Username        string `json:"username"`
+			Password        string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		req.Username = strings.TrimSpace(req.Username)
+		if req.Username == "" || len(req.Password) < 8 {
+			http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
+			return
+		}
+		a.credMu.RLock()
+		currentUser := a.credUser
+		a.credMu.RUnlock()
+		if !a.checkCredentials(currentUser, req.CurrentPassword) {
+			http.Error(w, "current password is incorrect", http.StatusUnauthorized)
+			return
+		}
+		if err := a.setCredentials(req.Username, req.Password); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.event("info", fmt.Sprintf("Credentials updated for user %q", req.Username))
+		writeJSON(w, map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func serveStaticPage(w http.ResponseWriter, r *http.Request, path string) {
+	data, err := staticFiles.ReadFile(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
 }
 
 // securityHeaders adds a small set of defensive headers to every response.
@@ -441,6 +661,9 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/login", a.handleLoginPage)
 	mux.HandleFunc("/api/login", a.handleLogin)
 	mux.HandleFunc("/api/logout", a.handleLogout)
+	mux.HandleFunc("/setup", a.handleSetupPage)
+	mux.HandleFunc("/api/setup", a.handleSetup)
+	mux.HandleFunc("/api/account", a.handleAccount)
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/sources", a.handleSources)
@@ -542,17 +765,37 @@ func (a *App) start(src Source) {
 	go a.runRecording(rec)
 }
 
+// minViableRecordingBytes is the smallest output size treated as a real
+// recording rather than a bare, empty container. A stream that fails almost
+// immediately (bad URL, wrong quality, blocked, offline channel...) can still
+// leave ffmpeg's container header on disk - a few hundred bytes to a couple
+// of KB with no actual media in it - which used to be silently accepted as a
+// "finished" recording, burying the real failure behind a stack of tiny,
+// unplayable files.
+const minViableRecordingBytes = 64 * 1024
+
 func (a *App) runRecording(rec *recording) {
 	defer close(rec.done)
 	defer rec.logFile.Close()
 
 	err := a.execute(rec)
-	if err != nil && rec.ctx.Err() == nil {
-		rec.lastErr = err.Error()
-		a.event("error", fmt.Sprintf("[%s] %s", rec.source.Name, err))
+	failed := err != nil && rec.ctx.Err() == nil
+	if failed {
+		rec.lastErr = errorWithLogDetail(err, rec.logPath)
+		a.event("error", fmt.Sprintf("[%s] %s", rec.source.Name, rec.lastErr))
 	}
 	rec.cancel()
-	if info, statErr := os.Stat(rec.tempPath); statErr == nil && info.Size() > 0 {
+
+	info, statErr := os.Stat(rec.tempPath)
+	hasOutput := statErr == nil && info.Size() > 0
+	if hasOutput && failed && info.Size() < minViableRecordingBytes {
+		_ = os.Remove(rec.tempPath)
+		hasOutput = false
+		a.event("error", fmt.Sprintf("[%s] discarded a %d-byte recording attempt with no usable media - see the log for why streamlink/ffmpeg failed", rec.source.Name, info.Size()))
+	}
+
+	switch {
+	case hasOutput:
 		_ = os.MkdirAll(filepath.Dir(rec.finalPath), 0o755)
 		if err := os.Rename(rec.tempPath, rec.finalPath); err != nil {
 			_ = copyFile(rec.tempPath, rec.finalPath)
@@ -560,12 +803,20 @@ func (a *App) runRecording(rec *recording) {
 		}
 		a.writeNFO(rec)
 		a.backup(rec)
-		a.notify(fmt.Sprintf("%s finished", rec.source.Name), rec.finalPath)
-		a.event("info", fmt.Sprintf("[%s] saved %s", rec.source.Name, rec.finalPath))
+		if failed {
+			// Real content was captured before the error hit (e.g. a network
+			// drop partway through a long recording) - worth keeping, but
+			// flagged rather than reported as a clean finish.
+			a.notify(fmt.Sprintf("%s stopped early", rec.source.Name), rec.finalPath)
+			a.event("warn", fmt.Sprintf("[%s] saved %s despite an error - it may be incomplete", rec.source.Name, rec.finalPath))
+		} else {
+			a.notify(fmt.Sprintf("%s finished", rec.source.Name), rec.finalPath)
+			a.event("info", fmt.Sprintf("[%s] saved %s", rec.source.Name, rec.finalPath))
+		}
 		a.mu.Lock()
 		a.lastFinished[rec.source.ID] = rec.finalPath
 		a.mu.Unlock()
-	} else if rec.ctx.Err() == nil {
+	case rec.ctx.Err() == nil && !failed:
 		a.event("warn", fmt.Sprintf("[%s] no output produced", rec.source.Name))
 	}
 
@@ -578,13 +829,50 @@ func (a *App) runRecording(rec *recording) {
 	a.mu.Unlock()
 }
 
+// errorWithLogDetail appends the last non-empty lines of a recording's log
+// (streamlink/ffmpeg's own stderr) to a generic exec error like "exit status
+// 1", since that's normally where the actual failure reason lives.
+func errorWithLogDetail(err error, logPath string) string {
+	var detail []string
+	for _, l := range tail(logPath, 8) {
+		if l = strings.TrimSpace(l); l != "" {
+			detail = append(detail, l)
+		}
+	}
+	if len(detail) == 0 {
+		return err.Error()
+	}
+	if len(detail) > 2 {
+		detail = detail[len(detail)-2:]
+	}
+	return fmt.Sprintf("%s (%s)", err.Error(), strings.Join(detail, " / "))
+}
+
+// gracefulShutdownDelay is how long a stopped ffmpeg/streamlink process gets
+// to react to a graceful interrupt and finalize its output before being hard
+// killed. Without this, cmd.Cancel (wired below) has no forceful fallback.
+const gracefulShutdownDelay = 5 * time.Second
+
+// prepareGracefulCmd arranges for a context-cancelable command to be asked to
+// shut down gracefully - via interruptProcess, which sends a real SIGINT on
+// Unix and a CTRL_BREAK_EVENT on Windows - instead of exec's default
+// behavior of hard-killing the process the instant its context is canceled.
+// A hard kill never gives ffmpeg the chance to flush and finalize its output
+// container, which left "stopped" recordings with broken duration/seeking or
+// outright unplayable files.
+func prepareGracefulCmd(cmd *exec.Cmd) {
+	prepareProcessGroup(cmd)
+	cmd.Cancel = func() error { return interruptProcess(cmd.Process.Pid) }
+	cmd.WaitDelay = gracefulShutdownDelay
+}
+
 func (a *App) execute(rec *recording) error {
 	src := rec.source
 	windowSeconds := a.snapshotConfig().Settings.LiveRewindWindowSeconds
 	if src.Type == "http" {
 		args := ffmpegArgs(src, src.URL, rec.tempPath, rec.hlsDir, windowSeconds)
 		cmd := exec.CommandContext(rec.ctx, "ffmpeg", args...)
-		rec.cmds = []*exec.Cmd{cmd}
+		prepareGracefulCmd(cmd)
 		return runLogged(cmd, rec.logFile)
 	}
 
@@ -599,7 +887,8 @@ func (a *App) execute(rec *recording) error {
 	slArgs = append(slArgs, src.URL, quality)
 	streamlink := exec.CommandContext(rec.ctx, "streamlink", slArgs...)
 	ffmpeg := exec.CommandContext(rec.ctx, "ffmpeg", ffmpegArgs(src, "pipe:0", rec.tempPath, rec.hlsDir, windowSeconds)...)
-	rec.cmds = []*exec.Cmd{streamlink, ffmpeg}
+	prepareGracefulCmd(streamlink)
+	prepareGracefulCmd(ffmpeg)
 
 	pipe, err := streamlink.StdoutPipe()
 	if err != nil {
@@ -616,8 +905,14 @@ func (a *App) execute(rec *recording) error {
 		_ = streamlink.Process.Kill()
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
-	slErr := streamlink.Wait()
+	// ffmpeg must be waited on first: exec.Cmd.StdoutPipe's read end is
+	// closed as soon as streamlink.Wait() reaps it, and racing that close
+	// against ffmpeg's still-in-progress read of the same pipe can truncate
+	// whatever was left buffered. Waiting on ffmpeg first guarantees it has
+	// already drained the pipe (ffmpeg can't reach EOF until streamlink has
+	// exited anyway) before streamlink's side is ever closed.
 	ffErr := ffmpeg.Wait()
+	slErr := streamlink.Wait()
 	if rec.ctx.Err() != nil {
 		return nil
 	}
@@ -639,7 +934,14 @@ func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) 
 	args = append(args, src.FFmpegArgs...)
 	args = append(args, "-i", input)
 
-	args = append(args, "-map", "0")
+	// Map only audio/video/subtitles, never "-map 0" wholesale: Twitch (and
+	// others) mux a timed_id3 data stream in alongside audio/video for ad
+	// markers, and Matroska - our default container - refuses to write a
+	// header at all if a data stream is mapped into it ("Only audio, video,
+	// and subtitles are supported for Matroska"), producing a near-empty
+	// file and failing the recording before a single frame is written. The
+	// "?" suffix means ffmpeg won't error if a source has no subtitle track.
+	args = append(args, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?")
 	if src.AudioOnly {
 		if src.Transcode {
 			args = append(args, "-vn", "-c:a", "aac", "-b:a", "192k")
@@ -657,7 +959,7 @@ func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) 
 	args = append(args, output)
 
 	if hlsDir != "" {
-		args = append(args, "-map", "0")
+		args = append(args, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?")
 		if src.AudioOnly {
 			args = append(args, "-vn", "-c:a", "aac", "-b:a", "160k")
 		} else {
@@ -728,6 +1030,10 @@ func runLogged(cmd *exec.Cmd, w io.Writer) error {
 	return cmd.Run()
 }
 
+// stop cancels a recording's context. Each command was set up by
+// prepareGracefulCmd, so cancellation asks ffmpeg/streamlink to shut down
+// gracefully first and only force-kills them after gracefulShutdownDelay -
+// see prepareGracefulCmd for why that matters.
 func (a *App) stop(id string) {
 	a.mu.RLock()
 	rec := a.active[id]
@@ -736,16 +1042,6 @@ func (a *App) stop(id string) {
 		return
 	}
 	rec.cancel()
-	for _, cmd := range rec.cmds {
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(os.Interrupt)
-			time.AfterFunc(5*time.Second, func() {
-				if cmd.Process != nil {
-					_ = cmd.Process.Kill()
-				}
-			})
-		}
-	}
 }
 
 func (a *App) stopAll() {
@@ -1700,9 +1996,9 @@ func loadConfig(path string) (AppConfig, error) {
 func defaultConfig() AppConfig {
 	return AppConfig{
 		Settings: Settings{
-			FinishedDir:             env("FINISHED_DIR", "/data/recordings"),
-			TempDir:                 env("TEMP_DIR", "/data/incomplete"),
-			LogDir:                  env("LOG_DIR", "/data/logs"),
+			FinishedDir:             localizePath(env("FINISHED_DIR", "/data/recordings")),
+			TempDir:                 localizePath(env("TEMP_DIR", "/data/incomplete")),
+			LogDir:                  localizePath(env("LOG_DIR", "/data/logs")),
 			CheckIntervalSeconds:    30,
 			MinFreeBytes:            1024 * 1024 * 1024,
 			WarnFreeBytes:           5 * 1024 * 1024 * 1024,
@@ -1730,13 +2026,13 @@ func defaultConfig() AppConfig {
 
 func normalizeConfig(cfg *AppConfig) {
 	if cfg.Settings.FinishedDir == "" {
-		cfg.Settings.FinishedDir = "/data/recordings"
+		cfg.Settings.FinishedDir = localizePath("/data/recordings")
 	}
 	if cfg.Settings.TempDir == "" {
-		cfg.Settings.TempDir = "/data/incomplete"
+		cfg.Settings.TempDir = localizePath("/data/incomplete")
 	}
 	if cfg.Settings.LogDir == "" {
-		cfg.Settings.LogDir = "/data/logs"
+		cfg.Settings.LogDir = localizePath("/data/logs")
 	}
 	if cfg.Settings.CheckIntervalSeconds == 0 {
 		cfg.Settings.CheckIntervalSeconds = 30
@@ -1957,6 +2253,37 @@ func env(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// isDockerish reports whether we appear to be running inside the project's
+// own Docker image, where /app and /data are always present and writable.
+// /.dockerenv is created by the Docker runtime itself in every container.
+func isDockerish() bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	_, err := os.Stat("/.dockerenv")
+	return err == nil
+}
+
+// localizePath rewrites the project's Docker-convention defaults (/app/...,
+// /data/...) into paths relative to the working directory when not running
+// in Docker, so the app has somewhere sane to write on a bare "go run" or a
+// native Windows/macOS/Linux install without requiring CONFIG_PATH/
+// FINISHED_DIR/TEMP_DIR/LOG_DIR to be set by hand. Paths that don't match
+// either convention (including a user's own explicit override) pass through
+// unchanged.
+func localizePath(p string) string {
+	if isDockerish() {
+		return p
+	}
+	if rest, ok := strings.CutPrefix(p, "/app/"); ok {
+		return filepath.Join(".", rest)
+	}
+	if rest, ok := strings.CutPrefix(p, "/data/"); ok {
+		return filepath.Join(".", rest)
+	}
+	return p
 }
 
 func safeName(s string) string {
