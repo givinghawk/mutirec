@@ -11,29 +11,31 @@
 </head>
 <body class="min-h-screen bg-zinc-950 text-zinc-100">
   <style id="custom-css"></style>
-  <div class="min-h-screen">
-    <header class="border-b border-white/10 bg-zinc-950/85 backdrop-blur">
-      <div class="mx-auto flex max-w-7xl items-center gap-4 px-4 py-4">
+  <div class="flex min-h-screen flex-col md:flex-row">
+    <aside class="sidebar flex flex-col gap-4 border-b border-white/10 bg-zinc-950/85 px-4 py-4 backdrop-blur md:sticky md:top-0 md:h-screen md:w-60 md:flex-shrink-0 md:border-b-0 md:border-r md:overflow-y-auto">
+      <div class="flex items-center gap-3">
         <img id="logo" class="hidden h-10 w-10 rounded object-contain" alt="">
         <div class="min-w-0 flex-1">
-          <h1 id="app-name" class="truncate text-xl font-semibold tracking-normal">Defqon Stream Recorder</h1>
-          <p class="text-sm text-zinc-400">Docker-first automatic recorder for Twitch, YouTube, and raw HTTP streams.</p>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <button data-view="dashboard" class="nav active">Dashboard</button>
-          <button data-view="sources" class="nav">Sources</button>
-          <button data-view="recordings" class="nav">Recordings</button>
-          <button data-view="timetable" class="nav">Timetable</button>
-          <button data-view="settings" class="nav">Settings</button>
-          <button data-view="help" class="nav">Help</button>
+          <h1 id="app-name" class="truncate text-lg font-semibold tracking-normal">Defqon Stream Recorder</h1>
+          <p class="text-xs text-zinc-400">Docker-first stream recorder</p>
         </div>
       </div>
-    </header>
+      <nav class="nav-vertical flex flex-1 flex-row flex-wrap gap-2 md:flex-col md:flex-nowrap">
+        <button data-view="dashboard" class="nav active">Dashboard</button>
+        <button data-view="sources" class="nav">Sources</button>
+        <button data-view="recordings" class="nav">Recordings</button>
+        <button data-view="timetable" class="nav">Timetable</button>
+        <button data-view="settings" class="nav">Settings</button>
+        <button data-view="help" class="nav">Help</button>
+      </nav>
+      <div id="version-footer" class="mt-auto pt-2 text-xs text-zinc-500"></div>
+    </aside>
 
-    <div id="toasts" class="pointer-events-none fixed right-4 top-4 z-50 flex w-80 flex-col gap-2"></div>
+    <div class="min-w-0 flex-1">
+      <div id="toasts" class="pointer-events-none fixed right-4 top-4 z-50 flex w-80 flex-col gap-2"></div>
 
-    <main class="mx-auto max-w-7xl px-4 py-6">
-      <section id="warnings" class="mb-4 space-y-2"></section>
+      <main class="mx-auto max-w-6xl px-4 py-6">
+        <section id="warnings" class="mb-4 space-y-2"></section>
 
       <section id="dashboard" class="view grid gap-4 lg:grid-cols-[1fr_360px]">
         <div class="space-y-4">
@@ -217,9 +219,11 @@ docker compose logs -f recorder</code></pre>
           <p>The Timetable tab has a visual editor: pick a day, click a set to edit or delete it, or click "+ Set" on a stage row to add one. Raw JSON editing is still available behind "Show raw JSON" for bulk edits. Optionally, look up a festival on <a href="https://timetable.lol" target="_blank" rel="noopener">timetable.lol</a> and import its schedule instead of building one by hand - this replaces the current timetable and remembers the link so you can re-sync later, but it's entirely optional and never required.</p>
           <p>Each recording source can optionally be pinned to a specific timetable stage name (Source Manager &rarr; "Timetable stage") if it doesn't match the source's own name.</p>
           <p>Star any set in the timetable to get a reminder (via Discord/SMTP, configured in Settings) a configurable number of minutes before it starts.</p>
+          <p>Version: <span id="help-version"></span></p>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
   </div>
   <script src="/app.js"></script>
 </body>

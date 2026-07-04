@@ -1,7 +1,10 @@
-APP      := defqon-stream-recorder
-PKG      := ./cmd/web
-VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS  := -s -w -X main.version=$(VERSION)
+APP          := defqon-stream-recorder
+PKG          := ./cmd/web
+BASE_VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
+COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DIRTY        := $(shell git diff --quiet 2>/dev/null || echo -dirty)
+VERSION      := v$(BASE_VERSION)+$(COMMIT)$(DIRTY)
+LDFLAGS      := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := build
 
@@ -42,7 +45,7 @@ check: fmt vet test
 ## docker: build the container image
 .PHONY: docker
 docker:
-	docker build -t $(APP):$(VERSION) -t $(APP):latest .
+	docker build --build-arg VERSION=$(VERSION) -t $(APP):$(VERSION) -t $(APP):latest .
 
 ## compose-up: start the local Docker Compose stack
 .PHONY: compose-up
@@ -62,3 +65,8 @@ clean:
 .PHONY: help
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //; s/:/ -> /'
+
+## version: print the computed version string (v<base>+<commit>[-dirty])
+.PHONY: version
+version:
+	@echo $(VERSION)

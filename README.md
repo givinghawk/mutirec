@@ -254,6 +254,13 @@ make run
 make check
 ```
 
+### Versioning
+
+The build version is `v<VERSION file>+<short commit sha>` (e.g. `v1.0.0+9838481`),
+computed by `make build`/`make docker` and by CI, and shown in the WebUI
+sidebar and Help tab. Bump the `VERSION` file for a new release; the commit
+suffix is automatic. Run `make version` to print the computed string.
+
 Environment variables:
 
 | Variable | Default | Purpose |

@@ -45,8 +45,17 @@ async function refresh() {
   }
   config = state.config;
   applyTheme();
+  renderVersion();
   renderDashboard();
   renderEditors();
+}
+
+function renderVersion() {
+  const v = state.version || 'dev';
+  $('version-footer').textContent = v;
+  $('version-footer').title = `Defqon Stream Recorder ${v}`;
+  const helpVersion = $('help-version');
+  if (helpVersion) helpVersion.textContent = v;
 }
 
 function applyTheme() {
