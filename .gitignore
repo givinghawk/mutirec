@@ -11,6 +11,9 @@ coverage.txt
 /recordings/
 *.mp3
 *.log
+config.json
+auth.json
+/.devdata/
 
 # OS / editor
 .DS_Store
