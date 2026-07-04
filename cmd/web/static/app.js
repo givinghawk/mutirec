@@ -6,6 +6,8 @@ let recordings = [];
 let lolEvents = [];
 let selectedTimetableDay = null;
 let editingSet = null;
+let nowPlayingId = null;
+let highlightSourceId = null;
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
 async function api(path, opts) {
@@ -72,16 +74,17 @@ function elapsed(startedAt) {
 function renderDashboard() {
   $('active-count').textContent = `${state.activeCount} active`;
   $('warnings').innerHTML = state.warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
-  $('source-grid').innerHTML = state.sources.map(src => `
-    <article class="source-card" style="border-left-color:${src.color || 'var(--accent)'}">
+  $('source-grid').innerHTML = state.sources.length ? state.sources.map(src => `
+    <article class="source-card ${src.id === nowPlayingId ? 'now-playing' : ''}" style="border-left-color:${src.color || 'var(--accent)'}">
       <div class="flex items-start justify-between gap-3">
         <div>
           <h3>${escapeHtml(src.name)}</h3>
           <p class="text-sm text-zinc-400">${escapeHtml(src.type)} · ${escapeHtml(src.quality || 'best')} · ${escapeHtml(src.container || 'mkv')}</p>
         </div>
-        <span class="pill status-${escapeHtml(src.status)}">${escapeHtml(src.status)}</span>
+        <span class="pill status-${escapeHtml(src.status)}"><span class="status-dot dot-${escapeHtml(src.status)}"></span>${escapeHtml(src.status)}</span>
       </div>
       <div class="mt-3 text-sm text-zinc-300">
+        ${src.id === nowPlayingId ? '<div class="now-playing-tag">&#9654; Now watching</div>' : ''}
         <div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div>
         <div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>
         <div>Size: ${formatBytes(src.size || 0)}${src.status === 'recording' ? ` · Recording for ${elapsed(src.startedAt)}` : ''}</div>
@@ -90,10 +93,10 @@ function renderDashboard() {
       <div class="mt-3 flex flex-wrap gap-2">
         <button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
-        <button class="btn" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Live (rewind)' : 'Live'}</button>
+        <button class="btn primary" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>
         ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
-    </article>`).join('');
+    </article>`).join('') : '<p class="text-sm text-zinc-400 md:col-span-2">No sources yet — add one from the Sources tab.</p>';
   const free = state.disk.volumeFree || 0;
   const total = state.disk.volumeTotal || 0;
   $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
@@ -138,8 +141,17 @@ function renderEditors() {
 }
 
 function drawSourceEditor() {
+  $('source-count-pill').textContent = `${config.sources.length} source${config.sources.length === 1 ? '' : 's'}`;
+  if (!config.sources.length) {
+    $('source-editor').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one above.</p>';
+    return;
+  }
   $('source-editor').innerHTML = config.sources.map((s, i) => `
-    <div class="grid gap-2 rounded border border-white/10 p-3 md:grid-cols-4" data-source="${i}">
+    <div class="source-card-edit grid gap-2 rounded border border-white/10 p-3 md:grid-cols-4" data-source="${i}" data-id="${escapeAttr(s.id || '')}">
+      <div class="col-span-full flex items-center justify-between">
+        <h3 class="font-semibold">${escapeHtml(s.name || 'Untitled source')}</h3>
+        <span class="save-hint hidden">Unsaved changes</span>
+      </div>
       <label>Name<input class="input src-name" value="${escapeAttr(s.name)}"></label>
       <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
       <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
@@ -155,17 +167,29 @@ function drawSourceEditor() {
       <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
       <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
       <div class="col-span-full flex flex-wrap items-center gap-2 pt-1">
+        <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
         <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
         <button type="button" class="btn" onclick="duplicateSource(${i})">Duplicate</button>
         <button type="button" class="btn" style="color:#fda4af" onclick="deleteSource(${i})">Delete</button>
         <span class="test-result text-sm text-zinc-400" id="test-result-${i}"></span>
       </div>
     </div>`).join('');
+
+  document.querySelectorAll('.source-card-edit').forEach(el => {
+    el.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => markCardUnsaved(el)));
+  });
+
+  if (highlightSourceId) {
+    const el = [...document.querySelectorAll('.source-card-edit')].find(c => c.dataset.id === highlightSourceId);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('now-playing'); setTimeout(() => el.classList.remove('now-playing'), 2000); }
+    highlightSourceId = null;
+  }
 }
 
-function readSources() {
-  return [...document.querySelectorAll('[data-source]')].map((el, i) => ({
-    ...config.sources[i],
+function markCardUnsaved(el) { el.querySelector('.save-hint').classList.remove('hidden'); }
+
+function readSourceCard(el) {
+  return {
     name: el.querySelector('.src-name').value,
     type: el.querySelector('.src-type').value,
     url: el.querySelector('.src-url').value,
@@ -180,41 +204,65 @@ function readSources() {
     transcode: el.querySelector('.src-transcode').checked,
     liveRewind: el.querySelector('.src-liverewind').checked,
     timetableStage: el.querySelector('.src-ttstage').value
-  }));
+  };
+}
+
+function sourceCardEl(i) { return document.querySelector(`.source-card-edit[data-source="${i}"]`); }
+
+async function saveSourceCard(i) {
+  const el = sourceCardEl(i);
+  const values = readSourceCard(el);
+  if (!values.name.trim() || !values.url.trim()) { toast('Name and URL are required', 'error'); return; }
+  const id = config.sources[i].id;
+  try {
+    await api(`/api/sources/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...config.sources[i], ...values }) });
+    toast(`Saved "${values.name}"`, 'info');
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+  } catch { /* toast already shown */ }
 }
 
 async function testSource(i) {
-  config.sources = readSources();
-  const s = config.sources[i];
+  const el = sourceCardEl(i);
+  const values = readSourceCard(el);
   const label = $(`test-result-${i}`);
   label.textContent = 'Testing…';
   try {
     const result = await api('/api/sources/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: s.type, url: s.url, quality: s.quality })
+      body: JSON.stringify({ type: values.type, url: values.url, quality: values.quality })
     });
     label.textContent = result.ok ? `Resolved OK` : `Failed: ${result.error}`;
     label.className = `test-result text-sm ${result.ok ? 'text-emerald-300' : 'text-rose-300'}`;
-    if (result.ok) toast(`${s.name || 'Source'}: stream resolved successfully`, 'info');
+    if (result.ok) toast(`${values.name || 'Source'}: stream resolved successfully`, 'info');
   } catch (err) {
     label.textContent = 'Test request failed';
   }
 }
 
-function duplicateSource(i) {
-  config.sources = readSources();
-  const copy = { ...config.sources[i], id: undefined, name: `${config.sources[i].name} copy` };
-  config.sources.splice(i + 1, 0, copy);
-  drawSourceEditor();
+async function duplicateSource(i) {
+  const el = sourceCardEl(i);
+  const values = readSourceCard(el);
+  const copy = { ...values, name: `${values.name} copy` };
+  try {
+    const created = await api('/api/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(copy) });
+    toast(`Duplicated as "${copy.name}"`, 'info');
+    highlightSourceId = created.id;
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+  } catch { /* toast already shown */ }
 }
 
-function deleteSource(i) {
-  config.sources = readSources();
+async function deleteSource(i) {
   const src = config.sources[i];
   if (!confirm(`Delete source "${src.name}"? This does not delete existing recordings.`)) return;
-  config.sources.splice(i, 1);
-  drawSourceEditor();
+  try {
+    await api(`/api/sources/${src.id}`, { method: 'DELETE' });
+    toast(`Deleted "${src.name}"`, 'info');
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+  } catch { /* toast already shown */ }
 }
 
 function fillSettings() {
@@ -264,6 +312,7 @@ async function stopRec(id, name) {
 
 function playLive(id, audioOnly) {
   const src = state.sources.find(s => s.id === id);
+  if (!src) return;
   const useHls = !!(src && src.liveRewindActive);
   const url = useHls ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
   const audioEl = $('audio'), videoEl = $('video');
@@ -271,6 +320,17 @@ function playLive(id, audioOnly) {
   videoEl.classList.toggle('hidden', audioOnly);
   const el = audioOnly ? audioEl : videoEl;
   (audioOnly ? videoEl : audioEl).pause();
+
+  nowPlayingId = id;
+  $('player-empty').classList.add('hidden');
+  $('player-now').textContent = `— ${src.name}${audioOnly ? ' (audio)' : ''}`;
+  renderDashboard();
+
+  const panel = $('player-panel');
+  panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  panel.classList.remove('flash');
+  void panel.offsetWidth;
+  panel.classList.add('flash');
 
   if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
 
@@ -314,12 +374,21 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = () => {
   if (b.dataset.view === 'recordings') loadRecordings();
 });
 
-$('add-source').onclick = () => { config.sources.push({ id: undefined, name: 'New Source', type: 'youtube', url: '', enabled: true, record: false, quality: 'best', container: 'mkv' }); drawSourceEditor(); };
-$('save-sources').onclick = async () => {
-  config.sources = readSources();
-  const missing = config.sources.find(s => !s.name.trim() || !s.url.trim());
-  if (missing) { toast('Every source needs a name and URL', 'error'); return; }
-  await saveConfig();
+$('qa-add').onclick = async () => {
+  const name = $('qa-name').value.trim();
+  const type = $('qa-type').value;
+  const url = $('qa-url').value.trim();
+  if (!name || !url) { toast('Give the source a name and a URL first', 'error'); return; }
+  const payload = { name, type, url, enabled: true, record: false, quality: 'best', container: 'mkv' };
+  try {
+    const created = await api('/api/sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    toast(`Added "${name}" — fine-tune it below if needed`, 'info');
+    $('qa-name').value = '';
+    $('qa-url').value = '';
+    highlightSourceId = created.id;
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+  } catch { /* toast already shown */ }
 };
 $('save-timetable').onclick = async () => {
   try {

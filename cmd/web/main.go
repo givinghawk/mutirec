@@ -671,6 +671,20 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, cfg)
 }
 
+// validateSource checks the minimum fields needed for a source to be usable.
+func validateSource(src Source) error {
+	if strings.TrimSpace(src.Name) == "" {
+		return errors.New("name is required")
+	}
+	if strings.TrimSpace(src.URL) == "" {
+		return errors.New("url is required")
+	}
+	if src.Type != "youtube" && src.Type != "twitch" && src.Type != "http" {
+		return errors.New("type must be youtube, twitch, or http")
+	}
+	return nil
+}
+
 func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -681,16 +695,8 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(src.Name) == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-	if strings.TrimSpace(src.URL) == "" {
-		http.Error(w, "url is required", http.StatusBadRequest)
-		return
-	}
-	if src.Type != "youtube" && src.Type != "twitch" && src.Type != "http" {
-		http.Error(w, "type must be youtube, twitch, or http", http.StatusBadRequest)
+	if err := validateSource(src); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if src.ID == "" {
@@ -719,6 +725,35 @@ func (a *App) handleSourceItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Method {
+	case http.MethodPut:
+		var src Source
+		if err := json.NewDecoder(r.Body).Decode(&src); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateSource(src); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		src.ID = id
+		a.mu.Lock()
+		idx := -1
+		for i, existing := range a.cfg.Sources {
+			if existing.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		a.cfg.Sources[idx] = src
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, src)
 	case http.MethodDelete:
 		a.stop(id)
 		a.mu.Lock()

@@ -45,15 +45,16 @@
             <div id="source-grid" class="grid gap-3 md:grid-cols-2"></div>
           </div>
 
-          <div class="panel">
+          <div class="panel" id="player-panel">
             <div class="panel-head">
-              <h2>Player</h2>
+              <h2>Player <span id="player-now" class="text-sm font-normal text-zinc-400"></span></h2>
               <label class="flex items-center gap-2 text-sm text-zinc-300"><input id="wave-toggle" type="checkbox" class="accent-red-500"> Waveform</label>
             </div>
             <div id="player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
-            <audio id="audio" controls class="w-full"></audio>
+            <audio id="audio" controls class="hidden w-full"></audio>
             <video id="video" controls class="mt-3 hidden w-full rounded border border-white/10 bg-black"></video>
             <div id="wave" class="mt-3 hidden h-20 rounded bg-black/30"></div>
+            <p id="player-empty" class="text-sm text-zinc-400">Nothing playing yet — click "Watch Live" on a source above.</p>
           </div>
         </div>
 
@@ -73,12 +74,26 @@
         </aside>
       </section>
 
-      <section id="sources" class="view hidden">
+      <section id="sources" class="view hidden space-y-4">
+        <div class="panel quick-add-panel">
+          <div class="panel-head"><h2>Add a Source</h2></div>
+          <div class="grid gap-2 md:grid-cols-[1fr_160px_2fr_auto]">
+            <label>Name<input id="qa-name" class="input" placeholder="e.g. Main Stage"></label>
+            <label>Type<select id="qa-type" class="input">
+              <option value="youtube">YouTube</option>
+              <option value="twitch">Twitch</option>
+              <option value="http">Raw HTTP/HLS</option>
+            </select></label>
+            <label>URL<input id="qa-url" class="input" placeholder="https://..."></label>
+            <label class="self-end"><button type="button" id="qa-add" class="btn primary w-full">Add Source</button></label>
+          </div>
+          <p id="qa-hint" class="mt-1 text-xs text-zinc-500">Pick a type, paste the channel/stream URL, and name it — you can fine-tune quality, container, transcoding, and more below after it's created.</p>
+        </div>
+
         <div class="panel">
-          <div class="panel-head"><h2>Source Manager</h2><button id="add-source" class="btn">Add Source</button></div>
+          <div class="panel-head"><h2>Source Manager</h2><span class="pill" id="source-count-pill">0 sources</span></div>
           <div id="source-editor" class="space-y-3"></div>
           <datalist id="timetable-stage-names"></datalist>
-          <button id="save-sources" class="btn primary mt-4">Save Sources</button>
         </div>
       </section>
 
