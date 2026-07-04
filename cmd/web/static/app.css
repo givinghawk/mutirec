@@ -15,6 +15,7 @@ label { display: block; color: #d4d4d8; font-size: 13px; }
 .source-card { border: 1px solid rgb(255 255 255 / .1); border-left-width: 4px; border-radius: 10px; background: linear-gradient(160deg, rgb(255 255 255 / .05), rgb(0 0 0 / .18) 60%); padding: 12px; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
 .source-card:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgb(0 0 0 / .35); }
 .source-card.now-playing { border-color: var(--accent, #ef4444); box-shadow: 0 0 0 1px var(--accent, #ef4444), 0 10px 26px rgb(0 0 0 / .35); }
+.source-card.orphaned { border-color: rgb(245 158 11 / .5); }
 .source-card h3 { font-weight: 650; }
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 6px; background: #71717a; }
 .status-dot.dot-recording { background: #ef4444; box-shadow: 0 0 0 rgb(239 68 68 / .6); animation: dot-pulse 1.6s infinite; }

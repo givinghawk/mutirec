@@ -75,7 +75,7 @@ function renderDashboard() {
   $('active-count').textContent = `${state.activeCount} active`;
   $('warnings').innerHTML = state.warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
   $('source-grid').innerHTML = state.sources.length ? state.sources.map(src => `
-    <article class="source-card ${src.id === nowPlayingId ? 'now-playing' : ''}" style="border-left-color:${src.color || 'var(--accent)'}">
+    <article class="source-card ${src.id === nowPlayingId ? 'now-playing' : ''} ${src.orphaned ? 'orphaned' : ''}" style="border-left-color:${src.color || 'var(--accent)'}">
       <div class="flex items-start justify-between gap-3">
         <div>
           <h3>${escapeHtml(src.name)}</h3>
@@ -83,17 +83,17 @@ function renderDashboard() {
         </div>
         <span class="pill status-${escapeHtml(src.status)}"><span class="status-dot dot-${escapeHtml(src.status)}"></span>${escapeHtml(src.status)}</span>
       </div>
+      ${src.orphaned ? '<div class="mt-2 rounded border border-amber-400/30 bg-amber-500/10 px-2 py-1 text-xs text-amber-100">This source was deleted while still recording — stop it to free it up.</div>' : ''}
       <div class="mt-3 text-sm text-zinc-300">
         ${src.id === nowPlayingId ? '<div class="now-playing-tag">&#9654; Now watching</div>' : ''}
-        <div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div>
-        <div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>
+        ${!src.orphaned ? `<div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div><div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>` : ''}
         <div>Size: ${formatBytes(src.size || 0)}${src.status === 'recording' ? ` · Recording for ${elapsed(src.startedAt)}` : ''}</div>
         ${src.lastError ? `<div class="text-rose-300">Error: ${escapeHtml(src.lastError)}</div>` : ''}
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
-        <button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>
+        ${src.orphaned ? '' : `<button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>`}
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
-        <button class="btn primary" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>
+        ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
         ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
     </article>`).join('') : '<p class="text-sm text-zinc-400 md:col-span-2">No sources yet — add one from the Sources tab.</p>';

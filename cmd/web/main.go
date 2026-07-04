@@ -166,6 +166,7 @@ type SourceStatus struct {
 	LogPath          string    `json:"logPath,omitempty"`
 	LastHeartbeat    time.Time `json:"lastHeartbeat,omitempty"`
 	LiveRewindActive bool      `json:"liveRewindActive"`
+	Orphaned         bool      `json:"orphaned,omitempty"`
 }
 
 // RecordingFile describes a single finished recording on disk.
@@ -755,7 +756,10 @@ func (a *App) handleSourceItem(w http.ResponseWriter, r *http.Request) {
 		_ = a.persist(cfg)
 		writeJSON(w, src)
 	case http.MethodDelete:
-		a.stop(id)
+		if a.isActive(id) {
+			http.Error(w, "stop the recording before deleting this source", http.StatusConflict)
+			return
+		}
 		a.mu.Lock()
 		found := false
 		out := a.cfg.Sources[:0:0]
@@ -1356,6 +1360,38 @@ func (a *App) state() State {
 		}
 		if next != nil {
 			st.NextSet = next.Name
+		}
+		statuses = append(statuses, st)
+	}
+	// A source can still be actively recording after being deleted from the
+	// config (deletion is blocked while recording, but this also covers any
+	// recording left over from before that guard existed). Surface it so it
+	// stays visible and stoppable instead of silently running forever.
+	for id, rec := range a.active {
+		found := false
+		for _, src := range cfg.Sources {
+			if src.ID == id {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		st := SourceStatus{Source: rec.source, Status: "recording", Orphaned: true}
+		st.OutputPath = rec.finalPath
+		st.StartedAt = rec.startedAt
+		st.LogPath = rec.logPath
+		st.LastError = rec.lastErr
+		st.LiveRewindActive = rec.hlsDir != ""
+		if info, err := os.Stat(rec.tempPath); err == nil {
+			st.Size = info.Size()
+			st.LastHeartbeat = info.ModTime()
+		}
+		if st.OutputPath != "" {
+			if rel, err := filepath.Rel(cfg.Settings.FinishedDir, st.OutputPath); err == nil && !strings.HasPrefix(rel, "..") {
+				st.MediaPath = filepath.ToSlash(rel)
+			}
 		}
 		statuses = append(statuses, st)
 	}
