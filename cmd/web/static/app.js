@@ -18,6 +18,10 @@ async function api(path, opts) {
     toast(`Network error: ${err.message}`, 'error');
     throw err;
   }
+  if (res.status === 401) {
+    window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+    throw new Error('session expired');
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     toast(text || `Request failed (${res.status})`, 'error');
@@ -334,8 +338,13 @@ async function stopRec(id, name) {
 function playLive(id, audioOnly) {
   const src = state.sources.find(s => s.id === id);
   if (!src) return;
-  const useHls = !!(src && src.liveRewindActive);
-  const url = useHls ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
+  // Twitch/YouTube (resolved via streamlink) and most raw HTTP sources are
+  // served as HLS (.m3u8), which only Safari can play natively - every other
+  // browser needs hls.js or "Watch Live" silently does nothing. The live
+  // rewind buffer is always HLS; otherwise guess from the source itself.
+  const looksLikeHls = src.liveRewindActive || src.type !== 'http' || /\.m3u8(\?|$)/i.test(src.url || '');
+  const useHls = looksLikeHls && window.Hls && Hls.isSupported();
+  const url = src.liveRewindActive ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
   const audioEl = $('audio'), videoEl = $('video');
   audioEl.classList.toggle('hidden', !audioOnly);
   videoEl.classList.toggle('hidden', audioOnly);
@@ -356,22 +365,23 @@ function playLive(id, audioOnly) {
   if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
 
   const statusEl = $('player-status');
-  if (useHls) {
+  if (src.liveRewindActive) {
     statusEl.textContent = 'Live rewind buffer connecting — drag the seek bar back to scrub within this recording.';
     statusEl.classList.remove('hidden');
   } else {
     statusEl.classList.add('hidden');
   }
 
-  if (useHls && window.Hls && Hls.isSupported()) {
+  if (useHls) {
     hlsPlayer = new Hls({ liveSyncDurationCount: 3 });
     hlsPlayer.on(Hls.Events.ERROR, (_evt, data) => {
-      if (data.fatal) toast(`Live rewind stream error: ${data.details}`, 'error');
+      if (data.fatal) toast(`Live stream error: ${data.details}`, 'error');
     });
     hlsPlayer.loadSource(url);
     hlsPlayer.attachMedia(el);
     hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error')));
   } else {
+    // Safari (and anything without hls.js) can play HLS natively via <video src>.
     el.src = url;
     el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
   }
@@ -387,13 +397,24 @@ function playLive(id, audioOnly) {
   }
 }
 
-document.querySelectorAll('.nav').forEach(b => b.onclick = () => {
+document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.view').forEach(x => x.classList.add('hidden'));
   b.classList.add('active');
   $(b.dataset.view).classList.remove('hidden');
+  // Each tab keeps its own view element rather than navigating to a real
+  // separate page, but it must still behave like one: pull fresh data from
+  // the server and redraw from scratch every time it's opened, instead of
+  // showing whatever was rendered (possibly stale) the last time it was open.
+  $('source-editor').dataset.loaded = '';
+  await refresh();
   if (b.dataset.view === 'recordings') loadRecordings();
 });
+
+$('logout-btn').onclick = async () => {
+  try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
+  window.location.href = '/login';
+};
 
 $('qa-add').onclick = async () => {
   const name = $('qa-name').value.trim();
@@ -505,7 +526,7 @@ function renderVisualTimetable() {
       const width = Math.max(3, (((ep ? ep.minutes : sp.minutes + 60) - sp.minutes) / span) * 100);
       const starred = set.id && favIds.has(set.id);
       return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(set.name)}">
-        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id}')">&#9733;</button>
+        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id || ''}')">&#9733;</button>
         <span onclick="editTimetableSet(${si},${seti})">${escapeHtml(set.name)}</span>
       </div>`;
     }).join('');

@@ -216,7 +216,13 @@ type App struct {
 	authUser      string
 	authPass      string
 	remindersSent map[string]time.Time
+
+	sessMu   sync.Mutex
+	sessions map[string]time.Time
 }
+
+const sessionCookieName = "dqr_session"
+const sessionTTL = 30 * 24 * time.Hour
 
 func main() {
 	configPath := env("CONFIG_PATH", "/app/config/config.json")
@@ -266,6 +272,7 @@ func NewApp(configPath string) (*App, error) {
 		active:        map[string]*recording{},
 		lastFinished:  map[string]string{},
 		remindersSent: map[string]time.Time{},
+		sessions:      map[string]time.Time{},
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -291,19 +298,131 @@ func (a *App) setupAuth() {
 	}
 }
 
-// requireAuth gates every request (UI and API) behind HTTP Basic Auth.
+// publicPaths lists the handful of routes reachable without a session, so the
+// login page itself (and the request that submits it) don't get redirected
+// back to the login page.
+func isPublicPath(p string) bool {
+	switch p {
+	case "/login", "/api/login", "/app.css":
+		return true
+	}
+	return false
+}
+
+// requireAuth gates every request (UI and API) behind a session cookie set by
+// a real login page (see handleLogin), redirecting page loads to /login and
+// returning 401 JSON for API calls when the session is missing or expired.
 func (a *App) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(a.authUser)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(a.authPass)) == 1
-		if !ok || !userMatch || !passMatch {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Defqon Stream Recorder", charset="UTF-8"`)
+		if isPublicPath(r.URL.Path) || a.validSession(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		http.Redirect(w, r, "/login", http.StatusFound)
 	})
+}
+
+// createSession mints a new random session token, records its expiry, and
+// sets it as an HttpOnly cookie on the response.
+func (a *App) createSession(w http.ResponseWriter) {
+	var b [32]byte
+	_, _ = rand.Read(b[:])
+	token := hex.EncodeToString(b[:])
+	expiry := time.Now().Add(sessionTTL)
+	a.sessMu.Lock()
+	a.sessions[token] = expiry
+	a.sessMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  expiry,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (a *App) validSession(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	a.sessMu.Lock()
+	defer a.sessMu.Unlock()
+	expiry, ok := a.sessions[c.Value]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		delete(a.sessions, c.Value)
+		return false
+	}
+	return true
+}
+
+func (a *App) destroySession(r *http.Request) {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return
+	}
+	a.sessMu.Lock()
+	delete(a.sessions, c.Value)
+	a.sessMu.Unlock()
+}
+
+// handleLoginPage serves the standalone login page, unauthenticated.
+func (a *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := staticFiles.ReadFile("static/login.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
+}
+
+// handleLogin verifies AUTH_USERNAME/AUTH_PASSWORD and, on success, starts a
+// session so the rest of the app is reachable without re-authenticating on
+// every request.
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	userMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(a.authUser)) == 1
+	passMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(a.authPass)) == 1
+	if !userMatch || !passMatch {
+		http.Error(w, "invalid username or password", http.StatusUnauthorized)
+		return
+	}
+	a.createSession(w)
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.destroySession(r)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 // securityHeaders adds a small set of defensive headers to every response.
@@ -319,6 +438,9 @@ func securityHeaders(next http.Handler) http.Handler {
 func (a *App) routes(mux *http.ServeMux) {
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
+	mux.HandleFunc("/login", a.handleLoginPage)
+	mux.HandleFunc("/api/login", a.handleLogin)
+	mux.HandleFunc("/api/logout", a.handleLogout)
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/sources", a.handleSources)
