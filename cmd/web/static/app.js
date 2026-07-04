@@ -44,10 +44,18 @@ async function refresh() {
     return;
   }
   config = state.config;
-  applyTheme();
-  renderVersion();
-  renderDashboard();
-  renderEditors();
+  if (!config) return;
+  // A rendering bug in any one panel should never take down the rest of the
+  // UI silently - log it and keep whatever else already rendered visible.
+  try {
+    applyTheme();
+    renderVersion();
+    renderDashboard();
+    renderEditors();
+  } catch (err) {
+    console.error('Render failed:', err);
+    toast(`UI failed to render: ${err.message}`, 'error');
+  }
 }
 
 function renderVersion() {
@@ -81,9 +89,12 @@ function elapsed(startedAt) {
 }
 
 function renderDashboard() {
+  const warnings = state.warnings || [];
+  const sources = state.sources || [];
+  const events = state.events || [];
   $('active-count').textContent = `${state.activeCount} active`;
-  $('warnings').innerHTML = state.warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
-  $('source-grid').innerHTML = state.sources.length ? state.sources.map(src => `
+  $('warnings').innerHTML = warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
+  $('source-grid').innerHTML = sources.length ? sources.map(src => `
     <article class="source-card ${src.id === nowPlayingId ? 'now-playing' : ''} ${src.orphaned ? 'orphaned' : ''}" style="border-left-color:${src.color || 'var(--accent)'}">
       <div class="flex items-start justify-between gap-3">
         <div>
@@ -109,7 +120,7 @@ function renderDashboard() {
   const free = state.disk.volumeFree || 0;
   const total = state.disk.volumeTotal || 0;
   $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
-  $('events').innerHTML = [...state.events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
+  $('events').innerHTML = [...events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
   renderFavoritesPanel();
 }
 
@@ -150,6 +161,7 @@ function renderEditors() {
 }
 
 function drawSourceEditor() {
+  config.sources = config.sources || [];
   $('source-count-pill').textContent = `${config.sources.length} source${config.sources.length === 1 ? '' : 's'}`;
   if (!config.sources.length) {
     $('source-editor').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one above.</p>';

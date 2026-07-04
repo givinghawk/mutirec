@@ -1396,12 +1396,14 @@ func (a *App) state() State {
 		statuses = append(statuses, st)
 	}
 	warnings := freeWarnings(cfg)
-	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: append([]Event(nil), a.events...), Disk: disk.Scan(cfg.Settings.FinishedDir), Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now}
+	events := make([]Event, len(a.events))
+	copy(events, a.events)
+	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: events, Disk: disk.Scan(cfg.Settings.FinishedDir), Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now}
 }
 
 func freeWarnings(cfg AppConfig) []string {
 	usage := disk.Scan(cfg.Settings.FinishedDir)
-	var warnings []string
+	warnings := []string{}
 	if usage.VolumeFree > 0 && usage.VolumeFree < cfg.Settings.WarnFreeBytes {
 		warnings = append(warnings, fmt.Sprintf("Only %.1f GB free in finished directory", gb(usage.VolumeFree)))
 	}
@@ -1645,6 +1647,19 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Settings.ReminderLeadMinutes == 0 {
 		cfg.Settings.ReminderLeadMinutes = 15
+	}
+	// Slices must never round-trip as JSON null: encoding/json marshals a nil
+	// slice as `null`, and the frontend calls array methods on these fields
+	// without expecting that - one nil slice throws and silently aborts the
+	// whole dashboard render (see the "no source cards" bug this fixed).
+	if cfg.Sources == nil {
+		cfg.Sources = []Source{}
+	}
+	if cfg.Timetable == nil {
+		cfg.Timetable = []StageSchedule{}
+	}
+	if cfg.Settings.FavoriteSetIDs == nil {
+		cfg.Settings.FavoriteSetIDs = []string{}
 	}
 	assignScheduleIDs(cfg.Timetable)
 }
