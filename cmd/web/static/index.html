@@ -63,6 +63,10 @@
             <div id="storage" class="space-y-2 text-sm text-zinc-300"></div>
           </div>
           <div class="panel">
+            <div class="panel-head"><h2>Starred Sets</h2></div>
+            <div id="favorites-panel" class="space-y-2 text-sm text-zinc-300"></div>
+          </div>
+          <div class="panel">
             <div class="panel-head"><h2>Event Log</h2></div>
             <div id="events" class="max-h-[420px] space-y-2 overflow-auto text-sm"></div>
           </div>
@@ -73,6 +77,7 @@
         <div class="panel">
           <div class="panel-head"><h2>Source Manager</h2><button id="add-source" class="btn">Add Source</button></div>
           <div id="source-editor" class="space-y-3"></div>
+          <datalist id="timetable-stage-names"></datalist>
           <button id="save-sources" class="btn primary mt-4">Save Sources</button>
         </div>
       </section>
@@ -87,11 +92,49 @@
         </div>
       </section>
 
-      <section id="timetable" class="view hidden">
+      <section id="timetable" class="view hidden space-y-4">
         <div class="panel">
-          <div class="panel-head"><h2>Editable Timetable</h2><button id="save-timetable" class="btn primary">Save</button></div>
-          <p class="mb-3 text-sm text-zinc-400">Edit JSON directly. Times are RFC3339, for example <code>2026-06-26T13:00:00+02:00</code>.</p>
-          <textarea id="timetable-json" class="codebox h-[560px]"></textarea>
+          <div class="panel-head">
+            <h2>Look up on timetable.lol</h2>
+            <span id="tt-linked-badge" class="pill hidden"></span>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Optional: browse a festival's public timetable and import it, instead of building your own by hand. Timetable data provided by <a href="https://timetable.lol" target="_blank" rel="noopener">timetable.lol</a>.</p>
+          <div class="flex flex-wrap items-end gap-2">
+            <label class="min-w-[280px] flex-1">Event<select id="tt-lol-event" class="input"><option value="">Loading events…</option></select></label>
+            <button type="button" id="tt-lol-refresh" class="btn">Refresh list</button>
+            <button type="button" id="tt-lol-import" class="btn primary">Import</button>
+            <button type="button" id="tt-lol-resync" class="btn hidden">Re-sync linked event</button>
+            <button type="button" id="tt-lol-unlink" class="btn hidden" style="color:#fda4af">Unlink</button>
+          </div>
+          <p id="tt-lol-status" class="mt-2 text-sm text-zinc-400"></p>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Timetable</h2>
+            <div class="flex items-center gap-2">
+              <button type="button" id="tt-toggle-json" class="btn">Show raw JSON</button>
+              <button id="save-timetable" class="btn primary">Save</button>
+            </div>
+          </div>
+          <div id="timetable-day-tabs" class="mb-3 flex flex-wrap gap-2"></div>
+          <div id="timetable-visual" class="space-y-2"></div>
+          <div id="timetable-edit-form" class="hidden mt-4 space-y-2 rounded border border-white/10 p-3">
+            <div class="grid gap-2 md:grid-cols-3">
+              <label>Name<input id="tt-edit-name" class="input"></label>
+              <label>Start<input id="tt-edit-start" type="datetime-local" class="input"></label>
+              <label>End<input id="tt-edit-end" type="datetime-local" class="input"></label>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" class="btn primary" onclick="applyTimetableSetEdit()">Apply</button>
+              <button type="button" class="btn" id="tt-edit-delete" style="color:#fda4af" onclick="deleteTimetableSet()">Delete</button>
+              <button type="button" class="btn" onclick="closeTimetableEdit()">Cancel</button>
+            </div>
+          </div>
+          <div id="timetable-json-wrap" class="hidden mt-4">
+            <p class="mb-2 text-sm text-zinc-400">Advanced: edit the raw JSON directly. Times are RFC3339, for example <code>2026-06-26T13:00:00+02:00</code>.</p>
+            <textarea id="timetable-json" class="codebox h-[420px]"></textarea>
+          </div>
         </div>
       </section>
 
@@ -123,6 +166,8 @@
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Notifications</h2></div>
+            <label>Reminder lead time (minutes)<input id="reminderLeadMinutes" type="number" class="input"></label>
+            <p class="-mt-2 mb-3 text-xs text-zinc-500">How long before a starred timetable set to send a reminder via Discord/SMTP below. Star sets from the Timetable tab.</p>
             <label>Discord webhook<input id="discordWebhook" class="input"></label>
             <label class="mt-3 inline-flex items-center gap-2 text-sm"><input id="smtpEnabled" type="checkbox" class="accent-red-500"> SMTP enabled</label>
             <label>SMTP host<input id="smtpHost" class="input"></label>
@@ -153,6 +198,10 @@ docker compose logs -f recorder</code></pre>
           <p>Hardware transcoding requires the matching device passthrough, for example NVIDIA Container Toolkit for <code>h264_nvenc</code>, Intel Quick Sync for <code>qsv</code>, or VAAPI devices mounted into the container.</p>
           <h2>Live Rewind</h2>
           <p>Turn on "Live rewind" for a source in the Source Manager to let viewers scrub backward while it's actively recording. This runs a second H.264/AAC transcode into a rolling HLS buffer (window length set in Settings), so only enable it where the extra CPU/disk cost is acceptable. Once a recording finishes, the buffer is discarded and the archived file takes over.</p>
+          <h2>Timetable</h2>
+          <p>The Timetable tab has a visual editor: pick a day, click a set to edit or delete it, or click "+ Set" on a stage row to add one. Raw JSON editing is still available behind "Show raw JSON" for bulk edits. Optionally, look up a festival on <a href="https://timetable.lol" target="_blank" rel="noopener">timetable.lol</a> and import its schedule instead of building one by hand - this replaces the current timetable and remembers the link so you can re-sync later, but it's entirely optional and never required.</p>
+          <p>Each recording source can optionally be pinned to a specific timetable stage name (Source Manager &rarr; "Timetable stage") if it doesn't match the source's own name.</p>
+          <p>Star any set in the timetable to get a reminder (via Discord/SMTP, configured in Settings) a configurable number of minutes before it starts.</p>
         </div>
       </section>
     </main>

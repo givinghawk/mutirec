@@ -16,10 +16,12 @@ import (
 	"log"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -37,10 +39,11 @@ var version = "dev"
 var staticFiles embed.FS
 
 type AppConfig struct {
-	Settings  Settings        `json:"settings"`
-	UI        UISettings      `json:"ui"`
-	Sources   []Source        `json:"sources"`
-	Timetable []StageSchedule `json:"timetable"`
+	Settings        Settings        `json:"settings"`
+	UI              UISettings      `json:"ui"`
+	Sources         []Source        `json:"sources"`
+	Timetable       []StageSchedule `json:"timetable"`
+	TimetableSource *TimetableLink  `json:"timetableSource,omitempty"`
 }
 
 type Settings struct {
@@ -58,6 +61,8 @@ type Settings struct {
 	AllowLiveProxy          bool          `json:"allowLiveProxy"`
 	WarnFreeBytes           uint64        `json:"warnFreeBytes"`
 	LiveRewindWindowSeconds int           `json:"liveRewindWindowSeconds"`
+	FavoriteSetIDs          []string      `json:"favoriteSetIds"`
+	ReminderLeadMinutes     int           `json:"reminderLeadMinutes"`
 	RecordingSetLookahead   time.Duration `json:"-"`
 }
 
@@ -108,6 +113,7 @@ type Source struct {
 	ExtraNFO       string   `json:"extraNfo"`
 	Color          string   `json:"color"`
 	LiveRewind     bool     `json:"liveRewind"`
+	TimetableStage string   `json:"timetableStage,omitempty"`
 }
 
 type StageSchedule struct {
@@ -117,9 +123,22 @@ type StageSchedule struct {
 }
 
 type ScheduleSet struct {
+	ID    string `json:"id,omitempty"`
 	Start string `json:"start"`
 	End   string `json:"end"`
 	Name  string `json:"name"`
+}
+
+// TimetableLink records which timetable.lol event our local timetable was
+// last imported from, purely for display/attribution and re-sync - linking
+// to timetable.lol is entirely optional and the timetable can just as well
+// be edited by hand or via the visual editor.
+type TimetableLink struct {
+	EventSlug  string    `json:"eventSlug"`
+	EventTitle string    `json:"eventTitle"`
+	PlanType   string    `json:"planType"`
+	SourceURL  string    `json:"sourceUrl"`
+	ImportedAt time.Time `json:"importedAt"`
 }
 
 type State struct {
@@ -186,15 +205,16 @@ type recording struct {
 }
 
 type App struct {
-	mu           sync.RWMutex
-	cfg          AppConfig
-	config       string
-	startedAt    time.Time
-	active       map[string]*recording
-	events       []Event
-	lastFinished map[string]string
-	authUser     string
-	authPass     string
+	mu            sync.RWMutex
+	cfg           AppConfig
+	config        string
+	startedAt     time.Time
+	active        map[string]*recording
+	events        []Event
+	lastFinished  map[string]string
+	authUser      string
+	authPass      string
+	remindersSent map[string]time.Time
 }
 
 func main() {
@@ -239,11 +259,12 @@ func NewApp(configPath string) (*App, error) {
 		return nil, err
 	}
 	app := &App{
-		cfg:          cfg,
-		config:       configPath,
-		startedAt:    time.Now(),
-		active:       map[string]*recording{},
-		lastFinished: map[string]string{},
+		cfg:           cfg,
+		config:        configPath,
+		startedAt:     time.Now(),
+		active:        map[string]*recording{},
+		lastFinished:  map[string]string{},
+		remindersSent: map[string]time.Time{},
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -303,6 +324,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
 	mux.HandleFunc("/api/timetable", a.handleTimetable)
+	mux.HandleFunc("/api/timetable/favorites", a.handleTimetableFavorites)
+	mux.HandleFunc("/api/timetable/lol-events", a.handleTimetableLolEvents)
+	mux.HandleFunc("/api/timetable/lol-import", a.handleTimetableLolImport)
+	mux.HandleFunc("/api/timetable/lol-unlink", a.handleTimetableLolUnlink)
 	mux.HandleFunc("/api/record/", a.handleRecordAction)
 	mux.HandleFunc("/api/live/", a.handleLive)
 	mux.HandleFunc("/api/recordings", a.handleRecordings)
@@ -326,6 +351,7 @@ func (a *App) scheduler(ctx context.Context) {
 
 func (a *App) evaluate() {
 	cfg := a.snapshotConfig()
+	a.checkReminders(cfg)
 	usage := disk.Scan(cfg.Settings.FinishedDir)
 	if usage.VolumeFree > 0 && usage.VolumeFree < cfg.Settings.MinFreeBytes {
 		a.event("error", fmt.Sprintf("Recording paused: free disk space below %.1f GB", gb(cfg.Settings.MinFreeBytes)))
@@ -822,12 +848,335 @@ func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	assignScheduleIDs(tt)
 	a.mu.Lock()
 	a.cfg.Timetable = tt
 	cfg := a.cfg
 	a.mu.Unlock()
 	_ = a.persist(cfg)
 	writeJSON(w, tt)
+}
+
+// handleTimetableFavorites replaces the list of favorited/starred set IDs
+// that reminders are sent for.
+func (a *App) handleTimetableFavorites(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var ids []string
+	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	a.mu.Lock()
+	a.cfg.Settings.FavoriteSetIDs = ids
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, ids)
+}
+
+const timetableLolAPIBase = "https://api.timetable.lol"
+
+// timetableLolSet accepts timetable.lol's PlannerSet, which is either the
+// tuple form [stableId, start, end, artist] or an equivalent object.
+type timetableLolSet struct {
+	ID     string
+	Start  string
+	End    string
+	Artist string
+}
+
+func (s *timetableLolSet) UnmarshalJSON(b []byte) error {
+	var arr []string
+	if err := json.Unmarshal(b, &arr); err == nil {
+		if len(arr) < 4 {
+			return fmt.Errorf("expected at least 4 items in tuple set, got %d", len(arr))
+		}
+		s.ID, s.Start, s.End, s.Artist = arr[0], arr[1], arr[2], arr[3]
+		return nil
+	}
+	var obj struct {
+		ID     string `json:"id"`
+		Start  string `json:"start"`
+		End    string `json:"end"`
+		Artist string `json:"artist"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return err
+	}
+	s.ID, s.Start, s.End, s.Artist = obj.ID, obj.Start, obj.End, obj.Artist
+	return nil
+}
+
+type timetableLolDay struct {
+	Date   string                       `json:"date"`
+	Stages map[string][]timetableLolSet `json:"stages"`
+}
+
+type timetableLolPlannerData struct {
+	EventSlug string                     `json:"eventSlug"`
+	PlanType  string                     `json:"planType"`
+	Title     string                     `json:"title"`
+	TimeZone  string                     `json:"timeZone"`
+	Data      map[string]timetableLolDay `json:"data"`
+}
+
+// handleTimetableLolEvents lists public events from timetable.lol so the
+// WebUI can offer a browse/import picker. This is entirely optional - the
+// timetable can always be edited by hand or visually instead.
+func (a *App) handleTimetableLolEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, timetableLolAPIBase+"/api/events", nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not reach timetable.lol: %s", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		http.Error(w, fmt.Sprintf("timetable.lol responded with %s", resp.Status), http.StatusBadGateway)
+		return
+	}
+	var payload struct {
+		Events []map[string]any `json:"events"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		http.Error(w, "could not parse timetable.lol response", http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]any{"events": payload.Events, "attribution": "Timetable data provided by timetable.lol (https://timetable.lol)"})
+}
+
+// handleTimetableLolImport fetches one event's schedule from timetable.lol
+// and replaces our local timetable with it, remembering the link for
+// display/re-sync. Existing per-stage stream URLs are preserved by matching
+// on stage name.
+func (a *App) handleTimetableLolImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		EventSlug string `json:"eventSlug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.EventSlug) == "" {
+		http.Error(w, "eventSlug is required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	apiURL := timetableLolAPIBase + "/api/events/" + url.PathEscape(req.EventSlug) + "/timetable-data"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("could not reach timetable.lol: %s", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, fmt.Sprintf("timetable.lol responded with %s: %s", resp.Status, strings.TrimSpace(string(body))), http.StatusBadGateway)
+		return
+	}
+	var payload timetableLolPlannerData
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		http.Error(w, "could not parse timetable.lol response", http.StatusBadGateway)
+		return
+	}
+
+	schedule, warnings, err := convertTimetableLolData(payload)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	cfg := a.snapshotConfig()
+	existing := map[string]StageSchedule{}
+	for _, st := range cfg.Timetable {
+		existing[strings.ToLower(st.Stage)] = st
+	}
+	for i := range schedule {
+		if old, ok := existing[strings.ToLower(schedule[i].Stage)]; ok {
+			schedule[i].URL = old.URL
+		}
+	}
+
+	link := &TimetableLink{
+		EventSlug:  req.EventSlug,
+		EventTitle: payload.Title,
+		PlanType:   payload.PlanType,
+		SourceURL:  "https://timetable.lol/" + req.EventSlug,
+		ImportedAt: time.Now(),
+	}
+
+	a.mu.Lock()
+	a.cfg.Timetable = schedule
+	a.cfg.TimetableSource = link
+	cfg2 := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg2)
+	a.event("info", fmt.Sprintf("Imported timetable for %q from timetable.lol (%d stages)", req.EventSlug, len(schedule)))
+
+	writeJSON(w, map[string]any{"timetable": schedule, "source": link, "warnings": warnings})
+}
+
+// handleTimetableLolUnlink forgets which timetable.lol event the local
+// timetable was imported from, without touching the timetable data itself.
+func (a *App) handleTimetableLolUnlink(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	a.mu.Lock()
+	a.cfg.TimetableSource = nil
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, map[string]string{"status": "unlinked"})
+}
+
+// convertTimetableLolData converts a timetable.lol PlannerData payload into
+// our StageSchedule/ScheduleSet shape. Non-timed rows (lineup-only entries
+// with no start/end) are skipped since there's nothing to schedule a
+// recording or reminder against.
+func convertTimetableLolData(payload timetableLolPlannerData) ([]StageSchedule, []string, error) {
+	if len(payload.Data) == 0 {
+		return nil, nil, errors.New("timetable.lol returned no schedule data for this event")
+	}
+	loc := time.UTC
+	if payload.TimeZone != "" {
+		if l, err := time.LoadLocation(payload.TimeZone); err == nil {
+			loc = l
+		}
+	}
+
+	byStage := map[string][]ScheduleSet{}
+	var warnings []string
+
+	dayKeys := make([]string, 0, len(payload.Data))
+	for k := range payload.Data {
+		dayKeys = append(dayKeys, k)
+	}
+	sort.Strings(dayKeys)
+
+	for _, dayKey := range dayKeys {
+		day := payload.Data[dayKey]
+		dateStr := day.Date
+		if dateStr == "" {
+			dateStr = dayKey
+		}
+		baseDate, err := parseFlexibleDate(dateStr)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("skipped day %q: could not parse date", dayKey))
+			continue
+		}
+		for stageName, sets := range day.Stages {
+			for _, set := range sets {
+				if strings.TrimSpace(set.Artist) == "" {
+					continue
+				}
+				if strings.TrimSpace(set.Start) == "" {
+					continue
+				}
+				start, ok := combineDateTime(baseDate, set.Start, loc)
+				if !ok {
+					warnings = append(warnings, fmt.Sprintf("skipped %q on %s: unparseable start time %q", set.Artist, dateStr, set.Start))
+					continue
+				}
+				end, ok := combineDateTime(baseDate, set.End, loc)
+				if !ok {
+					end = start.Add(time.Hour)
+				}
+				if end.Before(start) {
+					end = end.Add(24 * time.Hour)
+				}
+				byStage[stageName] = append(byStage[stageName], ScheduleSet{
+					ID:    set.ID,
+					Start: start.Format(time.RFC3339),
+					End:   end.Format(time.RFC3339),
+					Name:  set.Artist,
+				})
+			}
+		}
+	}
+
+	stageNames := make([]string, 0, len(byStage))
+	for k := range byStage {
+		stageNames = append(stageNames, k)
+	}
+	sort.Strings(stageNames)
+
+	out := make([]StageSchedule, 0, len(stageNames))
+	for _, name := range stageNames {
+		sets := byStage[name]
+		sort.Slice(sets, func(i, j int) bool { return sets[i].Start < sets[j].Start })
+		out = append(out, StageSchedule{Stage: name, Sets: sets})
+	}
+	assignScheduleIDs(out)
+	return out, warnings, nil
+}
+
+var timetableLolDateRe = regexp.MustCompile(`(\d{1,2})\.(\d{1,2})\.(\d{2,4})`)
+
+// parseFlexibleDate accepts a bare "YYYY-MM-DD" date, a full RFC3339
+// timestamp, or timetable.lol's actual "<Weekday> DD.MM.YY" day label (e.g.
+// "Friday 30.05.25"), since the exact shape isn't guaranteed by the API.
+func parseFlexibleDate(s string) (time.Time, error) {
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if m := timetableLolDateRe.FindStringSubmatch(s); m != nil {
+		day, _ := strconv.Atoi(m[1])
+		month, _ := strconv.Atoi(m[2])
+		year, _ := strconv.Atoi(m[3])
+		if year < 100 {
+			year += 2000
+		}
+		return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC), nil
+	}
+	return time.Time{}, fmt.Errorf("unrecognized date %q", s)
+}
+
+// combineDateTime combines a day's date with an "HH:MM" wall-clock time in
+// the event's timezone. Hours >= 24 (a common festival-timetable convention
+// for after-midnight sets) roll over into the next calendar day automatically
+// via time.Date's normalization.
+func combineDateTime(base time.Time, hm string, loc *time.Location) (time.Time, bool) {
+	hm = strings.TrimSpace(hm)
+	if hm == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, hm); err == nil {
+		return t, true
+	}
+	parts := strings.SplitN(hm, ":", 2)
+	if len(parts) != 2 {
+		return time.Time{}, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return time.Time{}, false
+	}
+	return time.Date(base.Year(), base.Month(), base.Day(), h, m, 0, 0, loc), true
 }
 
 func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
@@ -961,7 +1310,11 @@ func (a *App) state() State {
 				st.MediaPath = filepath.ToSlash(rel)
 			}
 		}
-		cur, next := scheduleFor(cfg.Timetable, src.Name, time.Now())
+		stageKey := src.Name
+		if strings.TrimSpace(src.TimetableStage) != "" {
+			stageKey = src.TimetableStage
+		}
+		cur, next := scheduleFor(cfg.Timetable, stageKey, time.Now())
 		if cur != nil {
 			st.CurrentSet = cur.Name
 			now[src.ID] = &NowItem{SetName: cur.Name, Starts: cur.Start, Ends: cur.End}
@@ -1219,6 +1572,22 @@ func normalizeConfig(cfg *AppConfig) {
 			cfg.Sources[i].Container = cfg.Settings.DefaultContainer
 		}
 	}
+	if cfg.Settings.ReminderLeadMinutes == 0 {
+		cfg.Settings.ReminderLeadMinutes = 15
+	}
+	assignScheduleIDs(cfg.Timetable)
+}
+
+// assignScheduleIDs gives every set a stable ID (used for favoriting/reminders)
+// if it doesn't already have one, e.g. from hand-edited JSON.
+func assignScheduleIDs(tt []StageSchedule) {
+	for i := range tt {
+		for j := range tt[i].Sets {
+			if tt[i].Sets[j].ID == "" {
+				tt[i].Sets[j].ID = newID()
+			}
+		}
+	}
 }
 
 type rawStage struct {
@@ -1314,6 +1683,60 @@ func scheduleFor(tt []StageSchedule, stage string, now time.Time) (*ScheduleSet,
 		return nil, next
 	}
 	return nil, nil
+}
+
+// findSetByID looks up a single scheduled set by its stable ID across every
+// stage, returning the owning stage name alongside it.
+func findSetByID(tt []StageSchedule, id string) (string, *ScheduleSet) {
+	for _, st := range tt {
+		for i := range st.Sets {
+			if st.Sets[i].ID == id {
+				return st.Stage, &st.Sets[i]
+			}
+		}
+	}
+	return "", nil
+}
+
+// checkReminders sends a notification (Discord/SMTP, whatever is configured)
+// for each favorited set that is about to start, once per set occurrence.
+// Reminders are best-effort and only tracked in memory, so a restart shortly
+// before a set starts may re-send one - an acceptable tradeoff for simplicity.
+func (a *App) checkReminders(cfg AppConfig) {
+	if len(cfg.Settings.FavoriteSetIDs) == 0 {
+		return
+	}
+	lead := time.Duration(cfg.Settings.ReminderLeadMinutes) * time.Minute
+	if lead <= 0 {
+		lead = 15 * time.Minute
+	}
+	now := time.Now()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, sentAt := range a.remindersSent {
+		if now.Sub(sentAt) > 24*time.Hour {
+			delete(a.remindersSent, id)
+		}
+	}
+	for _, id := range cfg.Settings.FavoriteSetIDs {
+		if _, already := a.remindersSent[id]; already {
+			continue
+		}
+		stage, set := findSetByID(cfg.Timetable, id)
+		if set == nil {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339, set.Start)
+		if err != nil {
+			continue
+		}
+		if now.Before(start.Add(-lead)) || now.After(start) {
+			continue
+		}
+		a.remindersSent[id] = now
+		go a.notify(fmt.Sprintf("Starting soon: %s", set.Name), fmt.Sprintf("%s starts on %s at %s", set.Name, stage, start.Format(time.RFC1123)))
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -11,7 +11,10 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Raw HTTP/HLS/DASH recording directly with FFmpeg.
 - One finished subdirectory per source/stage.
 - Separate temporary, finished, and log directories.
-- Editable DEFQON.1 timetable from the WebUI.
+- Visual timetable editor (day tabs, click-to-edit/add sets), with raw JSON editing still available.
+- Optional timetable lookup/import from [timetable.lol](https://timetable.lol) for hundreds of festivals, or build your own by hand - entirely optional either way.
+- Per-source "timetable stage" linking, for when a recording source's name doesn't match its stage name in the timetable.
+- Star any timetable set to get a Discord/SMTP reminder a configurable number of minutes before it starts.
 - Optional FFmpeg transcoding with hardware acceleration presets for CUDA/NVENC, Quick Sync, and VAAPI.
 - Optional `.nfo` files beside completed recordings.
 - Disk free-space guard that pauses recording below 1 GB free and warns earlier.
@@ -117,7 +120,10 @@ data/logs/
 
 ## Timetable
 
-The timetable is editable in the WebUI as JSON. Entries use RFC3339 timestamps:
+The Timetable tab has a visual editor: pick a day, click a set to edit or
+delete it, or click "+ Set" on a stage row to add a new one. Raw JSON editing
+is still available behind "Show raw JSON" for bulk edits or scripting. Entries
+use RFC3339 timestamps:
 
 ```json
 [
@@ -126,6 +132,7 @@ The timetable is editable in the WebUI as JSON. Entries use RFC3339 timestamps:
     "url": "https://www.youtube.com/@qdance/live",
     "sets": [
       {
+        "id": "opt-stable-id",
         "start": "2026-06-26T13:00:00+02:00",
         "end": "2026-06-26T14:00:00+02:00",
         "name": "Opening Ceremony"
@@ -134,6 +141,32 @@ The timetable is editable in the WebUI as JSON. Entries use RFC3339 timestamps:
   }
 ]
 ```
+
+`id` is optional on manual entries - one is assigned automatically on save if
+missing, and it's what favoriting/reminders key off internally.
+
+### Importing from timetable.lol (optional)
+
+The Timetable tab can look up a festival on
+[timetable.lol](https://timetable.lol) and import its schedule instead of
+building one by hand. This is entirely optional - your own hand-built or
+JSON-edited timetable works exactly the same either way, and importing is
+just a shortcut. Timetable data is provided by timetable.lol; importing
+replaces the current timetable and remembers which event it came from so you
+can re-sync or unlink later from the same panel. Existing per-stage stream
+URLs are preserved by matching on stage name across a re-sync.
+
+If a recording source's name doesn't match the stage name from an imported
+(or hand-built) timetable, set "Timetable stage" on that source in the
+Source Manager to point it at the right stage for Now/Next lookups.
+
+### Reminders
+
+Star any set in the visual timetable to get a reminder before it starts, sent
+through whichever of Discord webhook/SMTP is configured in Settings. The lead
+time (default 15 minutes) is configurable under Settings → Notifications.
+Reminders are tracked in memory only, so a restart shortly before a starred
+set starts may re-send its reminder once.
 
 ## Live Rewind
 

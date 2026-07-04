@@ -1,0 +1,7883 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Timetable.lol API",
+    "version": "0.2.0",
+    "summary": "Accounts, saved plans, room collaboration, feedback, events, and festival reminder push APIs.",
+    "description": "Timetable.lol API for the festival planner. The timetable reminder flow is designed for festival grounds where mobile reception can be weak or intermittent: Web Push reminders are best-effort, clients should keep local browser reminder fallback while the page/PWA is active, cache room state, queue local room selection changes where possible, and resync when connectivity returns."
+  },
+  "servers": [
+    {
+      "url": "https://api.timetable.lol",
+      "description": "Production API"
+    },
+    {
+      "url": "https://api.bluecrazii.nl",
+      "description": "BlueCrazii API alias"
+    },
+    {
+      "url": "https://api.festival-timetable.party",
+      "description": "Festival Timetable API alias"
+    },
+    {
+      "url": "http://localhost:3000",
+      "description": "Local API"
+    }
+  ],
+  "x-festival-ground-notes": {
+    "connectivity": "Expect weak or intermittent mobile data on festival grounds.",
+    "reminders": "Web Push delivery depends on device, browser, push service, and network quality. Clients should keep local timers while the timetable page/PWA is open and call /api/reminders/schedule again after selection or connectivity changes.",
+    "rooms": "Room state should be treated as eventually consistent. Clients should cache the last known state, persist the room clientToken, and retry queued selection changes after reconnecting."
+  },
+  "tags": [
+    {
+      "name": "Health"
+    },
+    {
+      "name": "Auth"
+    },
+    {
+      "name": "Account"
+    },
+    {
+      "name": "Events"
+    },
+    {
+      "name": "Artists"
+    },
+    {
+      "name": "Livestreams"
+    },
+    {
+      "name": "Plans"
+    },
+    {
+      "name": "Snapshots"
+    },
+    {
+      "name": "Rooms"
+    },
+    {
+      "name": "Reminders"
+    },
+    {
+      "name": "Telemetry"
+    },
+    {
+      "name": "Admin"
+    }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Check admin-only API, database, and SMTP readiness.",
+        "description": "Requires an authenticated admin session. Returns API, database, and SMTP readiness for operations checks.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/HealthResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/signup": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Create an account and start a session.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Signup"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Log in and start a session.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Login"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Log out and clear the session cookie.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          }
+        }
+      }
+    },
+    "/api/auth/forgot-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Request a password reset email.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ForgotPassword"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithMessage"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/reset-password": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Reset a password with a reset token.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ResetPassword"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Get the current session user, or null when logged out.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/NullableUserResponse"
+          }
+        }
+      }
+    },
+    "/api/account/me": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Get the current account profile.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account/export": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Export the current account data.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AccountExportResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account/profile": {
+      "patch": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Update the current account profile.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ProfilePatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account/rooms": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "List rooms connected to the current account.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomsResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account/rooms/{roomCode}": {
+      "delete": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Leave a room from the account profile.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LeaveRoomResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account/rooms/{roomCode}/delete": {
+      "delete": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Delete a room owned by the current account.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithMessage"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/account": {
+      "delete": {
+        "tags": [
+          "Account"
+        ],
+        "summary": "Delete the current account.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/DeleteAccount"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithMessage"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "tags": [
+          "Events"
+        ],
+        "summary": "Get public event configuration.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EventsConfigResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/events/{eventSlug}/planner-data": {
+      "get": {
+        "tags": [
+          "Events"
+        ],
+        "summary": "Get planner timetable or lineup data for an event.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlannerDataResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/events/{eventSlug}/timetable-data": {
+      "get": {
+        "tags": [
+          "Events"
+        ],
+        "summary": "Get timetable data for an event.",
+        "description": "Alias of /api/events/{eventSlug}/planner-data for timetable pages.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlannerDataResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/mixlr/listeners": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Get cached Mixlr listener counts for public livestream counters.",
+        "description": "Returns listener counts through the Timetable.lol API cache so browser clients do not call the Mixlr API directly. Counts are cached server-side and the endpoint is rate limited.",
+        "parameters": [
+          {
+            "name": "channels",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated Mixlr channel slugs, with or without the .mixlr.com suffix.",
+            "schema": {
+              "type": "string",
+              "example": "defqon1blue,defqon1black"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached listener counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "updatedAt",
+                    "cacheTtlSeconds",
+                    "maxChannels",
+                    "totalListeners",
+                    "channels"
+                  ],
+                  "properties": {
+                    "updatedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "cacheTtlSeconds": {
+                      "type": "integer",
+                      "example": 600
+                    },
+                    "maxChannels": {
+                      "type": "integer",
+                      "example": 16
+                    },
+                    "totalListeners": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ],
+                      "example": 1234
+                    },
+                    "channels": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MixlrListenerResult"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans": {
+      "get": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "List saved plans for the current account.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlugQuery"
+          },
+          {
+            "$ref": "#/components/parameters/PlanTypeQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlansResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Create a saved plan.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PlanWrite"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/current": {
+      "get": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Get the current saved plan for an event and plan type.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlugQueryRequired"
+          },
+          {
+            "$ref": "#/components/parameters/PlanTypeQueryRequired"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/upsert": {
+      "post": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Create or update the current plan for an event and plan type.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PlanWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/share": {
+      "post": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Create a share link from plan data.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SharePlan"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ShareResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/shared": {
+      "get": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Read a shared plan by token query parameter.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ShareTokenQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/{planId}": {
+      "get": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Get a saved plan by id.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlanId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Update a saved plan by id.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlanId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PlanWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Delete a saved plan by id.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlanId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/plans/{planId}/share": {
+      "post": {
+        "tags": [
+          "Plans"
+        ],
+        "summary": "Create or refresh a share link for a saved plan.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PlanId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ShareResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/snapshots": {
+      "post": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Create an anonymous plan snapshot.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SnapshotCreate"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/SnapshotResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/snapshots/{snapshotId}": {
+      "get": {
+        "tags": [
+          "Snapshots"
+        ],
+        "summary": "Get an anonymous plan snapshot.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SnapshotId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SnapshotResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms": {
+      "get": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "List rooms for the current account.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomsResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Create a live friend room.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/CreateRoom"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JoinRoomResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}": {
+      "get": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Get public room metadata.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomInfoResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Update room settings. Host only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/UpdateRoom"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Delete a room. Host only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/DeleteRoomResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/join": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Join or rejoin a live friend room.",
+        "description": "Persist clientToken locally so a user can rejoin the same room member after reloads, app restarts, or weak festival-ground connectivity.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JoinRoom"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/JoinRoomResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/state": {
+      "get": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Get current room state.",
+        "description": "Use X-Client-Token to identify the local member. Clients should cache this response for poor reception and retry state fetches after reconnecting.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/XClientToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateWithMe"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/members/me": {
+      "patch": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Update the current room member profile.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/UpdateRoomMember"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomMemberUpdateResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/members/{memberId}": {
+      "delete": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Remove a member from a room. Host only.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/MemberId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/group-plans": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Add a custom group plan item.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/GroupPlanWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/group-plans/{groupPlanId}": {
+      "patch": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Update a custom group plan item.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/GroupPlanId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/GroupPlanWrite"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Delete a custom group plan item.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/GroupPlanId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/group-plans/{groupPlanId}/join": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Join a custom group plan item.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/GroupPlanId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Leave a custom group plan item.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/GroupPlanId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/import-current-plan": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Import the current user's saved profile picks into a room.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ImportCurrentPlan"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ImportCurrentPlanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/selections": {
+      "put": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Replace the current member's room selections.",
+        "description": "For poor connectivity, clients may queue local selection changes and send this compact resync endpoint when the network returns.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ReplaceSelections"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomMemberStateResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/selections/add": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Add one selection for the current room member.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SelectionChange"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/selections/remove": {
+      "post": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Remove one selection for the current room member.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SelectionChange"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/{roomCode}/selections/{setId}": {
+      "put": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Add one selection by path setId.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/SetId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Remove one selection by path setId.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RoomCode"
+          },
+          {
+            "$ref": "#/components/parameters/SetId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ClientToken"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/RoomStateOk"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/rooms/meta/member-colors/{eventSlug}": {
+      "get": {
+        "tags": [
+          "Rooms"
+        ],
+        "summary": "Get blocked stage colors for member color picking.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MemberColorsResponse"
+          }
+        }
+      }
+    },
+    "/api/reminders/vapid-public-key": {
+      "get": {
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "Get the VAPID public key for Web Push reminders.",
+        "description": "When enabled is false, clients should use local browser reminder timers only.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/VapidPublicKeyResponse"
+          }
+        }
+      }
+    },
+    "/api/reminders/subscriptions": {
+      "post": {
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "Save or refresh a Web Push subscription.",
+        "description": "The subscription may be linked to the logged-in account when a valid session cookie is present.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PushSubscription"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PushSubscriptionResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "Disable a Web Push subscription and cancel pending reminders.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/PushEndpointQuery"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/DeletePushSubscription"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Ok"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/reminders/schedule": {
+      "post": {
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "Schedule server-side Web Push reminders for a device subscription.",
+        "description": "Replaces pending reminders for the same subscription and event. On festival grounds, clients should call this after each selection change when online and keep local timers as fallback because push delivery can be delayed by weak reception.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SchedulePushReminders"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SchedulePushRemindersResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/telemetry/export": {
+      "post": {
+        "tags": [
+          "Telemetry"
+        ],
+        "summary": "Track a planner export event.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ExportTelemetry"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/TelemetryResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/telemetry/feedback": {
+      "post": {
+        "tags": [
+          "Telemetry"
+        ],
+        "summary": "Submit timetable or site feedback.",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/FeedbackCreate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/FeedbackCreateResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/me": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get the current admin user.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UserResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/stats": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get admin dashboard stats.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/AdminStatsResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/smtp-test": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Send a test SMTP email.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SmtpTest"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/OkWithMessage"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/events": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get editable event configuration.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EventsConfigResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Replace event configuration.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminEventsUpdate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/EventsConfigResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/planner-data/{eventSlug}": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get editable planner data for an event.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlannerDataResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Create or replace API-managed planner data for an event.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/PlannerDataUpdate"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/PlannerDataResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/feedback": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List feedback reports.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/FeedbackStatusQuery"
+          },
+          {
+            "$ref": "#/components/parameters/FeedbackLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/FeedbackListResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/feedback/{feedbackId}": {
+      "patch": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Update feedback status.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/FeedbackId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/FeedbackStatusPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/FeedbackUpdateResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/artists": {
+      "get": {
+        "tags": [
+          "Artists"
+        ],
+        "summary": "List artists with optional booking counts.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SearchQuery"
+          },
+          {
+            "$ref": "#/components/parameters/SearchAliasQuery"
+          },
+          {
+            "$ref": "#/components/parameters/ArtistLimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/OffsetQuery"
+          },
+          {
+            "$ref": "#/components/parameters/IncludeEmptyQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistsResponse"
+          }
+        }
+      }
+    },
+    "/api/artists/search": {
+      "get": {
+        "tags": [
+          "Artists"
+        ],
+        "summary": "Search artists for picker/autocomplete UI.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SearchQuery"
+          },
+          {
+            "$ref": "#/components/parameters/ArtistSearchLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistSearchResponse"
+          }
+        }
+      }
+    },
+    "/api/artists/{slugOrId}": {
+      "get": {
+        "tags": [
+          "Artists"
+        ],
+        "summary": "Get one artist by slug or id.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ArtistSlugOrId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistResponse"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/artists/{slugOrId}/bookings": {
+      "get": {
+        "tags": [
+          "Artists"
+        ],
+        "summary": "Get timetable bookings for one artist.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ArtistSlugOrId"
+          },
+          {
+            "$ref": "#/components/parameters/ArtistBookingWhenQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistBookingsResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/moderator/me": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Check whether the current user is a livestream chat moderator.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatModeratorStatusResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/LivestreamChatModeratorStatusResponse"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/stats": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Get livestream chat moderation stats for an event.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/LivestreamStreamIdsQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatStatsResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/{streamId}/settings": {
+      "put": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Update moderator-controlled livestream chat stream settings.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatStreamSettingsPatch"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatStreamSettingsResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/{streamId}/messages": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Get visible livestream chat messages for a stream.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          },
+          {
+            "$ref": "#/components/parameters/LivestreamMessageLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatMessagesResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Create a livestream chat message.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatMessageCreate"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/LivestreamChatMessageResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Clear visible livestream chat messages for a stream.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatClearResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/{streamId}/messages/{messageId}": {
+      "delete": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Delete one livestream chat message.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          },
+          {
+            "$ref": "#/components/parameters/ChatMessageId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatDeleteMessageResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/{streamId}/mutes": {
+      "post": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Mute one user in a livestream chat stream.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatModerateUser"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatMuteResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/{streamId}/unmutes": {
+      "post": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Clear active stream mutes for one user.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          },
+          {
+            "$ref": "#/components/parameters/StreamId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatModerateUser"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatUnmuteResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/link-permissions": {
+      "post": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Approve livestream chat links for one user.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatModerateUser"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatLinkPermissionResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/chat/{eventSlug}/bans": {
+      "post": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Ban one user from all livestream chats for an event.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlug"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/LivestreamChatModerateUser"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatBanResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/mixlr/history": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Get stored Mixlr and YouTube listener history.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlugQuery"
+          },
+          {
+            "$ref": "#/components/parameters/MixlrHistoryLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/MixlrListenerHistoryResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/livestreams/youtube/viewers": {
+      "get": {
+        "tags": [
+          "Livestreams"
+        ],
+        "summary": "Get cached YouTube livestream viewer count.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/YoutubeVideoIdQuery"
+          },
+          {
+            "$ref": "#/components/parameters/YoutubeUrlQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/YoutubeViewerResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/artists/import-sql": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Import artists from SQL INSERT statements.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/AdminArtistSqlImport"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistImportResultResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/status": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get Spotify API configuration status.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SpotifyStatusResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/sync/status": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get Spotify sync scheduler status and recent runs.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SpotifySyncStatusResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/sync/run": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Run Spotify artist sync immediately.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SpotifySyncRunResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/artists/search": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Search Spotify artists through the server credentials.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SearchQuery"
+          },
+          {
+            "$ref": "#/components/parameters/SpotifyLimitQuery"
+          },
+          {
+            "$ref": "#/components/parameters/SpotifyMarketQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SpotifyArtistSearchResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/artists/import": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Import one or more Spotify artists into the local artist catalog.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SpotifyArtistImport"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistImportResultResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/spotify/artists/refresh": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Refresh Spotify profile data for local artists.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/SpotifyArtistRefresh"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ArtistImportResultResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/acts/unmapped": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List timetable acts without mapped artists.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AdminLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/UnmappedActsResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/acts/{actId}/suggestions": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Get artist mapping suggestions for an act.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ActId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ActSuggestionsResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/acts/{actId}/artists": {
+      "put": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Save artist mappings for an act.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ActId"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/ActArtistMapping"
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/ActArtistMappingResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/livestream-chat/mutes": {
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "List livestream chat mutes and bans.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventSlugQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LivestreamMuteStatusQuery"
+          },
+          {
+            "$ref": "#/components/parameters/LivestreamMuteTypeQuery"
+          },
+          {
+            "$ref": "#/components/parameters/SearchQuery"
+          },
+          {
+            "$ref": "#/components/parameters/AdminLimitQuery"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatMutesResponse"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/api/admin/livestream-chat/mutes/{muteId}/clear": {
+      "post": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Expire an active livestream chat mute or ban.",
+        "security": [
+          {
+            "cookieAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/LivestreamMuteId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/LivestreamChatMuteClearResponse"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "bc_session"
+      },
+      "clientTokenHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Client-Token"
+      }
+    },
+    "parameters": {
+      "RoomCode": {
+        "name": "roomCode",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 12
+        }
+      },
+      "PlanId": {
+        "name": "planId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SnapshotId": {
+        "name": "snapshotId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "ShareTokenQuery": {
+        "name": "token",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "MemberId": {
+        "name": "memberId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "GroupPlanId": {
+        "name": "groupPlanId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "SetId": {
+        "name": "setId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "EventSlug": {
+        "name": "eventSlug",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "EventSlugQuery": {
+        "name": "eventSlug",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "EventSlugQueryRequired": {
+        "name": "eventSlug",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PlanTypeQuery": {
+        "name": "planType",
+        "in": "query",
+        "schema": {
+          "$ref": "#/components/schemas/PlanType"
+        }
+      },
+      "PlanTypeQueryRequired": {
+        "name": "planType",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/PlanType"
+        }
+      },
+      "XClientToken": {
+        "name": "X-Client-Token",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "PushEndpointQuery": {
+        "name": "endpoint",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string",
+          "format": "uri"
+        }
+      },
+      "FeedbackId": {
+        "name": "feedbackId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "FeedbackStatusQuery": {
+        "name": "status",
+        "in": "query",
+        "schema": {
+          "$ref": "#/components/schemas/FeedbackStatus"
+        }
+      },
+      "FeedbackLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        }
+      },
+      "ArtistSlugOrId": {
+        "name": "slugOrId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SearchQuery": {
+        "name": "q",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SearchAliasQuery": {
+        "name": "search",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Alias for q."
+      },
+      "ArtistLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "default": 120
+        }
+      },
+      "ArtistSearchLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 12
+        }
+      },
+      "OffsetQuery": {
+        "name": "offset",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "IncludeEmptyQuery": {
+        "name": "includeEmpty",
+        "in": "query",
+        "schema": {
+          "type": "boolean",
+          "default": true
+        },
+        "description": "When false, only artists with timetable bookings are returned."
+      },
+      "ArtistBookingWhenQuery": {
+        "name": "when",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "upcoming",
+            "past",
+            "all"
+          ],
+          "default": "all"
+        }
+      },
+      "StreamId": {
+        "name": "streamId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 180
+        }
+      },
+      "ChatMessageId": {
+        "name": "messageId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "LivestreamStreamIdsQuery": {
+        "name": "streamIds",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Comma-separated livestream stream ids."
+      },
+      "LivestreamMessageLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 100
+        }
+      },
+      "MixlrHistoryLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000,
+          "default": 5000
+        }
+      },
+      "YoutubeVideoIdQuery": {
+        "name": "videoId",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "YoutubeUrlQuery": {
+        "name": "url",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "uri"
+        },
+        "description": "Alternative to videoId. The API extracts the YouTube video id from the URL."
+      },
+      "SpotifyLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 10
+        }
+      },
+      "SpotifyMarketQuery": {
+        "name": "market",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "description": "Optional ISO 3166-1 alpha-2 market code for Spotify search."
+      },
+      "ActId": {
+        "name": "actId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "LivestreamMuteId": {
+        "name": "muteId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "LivestreamMuteStatusQuery": {
+        "name": "status",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "active",
+            "expired",
+            "all"
+          ],
+          "default": "active"
+        }
+      },
+      "LivestreamMuteTypeQuery": {
+        "name": "type",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "all",
+            "mutes",
+            "bans"
+          ],
+          "default": "all"
+        }
+      },
+      "AdminLimitQuery": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 200
+        }
+      }
+    },
+    "requestBodies": {
+      "Signup": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SignupRequest"
+            }
+          }
+        }
+      },
+      "Login": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LoginRequest"
+            }
+          }
+        }
+      },
+      "ForgotPassword": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ForgotPasswordRequest"
+            }
+          }
+        }
+      },
+      "ResetPassword": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ResetPasswordRequest"
+            }
+          }
+        }
+      },
+      "ProfilePatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ProfilePatchRequest"
+            }
+          }
+        }
+      },
+      "DeleteAccount": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteAccountRequest"
+            }
+          }
+        }
+      },
+      "PlanWrite": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PlanWriteRequest"
+            }
+          }
+        }
+      },
+      "SharePlan": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SharePlanRequest"
+            }
+          }
+        }
+      },
+      "SnapshotCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotCreateRequest"
+            }
+          }
+        }
+      },
+      "CreateRoom": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/CreateRoomRequest"
+            }
+          }
+        }
+      },
+      "JoinRoom": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/JoinRoomRequest"
+            }
+          }
+        }
+      },
+      "UpdateRoom": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/UpdateRoomRequest"
+            }
+          }
+        }
+      },
+      "UpdateRoomMember": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/UpdateRoomMemberRequest"
+            }
+          }
+        }
+      },
+      "GroupPlanWrite": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/GroupPlanWriteRequest"
+            }
+          }
+        }
+      },
+      "ImportCurrentPlan": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ImportCurrentPlanRequest"
+            }
+          }
+        }
+      },
+      "ReplaceSelections": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ReplaceSelectionsRequest"
+            }
+          }
+        }
+      },
+      "SelectionChange": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SelectionChangeRequest"
+            }
+          }
+        }
+      },
+      "ClientToken": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ClientTokenRequest"
+            }
+          }
+        }
+      },
+      "PushSubscription": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PushSubscriptionRequest"
+            }
+          }
+        }
+      },
+      "DeletePushSubscription": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeletePushSubscriptionRequest"
+            }
+          }
+        }
+      },
+      "SchedulePushReminders": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SchedulePushRemindersRequest"
+            }
+          }
+        }
+      },
+      "ExportTelemetry": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ExportTelemetryRequest"
+            }
+          }
+        }
+      },
+      "FeedbackCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackCreateRequest"
+            }
+          }
+        }
+      },
+      "SmtpTest": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SmtpTestRequest"
+            }
+          }
+        }
+      },
+      "AdminEventsUpdate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminEventsUpdateRequest"
+            }
+          }
+        }
+      },
+      "FeedbackStatusPatch": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackStatusPatchRequest"
+            }
+          }
+        }
+      },
+      "PlannerDataUpdate": {
+        "description": "Full planner data payload. eventSlug in the path is authoritative.",
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PlannerDataPayload"
+            }
+          }
+        }
+      },
+      "AdminArtistSqlImport": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminArtistSqlImportRequest"
+            }
+          }
+        }
+      },
+      "SpotifyArtistImport": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifyArtistImportRequest"
+            }
+          }
+        }
+      },
+      "SpotifyArtistRefresh": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifyArtistRefreshRequest"
+            }
+          }
+        }
+      },
+      "ActArtistMapping": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ActArtistMappingRequest"
+            }
+          }
+        }
+      },
+      "LivestreamChatMessageCreate": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMessageCreateRequest"
+            }
+          }
+        }
+      },
+      "LivestreamChatStreamSettingsPatch": {
+        "required": false,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatStreamSettingsPatchRequest"
+            }
+          }
+        }
+      },
+      "LivestreamChatModerateUser": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatModerateUserRequest"
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Ok": {
+        "description": "Successful operation.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OkResponse"
+            }
+          }
+        }
+      },
+      "OkWithMessage": {
+        "description": "Successful operation with a message.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/OkWithMessageResponse"
+            }
+          }
+        }
+      },
+      "UserResponse": {
+        "description": "User response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/UserResponse"
+            }
+          }
+        }
+      },
+      "NullableUserResponse": {
+        "description": "Current user response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/NullableUserResponse"
+            }
+          }
+        }
+      },
+      "AccountExportResponse": {
+        "description": "Account export response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AccountExport"
+            }
+          }
+        }
+      },
+      "EventsConfigResponse": {
+        "description": "Event configuration response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/EventsConfigResponse"
+            }
+          }
+        }
+      },
+      "PlansResponse": {
+        "description": "Plans response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PlansResponse"
+            }
+          }
+        }
+      },
+      "PlanResponse": {
+        "description": "Plan response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PlanResponse"
+            }
+          }
+        }
+      },
+      "ShareResponse": {
+        "description": "Plan share response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ShareResponse"
+            }
+          }
+        }
+      },
+      "SnapshotResponse": {
+        "description": "Snapshot response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SnapshotResponse"
+            }
+          }
+        }
+      },
+      "RoomsResponse": {
+        "description": "Rooms response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomsResponse"
+            }
+          }
+        }
+      },
+      "LeaveRoomResponse": {
+        "description": "Room leave response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LeaveRoomResponse"
+            }
+          }
+        }
+      },
+      "RoomInfoResponse": {
+        "description": "Room metadata response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomInfoResponse"
+            }
+          }
+        }
+      },
+      "JoinRoomResponse": {
+        "description": "Join room response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/JoinRoomResponse"
+            }
+          }
+        }
+      },
+      "RoomStateWithMe": {
+        "description": "Room state and current member response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomStateWithMeResponse"
+            }
+          }
+        }
+      },
+      "RoomStateOk": {
+        "description": "Room state response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomStateOkResponse"
+            }
+          }
+        }
+      },
+      "RoomMemberUpdateResponse": {
+        "description": "Room member update response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomMemberUpdateResponse"
+            }
+          }
+        }
+      },
+      "RoomMemberStateResponse": {
+        "description": "Room member and state response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/RoomMemberStateResponse"
+            }
+          }
+        }
+      },
+      "DeleteRoomResponse": {
+        "description": "Room deletion response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/DeleteRoomResponse"
+            }
+          }
+        }
+      },
+      "ImportCurrentPlanResponse": {
+        "description": "Import current plan response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ImportCurrentPlanResponse"
+            }
+          }
+        }
+      },
+      "MemberColorsResponse": {
+        "description": "Member color metadata response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MemberColorsResponse"
+            }
+          }
+        }
+      },
+      "VapidPublicKeyResponse": {
+        "description": "VAPID public key response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/VapidPublicKeyResponse"
+            }
+          }
+        }
+      },
+      "PushSubscriptionResponse": {
+        "description": "Push subscription response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PushSubscriptionResponse"
+            }
+          }
+        }
+      },
+      "SchedulePushRemindersResponse": {
+        "description": "Push reminder schedule response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SchedulePushRemindersResponse"
+            }
+          }
+        }
+      },
+      "TelemetryResponse": {
+        "description": "Telemetry response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/TelemetryResponse"
+            }
+          }
+        }
+      },
+      "FeedbackCreateResponse": {
+        "description": "Feedback create response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackCreateResponse"
+            }
+          }
+        }
+      },
+      "FeedbackListResponse": {
+        "description": "Feedback list response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackListResponse"
+            }
+          }
+        }
+      },
+      "FeedbackUpdateResponse": {
+        "description": "Feedback update response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FeedbackUpdateResponse"
+            }
+          }
+        }
+      },
+      "AdminStatsResponse": {
+        "description": "Admin stats response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/AdminStatsResponse"
+            }
+          }
+        }
+      },
+      "HealthResponse": {
+        "description": "Health response.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/HealthResponse"
+            }
+          }
+        }
+      },
+      "PlannerDataResponse": {
+        "description": "Planner timetable or lineup data.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/PlannerDataResponse"
+            }
+          }
+        }
+      },
+      "ArtistsResponse": {
+        "description": "Artists.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArtistsResponse"
+            }
+          }
+        }
+      },
+      "ArtistSearchResponse": {
+        "description": "Artist search results.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArtistSearchResponse"
+            }
+          }
+        }
+      },
+      "ArtistResponse": {
+        "description": "Artist.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArtistResponse"
+            }
+          }
+        }
+      },
+      "ArtistBookingsResponse": {
+        "description": "Artist bookings.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArtistBookingsResponse"
+            }
+          }
+        }
+      },
+      "ArtistImportResultResponse": {
+        "description": "Artist import result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ArtistImportResultResponse"
+            }
+          }
+        }
+      },
+      "SpotifyStatusResponse": {
+        "description": "Spotify API status.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifyStatusResponse"
+            }
+          }
+        }
+      },
+      "SpotifySyncStatusResponse": {
+        "description": "Spotify sync status.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifySyncStatusResponse"
+            }
+          }
+        }
+      },
+      "SpotifySyncRunResponse": {
+        "description": "Spotify sync run result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifySyncRunResponse"
+            }
+          }
+        }
+      },
+      "SpotifyArtistSearchResponse": {
+        "description": "Spotify artist search results.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SpotifyArtistSearchResponse"
+            }
+          }
+        }
+      },
+      "UnmappedActsResponse": {
+        "description": "Unmapped timetable acts.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/UnmappedActsResponse"
+            }
+          }
+        }
+      },
+      "ActSuggestionsResponse": {
+        "description": "Act artist suggestions.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ActSuggestionsResponse"
+            }
+          }
+        }
+      },
+      "ActArtistMappingResponse": {
+        "description": "Updated act artist mapping.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ActArtistMappingResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatModeratorStatusResponse": {
+        "description": "Livestream chat moderator status.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatModeratorStatusResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatStatsResponse": {
+        "description": "Livestream chat stats.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatStatsResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatStreamSettingsResponse": {
+        "description": "Livestream chat stream settings.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatStreamSettingsResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatMessagesResponse": {
+        "description": "Livestream chat messages.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMessagesResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatMessageResponse": {
+        "description": "Livestream chat message.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMessageResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatClearResponse": {
+        "description": "Livestream chat clear result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatClearResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatDeleteMessageResponse": {
+        "description": "Livestream chat delete result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatDeleteMessageResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatMuteResponse": {
+        "description": "Livestream chat mute result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMuteResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatUnmuteResponse": {
+        "description": "Livestream chat unmute result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatUnmuteResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatLinkPermissionResponse": {
+        "description": "Livestream chat link permission.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatLinkPermissionResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatBanResponse": {
+        "description": "Livestream chat ban result.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatBanResponse"
+            }
+          }
+        }
+      },
+      "MixlrListenerHistoryResponse": {
+        "description": "Mixlr and YouTube listener history.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/MixlrListenerHistoryResponse"
+            }
+          }
+        }
+      },
+      "YoutubeViewerResponse": {
+        "description": "YouTube livestream viewer count.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/YoutubeViewerResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatMutesResponse": {
+        "description": "Livestream chat mutes and bans.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMutesResponse"
+            }
+          }
+        }
+      },
+      "LivestreamChatMuteClearResponse": {
+        "description": "Cleared livestream chat mute or ban.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/LivestreamChatMuteClearResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "OkResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "OkWithMessageResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "PlanType": {
+        "type": "string",
+        "enum": [
+          "lineup",
+          "timetable"
+        ]
+      },
+      "Visibility": {
+        "type": "string",
+        "enum": [
+          "public",
+          "invite_only"
+        ]
+      },
+      "Color": {
+        "type": "string",
+        "pattern": "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "preferredColor": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "preferred_color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "role": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": true
+      },
+      "UserResponse": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "user"
+        ]
+      },
+      "NullableUserResponse": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/User"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "user"
+        ]
+      },
+      "SignupRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "preferredColor": {
+            "$ref": "#/components/schemas/Color"
+          }
+        },
+        "required": [
+          "email",
+          "password",
+          "displayName"
+        ]
+      },
+      "LoginRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ]
+      },
+      "ForgotPasswordRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 8
+          }
+        },
+        "required": [
+          "token",
+          "password"
+        ]
+      },
+      "ProfilePatchRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "displayName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "preferredColor": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "currentPassword": {
+            "type": "string"
+          },
+          "newPassword": {
+            "type": "string",
+            "minLength": 8
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeleteAccountRequest": {
+        "type": "object",
+        "properties": {
+          "currentPassword": {
+            "type": "string"
+          },
+          "confirmText": {
+            "type": "string",
+            "const": "DELETE MY ACCOUNT"
+          }
+        },
+        "required": [
+          "currentPassword",
+          "confirmText"
+        ]
+      },
+      "AccountExport": {
+        "type": "object",
+        "properties": {
+          "exportedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Plan"
+            }
+          },
+          "rooms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomSummary"
+            }
+          },
+          "snapshots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Snapshot"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "SiteEvent": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "subtitle": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "live",
+              "coming-soon",
+              "draft"
+            ]
+          },
+          "buttonText": {
+            "type": "string"
+          },
+          "theme": {
+            "type": "string"
+          },
+          "meta": {
+            "type": "string"
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "year": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "timetable",
+              "lineup"
+            ]
+          },
+          "editionKey": {
+            "type": "string"
+          },
+          "dateLabel": {
+            "type": "string"
+          },
+          "startDate": {
+            "type": "string"
+          },
+          "endDate": {
+            "type": "string"
+          },
+          "sortDate": {
+            "type": "string"
+          },
+          "changelogLabel": {
+            "type": "string"
+          },
+          "ticketUrl": {
+            "type": "string",
+            "description": "Primary ticket or website URL shown on event cards."
+          },
+          "ticketLabel": {
+            "type": "string",
+            "description": "Label for ticketUrl. Clients default to Tickets when omitted."
+          },
+          "ticketStatus": {
+            "type": "string",
+            "enum": [
+              "available",
+              "sold_out",
+              "closed",
+              "hidden"
+            ],
+            "description": "Controls the primary ticket button. sold_out renders a disabled Sold out button; closed renders a disabled Closed button; hidden suppresses it."
+          },
+          "resaleTicketUrl": {
+            "type": "string",
+            "description": "Optional resale URL shown on event cards."
+          },
+          "resaleTicketLabel": {
+            "type": "string",
+            "description": "Label for resaleTicketUrl. Clients default to Resale when omitted."
+          },
+          "resaleTicketStatus": {
+            "type": "string",
+            "enum": [
+              "available",
+              "sold_out",
+              "closed",
+              "hidden"
+            ],
+            "description": "Controls the resale button. sold_out renders a disabled Sold out button; closed renders a disabled Closed button; hidden suppresses it."
+          },
+          "location": {
+            "type": "object",
+            "description": "Festival location shown in event data.",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              },
+              "country": {
+                "type": "string"
+              },
+              "address": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "EventsConfigResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteEvent"
+            }
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "events"
+        ]
+      },
+      "Plan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string"
+          },
+          "selectionData": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artistKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selectionCount": {
+            "type": "integer"
+          },
+          "shareToken": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "PlanLite": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string"
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "PlanWriteRequest": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "selectionData": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artistKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "SharePlanRequest": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string"
+          },
+          "selectionData": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "artistKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "PlansResponse": {
+        "type": "object",
+        "properties": {
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Plan"
+            }
+          }
+        },
+        "required": [
+          "plans"
+        ]
+      },
+      "PlanResponse": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/Plan"
+          }
+        },
+        "required": [
+          "plan"
+        ]
+      },
+      "ShareResponse": {
+        "type": "object",
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/Plan"
+          },
+          "shareToken": {
+            "type": "string"
+          },
+          "shareUrl": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "shareToken",
+          "shareUrl"
+        ]
+      },
+      "Snapshot": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selectionData": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "SnapshotCreateRequest": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "selectionData": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "SnapshotResponse": {
+        "type": "object",
+        "properties": {
+          "snapshot": {
+            "$ref": "#/components/schemas/Snapshot"
+          }
+        },
+        "required": [
+          "snapshot"
+        ]
+      },
+      "ClientTokenRequest": {
+        "type": "object",
+        "properties": {
+          "clientToken": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientToken"
+        ]
+      },
+      "RoomInfo": {
+        "type": "object",
+        "properties": {
+          "roomCode": {
+            "type": "string"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "isActive": {
+            "type": "boolean"
+          },
+          "hostUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "blockedStageColors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "roomCode",
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "RoomSummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RoomInfo"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "memberCount": {
+                "type": "integer"
+              },
+              "selectionCount": {
+                "type": "integer"
+              },
+              "sharedCount": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": true
+          }
+        ]
+      },
+      "RoomMember": {
+        "type": "object",
+        "properties": {
+          "memberId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "host",
+              "member"
+            ]
+          },
+          "joinedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "memberId",
+          "displayName",
+          "color",
+          "role"
+        ]
+      },
+      "RoomSelection": {
+        "type": "object",
+        "properties": {
+          "setId": {
+            "type": "string"
+          },
+          "memberIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "setId",
+          "memberIds"
+        ]
+      },
+      "RoomGroupPlan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "day": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "createdByMemberId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "joinedMemberIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ]
+      },
+      "RoomState": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "$ref": "#/components/schemas/RoomInfo"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomMember"
+            }
+          },
+          "selections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomSelection"
+            }
+          },
+          "sharedSetIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groupPlans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomGroupPlan"
+            }
+          }
+        },
+        "required": [
+          "room",
+          "members",
+          "selections",
+          "sharedSetIds",
+          "groupPlans"
+        ]
+      },
+      "CreateRoomRequest": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "displayName": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "clientToken": {
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/components/schemas/Visibility"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 200,
+            "description": "Required when visibility is invite_only."
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType",
+          "displayName",
+          "clientToken"
+        ]
+      },
+      "JoinRoomRequest": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "color": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "clientToken": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 200,
+            "description": "Required when joining an invite_only room unless this client is already a member."
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "displayName",
+          "clientToken"
+        ]
+      },
+      "UpdateRoomRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ClientTokenRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "visibility": {
+                "$ref": "#/components/schemas/Visibility"
+              },
+              "password": {
+                "type": "string",
+                "minLength": 4,
+                "maxLength": 200,
+                "description": "Required when changing a public room to invite_only without an existing password; optional for rotating an invite_only room password."
+              },
+              "blockedStageColors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "UpdateRoomMemberRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ClientTokenRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "displayName": {
+                "type": "string",
+                "maxLength": 80
+              },
+              "color": {
+                "$ref": "#/components/schemas/Color"
+              }
+            }
+          }
+        ]
+      },
+      "GroupPlanWriteRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ClientTokenRequest"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "day": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 160
+              },
+              "start": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        ]
+      },
+      "ImportCurrentPlanRequest": {
+        "type": "object",
+        "properties": {
+          "clientToken": {
+            "type": "string"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          }
+        },
+        "required": [
+          "clientToken",
+          "eventSlug",
+          "planType"
+        ]
+      },
+      "ReplaceSelectionsRequest": {
+        "type": "object",
+        "properties": {
+          "clientToken": {
+            "type": "string"
+          },
+          "setIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "clientToken",
+          "setIds"
+        ]
+      },
+      "SelectionChangeRequest": {
+        "type": "object",
+        "properties": {
+          "clientToken": {
+            "type": "string"
+          },
+          "setId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientToken",
+          "setId"
+        ]
+      },
+      "RoomsResponse": {
+        "type": "object",
+        "properties": {
+          "rooms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoomSummary"
+            }
+          }
+        },
+        "required": [
+          "rooms"
+        ]
+      },
+      "LeaveRoomResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "roomCode": {
+            "type": "string"
+          },
+          "roomClosed": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "roomCode",
+          "roomClosed",
+          "message"
+        ]
+      },
+      "RoomInfoResponse": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "$ref": "#/components/schemas/RoomInfo"
+          }
+        },
+        "required": [
+          "room"
+        ]
+      },
+      "JoinRoomResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "roomCode": {
+            "type": "string"
+          },
+          "clientToken": {
+            "type": "string"
+          },
+          "member": {
+            "$ref": "#/components/schemas/RoomMember"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "ok",
+          "roomCode",
+          "clientToken",
+          "member",
+          "state"
+        ]
+      },
+      "RoomStateWithMeResponse": {
+        "type": "object",
+        "properties": {
+          "me": {
+            "$ref": "#/components/schemas/RoomMember"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "me",
+          "state"
+        ]
+      },
+      "RoomStateOkResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "ok",
+          "state"
+        ]
+      },
+      "RoomMemberUpdateResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "member": {
+            "$ref": "#/components/schemas/RoomMember"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "ok",
+          "member",
+          "state"
+        ]
+      },
+      "RoomMemberStateResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "member": {
+            "$ref": "#/components/schemas/RoomMember"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "ok",
+          "member",
+          "state"
+        ]
+      },
+      "DeleteRoomResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "roomCode": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "ImportCurrentPlanResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "importedCount": {
+            "type": "integer"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/PlanLite"
+          },
+          "member": {
+            "$ref": "#/components/schemas/RoomMember"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoomState"
+          }
+        },
+        "required": [
+          "ok",
+          "importedCount",
+          "plan",
+          "member",
+          "state"
+        ]
+      },
+      "MemberColorsResponse": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "blockedStageColors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "eventSlug",
+          "blockedStageColors"
+        ]
+      },
+      "WebPushSubscription": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri"
+          },
+          "expirationTime": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "keys": {
+            "type": "object",
+            "properties": {
+              "p256dh": {
+                "type": "string"
+              },
+              "auth": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "p256dh",
+              "auth"
+            ]
+          }
+        },
+        "required": [
+          "endpoint",
+          "keys"
+        ]
+      },
+      "VapidPublicKeyResponse": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "publicKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "PushSubscriptionRequest": {
+        "type": "object",
+        "properties": {
+          "subscription": {
+            "$ref": "#/components/schemas/WebPushSubscription"
+          }
+        },
+        "required": [
+          "subscription"
+        ]
+      },
+      "DeletePushSubscriptionRequest": {
+        "type": "object",
+        "properties": {
+          "endpoint": {
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      },
+      "PushSubscriptionResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "subscription": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "endpoint": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "id",
+              "endpoint"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "subscription"
+        ]
+      },
+      "PushReminderInput": {
+        "type": "object",
+        "properties": {
+          "setId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string"
+          },
+          "day": {
+            "type": "string"
+          },
+          "startAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "remindAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "required": [
+          "setId",
+          "title",
+          "startAt",
+          "remindAt"
+        ]
+      },
+      "SchedulePushRemindersRequest": {
+        "type": "object",
+        "properties": {
+          "subscription": {
+            "$ref": "#/components/schemas/WebPushSubscription"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PushReminderInput"
+            }
+          }
+        },
+        "required": [
+          "subscription",
+          "eventSlug",
+          "items"
+        ]
+      },
+      "SchedulePushRemindersResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "scheduled": {
+            "type": "integer"
+          },
+          "ignored": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "scheduled"
+        ]
+      },
+      "ExportTelemetryRequest": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "png",
+              "ics",
+              "google_sheets"
+            ]
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "TelemetryResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "key"
+        ]
+      },
+      "FeedbackType": {
+        "type": "string",
+        "enum": [
+          "correction",
+          "missing_artist",
+          "wrong_time",
+          "broken_link",
+          "feature",
+          "other"
+        ]
+      },
+      "FeedbackStatus": {
+        "type": "string",
+        "enum": [
+          "open",
+          "reviewing",
+          "fixed",
+          "closed"
+        ]
+      },
+      "FeedbackCreateRequest": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "feedbackType": {
+            "$ref": "#/components/schemas/FeedbackType"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 2000
+          },
+          "pageUrl": {
+            "type": "string"
+          },
+          "pageTitle": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "setLabel": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "contact": {
+            "type": "string",
+            "maxLength": 320
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType",
+          "message",
+          "pageUrl"
+        ]
+      },
+      "FeedbackReport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "feedbackType": {
+            "$ref": "#/components/schemas/FeedbackType"
+          },
+          "pageUrl": {
+            "type": "string"
+          },
+          "pageTitle": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "setLabel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "contact": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/FeedbackStatus"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reviewedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "eventSlug",
+          "planType",
+          "message",
+          "status",
+          "createdAt"
+        ]
+      },
+      "FeedbackCreateResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "feedback": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "createdAt"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "feedback"
+        ]
+      },
+      "FeedbackListResponse": {
+        "type": "object",
+        "properties": {
+          "feedback": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeedbackReport"
+            }
+          }
+        },
+        "required": [
+          "feedback"
+        ]
+      },
+      "FeedbackUpdateResponse": {
+        "type": "object",
+        "properties": {
+          "feedback": {
+            "$ref": "#/components/schemas/FeedbackReport"
+          }
+        },
+        "required": [
+          "feedback"
+        ]
+      },
+      "SmtpTestRequest": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "format": "email"
+          }
+        },
+        "required": [
+          "to"
+        ]
+      },
+      "AdminEventsUpdateRequest": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SiteEvent"
+            }
+          }
+        },
+        "required": [
+          "events"
+        ]
+      },
+      "FeedbackStatusPatchRequest": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/FeedbackStatus"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "AdminStatsResponse": {
+        "type": "object",
+        "properties": {
+          "stats": {
+            "type": "object",
+            "properties": {
+              "registeredUsers": {
+                "type": "integer"
+              },
+              "createdRooms": {
+                "type": "integer"
+              },
+              "activeRooms": {
+                "type": "integer"
+              },
+              "pngDownloads": {
+                "type": "integer"
+              },
+              "icsExports": {
+                "type": "integer"
+              },
+              "googleSheetsExports": {
+                "type": "integer"
+              },
+              "feedbackSubmissions": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "stats"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "service": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "uptimeSeconds": {
+            "type": "integer"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "api": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "database": {
+                "type": "object",
+                "additionalProperties": true
+              },
+              "smtp": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "ok",
+          "service",
+          "environment",
+          "time",
+          "uptimeSeconds",
+          "checks"
+        ]
+      },
+      "PlannerSet": {
+        "oneOf": [
+          {
+            "type": "array",
+            "minItems": 4,
+            "items": {
+              "type": "string"
+            },
+            "description": "[stableId, start, end, artist]. Leave start and end blank together for non-timed lineup, host, or MC rows."
+          },
+          {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "start": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              },
+              "artist": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "artist"
+            ]
+          }
+        ]
+      },
+      "PlannerDay": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "stages": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/PlannerSet"
+              }
+            }
+          }
+        },
+        "required": [
+          "stages"
+        ]
+      },
+      "PlannerDataPayload": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "title": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "updatedLabel": {
+            "type": "string"
+          },
+          "timeZone": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PlannerDay"
+            }
+          },
+          "stageHosts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "stageColors": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$"
+            }
+          },
+          "festivalRange": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "start": {
+                  "type": "string"
+                },
+                "end": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "eventSlug",
+          "planType",
+          "data"
+        ]
+      },
+      "PlannerDataResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PlannerDataPayload"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "updatedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "sourceType": {
+                "type": "string",
+                "enum": [
+                  "database",
+                  "packaged"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Artist": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Spotify artist id, or a local: prefixed id for timetable-only artists."
+          },
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "spotifyUrl": {
+            "type": "string"
+          },
+          "imageUrl": {
+            "type": "string"
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "popularity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "followersTotal": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "spotifyFetchedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "description": {
+            "type": "string"
+          },
+          "bookingCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "upcomingCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pastCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "image",
+          "spotifyUrl",
+          "imageUrl",
+          "genres",
+          "popularity",
+          "followersTotal",
+          "spotifyFetchedAt",
+          "description"
+        ],
+        "additionalProperties": true
+      },
+      "ArtistsResponse": {
+        "type": "object",
+        "properties": {
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Artist"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "artists",
+          "total",
+          "limit",
+          "offset"
+        ]
+      },
+      "ArtistSearchResponse": {
+        "type": "object",
+        "properties": {
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Artist"
+            }
+          }
+        },
+        "required": [
+          "artists"
+        ]
+      },
+      "ArtistResponse": {
+        "type": "object",
+        "properties": {
+          "artist": {
+            "$ref": "#/components/schemas/Artist"
+          }
+        },
+        "required": [
+          "artist"
+        ]
+      },
+      "ArtistBookingAct": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "slug"
+        ]
+      },
+      "ArtistBooking": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "siteEventSlug": {
+            "type": "string"
+          },
+          "eventTitle": {
+            "type": "string"
+          },
+          "eventHref": {
+            "type": "string"
+          },
+          "dateLabel": {
+            "type": "string"
+          },
+          "location": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "planType": {
+            "$ref": "#/components/schemas/PlanType"
+          },
+          "setId": {
+            "type": "string"
+          },
+          "dayLabel": {
+            "type": "string"
+          },
+          "eventDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stage": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "act": {
+            "$ref": "#/components/schemas/ArtistBookingAct"
+          }
+        },
+        "required": [
+          "id",
+          "eventSlug",
+          "siteEventSlug",
+          "eventTitle",
+          "eventHref",
+          "planType",
+          "setId",
+          "dayLabel",
+          "stage",
+          "start",
+          "end",
+          "label",
+          "act"
+        ]
+      },
+      "ArtistBookingsResponse": {
+        "type": "object",
+        "properties": {
+          "artist": {
+            "$ref": "#/components/schemas/Artist"
+          },
+          "bookings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtistBooking"
+            }
+          }
+        },
+        "required": [
+          "artist",
+          "bookings"
+        ]
+      },
+      "SpotifyImage": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SpotifyArtist": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "spotifyUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "imageUrl": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpotifyImage"
+            }
+          },
+          "genres": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "popularity": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "followersTotal": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "spotifyUrl",
+          "imageUrl",
+          "images",
+          "genres",
+          "popularity",
+          "followersTotal"
+        ]
+      },
+      "AdminArtistSqlImportRequest": {
+        "type": "object",
+        "properties": {
+          "sql": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql"
+        ]
+      },
+      "ArtistImportResultResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "imported": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "parsed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "requested": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpotifyArtist"
+            }
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": true
+      },
+      "SpotifyStatusResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "spotify": {
+            "type": "object",
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "configured"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "spotify"
+        ]
+      },
+      "SpotifySyncRun": {
+        "type": "object",
+        "properties": {
+          "job_key": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed",
+              "skipped"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "stats": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "SpotifySyncStatusResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "sync": {
+            "type": "object",
+            "properties": {
+              "configured": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "schedule": {
+                "type": "object",
+                "properties": {
+                  "hour": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 23
+                  },
+                  "minute": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 59
+                  },
+                  "timezone": {
+                    "type": "string"
+                  },
+                  "checkIntervalSeconds": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "limits": {
+                "type": "object",
+                "properties": {
+                  "refreshLimit": {
+                    "type": "integer"
+                  },
+                  "searchLimit": {
+                    "type": "integer"
+                  },
+                  "staleDays": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": true
+              },
+              "openCandidates": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "recentRuns": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/SpotifySyncRun"
+                }
+              }
+            },
+            "required": [
+              "configured",
+              "enabled",
+              "schedule",
+              "limits",
+              "openCandidates",
+              "recentRuns"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "sync"
+        ]
+      },
+      "SpotifySyncRunResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "skipped": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "jobKey": {
+            "type": "string"
+          },
+          "stats": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": true
+      },
+      "SpotifyArtistSearchResponse": {
+        "type": "object",
+        "properties": {
+          "artists": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpotifyArtist"
+            }
+          }
+        },
+        "required": [
+          "artists"
+        ]
+      },
+      "SpotifyArtistImportRequest": {
+        "type": "object",
+        "properties": {
+          "artistId": {
+            "type": "string"
+          },
+          "artistIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "SpotifyArtistRefreshRequest": {
+        "type": "object",
+        "properties": {
+          "artistIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250,
+            "default": 50
+          }
+        },
+        "additionalProperties": false
+      },
+      "Act": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "label": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "noArtists": {
+            "type": "boolean"
+          },
+          "bookingCount": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "slug",
+          "noArtists",
+          "bookingCount"
+        ]
+      },
+      "ActSuggestionArtist": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Artist"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "matchedToken": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "ActSuggestionsResponse": {
+        "type": "object",
+        "properties": {
+          "act": {
+            "$ref": "#/components/schemas/Act"
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "suggestions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActSuggestionArtist"
+            }
+          }
+        },
+        "required": [
+          "act",
+          "suggestions"
+        ]
+      },
+      "UnmappedActsResponse": {
+        "type": "object",
+        "properties": {
+          "acts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Act"
+            }
+          }
+        },
+        "required": [
+          "acts"
+        ]
+      },
+      "ActArtistMappingRequest": {
+        "type": "object",
+        "properties": {
+          "artistIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "noArtists": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ActArtistMappingResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ActSuggestionsResponse"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "ok"
+            ]
+          }
+        ]
+      },
+      "LivestreamChatModeratorStatusResponse": {
+        "type": "object",
+        "properties": {
+          "moderator": {
+            "type": "boolean"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  },
+                  "displayName": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "email",
+                  "displayName"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "moderator",
+          "user"
+        ]
+      },
+      "LivestreamChatGlobalSettings": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "sendEnabled": {
+            "type": "boolean"
+          },
+          "linksRequireApproval": {
+            "type": "boolean"
+          },
+          "maxMessageLength": {
+            "type": "integer"
+          },
+          "sendCooldownSeconds": {
+            "type": "integer"
+          },
+          "maxRoomConnections": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "sendEnabled",
+          "linksRequireApproval",
+          "maxMessageLength",
+          "sendCooldownSeconds",
+          "maxRoomConnections"
+        ]
+      },
+      "LivestreamChatStreamSettings": {
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string"
+          },
+          "sendEnabled": {
+            "type": "boolean"
+          },
+          "slowmodeSeconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "hasOverride": {
+            "type": "boolean"
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "updatedByUserId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "streamId",
+          "sendEnabled",
+          "slowmodeSeconds",
+          "hasOverride",
+          "updatedAt",
+          "updatedByUserId"
+        ]
+      },
+      "LivestreamChatSettingsForStream": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LivestreamChatGlobalSettings"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "streamSettings": {
+                "$ref": "#/components/schemas/LivestreamChatStreamSettings"
+              }
+            },
+            "required": [
+              "streamSettings"
+            ]
+          }
+        ]
+      },
+      "LivestreamChatMessage": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "streamId": {
+            "type": "string"
+          },
+          "userId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "preferredColor": {
+            "$ref": "#/components/schemas/Color"
+          },
+          "message": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "eventSlug",
+          "streamId",
+          "userId",
+          "displayName",
+          "preferredColor",
+          "message",
+          "createdAt"
+        ]
+      },
+      "LivestreamChatMessagesResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LivestreamChatSettingsForStream"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventSlug": {
+                "type": "string"
+              },
+              "streamId": {
+                "type": "string"
+              },
+              "messages": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/LivestreamChatMessage"
+                }
+              },
+              "updatedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "eventSlug",
+              "streamId",
+              "messages",
+              "updatedAt"
+            ]
+          }
+        ]
+      },
+      "LivestreamChatMessageCreateRequest": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240
+          }
+        },
+        "required": [
+          "message"
+        ]
+      },
+      "LivestreamChatMessageResponse": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LivestreamChatSettingsForStream"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "eventSlug": {
+                "type": "string"
+              },
+              "streamId": {
+                "type": "string"
+              },
+              "message": {
+                "$ref": "#/components/schemas/LivestreamChatMessage"
+              }
+            },
+            "required": [
+              "eventSlug",
+              "streamId",
+              "message"
+            ]
+          }
+        ]
+      },
+      "LivestreamChatStatsStream": {
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string"
+          },
+          "totalMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "visibleMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "blockedMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deletedMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueChatters": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lastMessageAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "liveConnections": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "settings": {
+            "$ref": "#/components/schemas/LivestreamChatStreamSettings"
+          }
+        },
+        "required": [
+          "streamId",
+          "totalMessages",
+          "visibleMessages",
+          "blockedMessages",
+          "deletedMessages",
+          "uniqueChatters",
+          "lastMessageAt",
+          "liveConnections"
+        ]
+      },
+      "LivestreamChatStatsResponse": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": "string"
+          },
+          "totalMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "visibleMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "blockedMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "deletedMessages": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueChatters": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "totalMutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "activeMutes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "totalBans": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "activeBans": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "firstMessageAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lastMessageAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "liveConnections": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LivestreamChatStatsStream"
+            }
+          },
+          "settings": {
+            "$ref": "#/components/schemas/LivestreamChatGlobalSettings"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "eventSlug",
+          "totalMessages",
+          "visibleMessages",
+          "blockedMessages",
+          "deletedMessages",
+          "uniqueChatters",
+          "streams",
+          "settings",
+          "updatedAt"
+        ]
+      },
+      "LivestreamChatStreamSettingsPatchRequest": {
+        "type": "object",
+        "properties": {
+          "sendEnabled": {
+            "type": "boolean"
+          },
+          "slowmodeSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 600
+          }
+        },
+        "additionalProperties": false
+      },
+      "LivestreamChatStreamSettingsResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "streamId": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/LivestreamChatStreamSettings"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "ok",
+          "eventSlug",
+          "streamId",
+          "settings",
+          "updatedAt"
+        ]
+      },
+      "LivestreamChatClearResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "streamId": {
+            "type": "string"
+          },
+          "deletedCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "clearedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "ok",
+          "eventSlug",
+          "streamId",
+          "deletedCount",
+          "clearedAt"
+        ]
+      },
+      "LivestreamChatDeleteMessageResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "deleted"
+        ]
+      },
+      "LivestreamChatModerateUserRequest": {
+        "type": "object",
+        "properties": {
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "durationMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10080
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 240
+          },
+          "allStreams": {
+            "type": "boolean"
+          },
+          "deleteVisibleMessages": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "userId"
+        ],
+        "additionalProperties": false
+      },
+      "LivestreamChatMuteRaw": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": true
+      },
+      "LivestreamChatMuteResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "mute": {
+            "$ref": "#/components/schemas/LivestreamChatMuteRaw"
+          }
+        },
+        "required": [
+          "ok",
+          "mute"
+        ]
+      },
+      "LivestreamChatUnmuteResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "unmutedCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mutes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "streamId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "streamId"
+              ]
+            }
+          }
+        },
+        "required": [
+          "ok",
+          "unmutedCount",
+          "mutes"
+        ]
+      },
+      "LivestreamChatLinkPermission": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_slug": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "approved_by_user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "approved_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": true
+      },
+      "LivestreamChatLinkPermissionResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "userId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "permission": {
+            "$ref": "#/components/schemas/LivestreamChatLinkPermission"
+          }
+        },
+        "required": [
+          "ok",
+          "eventSlug",
+          "userId",
+          "permission"
+        ]
+      },
+      "LivestreamChatBanResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "ban": {
+            "$ref": "#/components/schemas/LivestreamChatMuteRaw"
+          },
+          "created": {
+            "type": "boolean"
+          },
+          "deletedMessages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "streamId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "streamId"
+              ]
+            }
+          }
+        },
+        "required": [
+          "ok",
+          "ban",
+          "created",
+          "deletedMessages"
+        ]
+      },
+      "MixlrListenerResult": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "listenerCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "unavailable",
+              "invalid"
+            ]
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "fetchedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "channel",
+          "listenerCount",
+          "status",
+          "cached",
+          "fetchedAt",
+          "expiresAt"
+        ]
+      },
+      "MixlrListenerHistorySample": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "day": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "mixlr",
+              "youtube"
+            ]
+          }
+        },
+        "required": [
+          "at",
+          "count",
+          "day",
+          "channel",
+          "source"
+        ]
+      },
+      "MixlrListenerHistoryStage": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "mixlr",
+              "youtube"
+            ]
+          },
+          "latest": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "latestAt": {
+            "type": "string"
+          },
+          "peak": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "peakAt": {
+            "type": "string"
+          },
+          "totalReads": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lastDay": {
+            "type": "string"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MixlrListenerHistorySample"
+            }
+          }
+        },
+        "required": [
+          "stage",
+          "channel",
+          "source",
+          "latest",
+          "latestAt",
+          "peak",
+          "peakAt",
+          "totalReads",
+          "lastDay",
+          "samples"
+        ]
+      },
+      "MixlrListenerHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "server"
+            ]
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "stages": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MixlrListenerHistoryStage"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "source",
+          "eventSlug",
+          "updatedAt",
+          "stages"
+        ]
+      },
+      "YoutubeViewerResponse": {
+        "type": "object",
+        "properties": {
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "videoId": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "viewerCount": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "invalid",
+              "missing-youtube-api-key",
+              "not-live",
+              "not-found",
+              "unavailable"
+            ]
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "fetchedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "updatedAt",
+          "videoId",
+          "channel",
+          "viewerCount",
+          "status",
+          "cached",
+          "fetchedAt",
+          "expiresAt"
+        ]
+      },
+      "LivestreamChatMuteRecordUser": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "preferredColor": {
+            "$ref": "#/components/schemas/Color"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "displayName",
+          "preferredColor"
+        ]
+      },
+      "LivestreamChatMuteRecordModerator": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "email": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "email",
+          "displayName"
+        ]
+      },
+      "LivestreamChatMuteRecord": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "eventSlug": {
+            "type": "string"
+          },
+          "streamId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "mute",
+              "ban"
+            ]
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "user": {
+            "$ref": "#/components/schemas/LivestreamChatMuteRecordUser"
+          },
+          "moderator": {
+            "$ref": "#/components/schemas/LivestreamChatMuteRecordModerator"
+          }
+        },
+        "required": [
+          "id",
+          "eventSlug",
+          "streamId",
+          "type",
+          "active",
+          "reason",
+          "expiresAt",
+          "createdAt",
+          "user",
+          "moderator"
+        ]
+      },
+      "LivestreamChatMutesResponse": {
+        "type": "object",
+        "properties": {
+          "eventSlug": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "expired",
+              "all"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "all",
+              "mutes",
+              "bans"
+            ]
+          },
+          "search": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "totalMutes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "activeMutes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "activeBans": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "expired": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "total",
+              "totalMutes",
+              "activeMutes",
+              "activeBans",
+              "expired"
+            ]
+          },
+          "mutes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LivestreamChatMuteRecord"
+            }
+          }
+        },
+        "required": [
+          "eventSlug",
+          "status",
+          "type",
+          "search",
+          "limit",
+          "counts",
+          "mutes"
+        ]
+      },
+      "LivestreamChatMuteClearResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "mute": {
+            "$ref": "#/components/schemas/LivestreamChatMuteRecord"
+          }
+        },
+        "required": [
+          "ok",
+          "mute"
+        ]
+      }
+    }
+  }
+}
