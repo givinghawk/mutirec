@@ -1,6 +1,7 @@
 let state = null;
 let config = null;
 let wave = null;
+let hlsPlayer = null;
 let recordings = [];
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
@@ -86,7 +87,7 @@ function renderDashboard() {
       <div class="mt-3 flex flex-wrap gap-2">
         <button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
-        <button class="btn" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">Live</button>
+        <button class="btn" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Live (rewind)' : 'Live'}</button>
         ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
     </article>`).join('');
@@ -120,6 +121,7 @@ function drawSourceEditor() {
       <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
       <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
       <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
+      <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
       <div class="col-span-full flex flex-wrap items-center gap-2 pt-1">
         <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
         <button type="button" class="btn" onclick="duplicateSource(${i})">Duplicate</button>
@@ -143,7 +145,8 @@ function readSources() {
     enabled: el.querySelector('.src-enabled').checked,
     record: el.querySelector('.src-record').checked,
     audioOnly: el.querySelector('.src-audio').checked,
-    transcode: el.querySelector('.src-transcode').checked
+    transcode: el.querySelector('.src-transcode').checked,
+    liveRewind: el.querySelector('.src-liverewind').checked
   }));
 }
 
@@ -183,7 +186,7 @@ function deleteSource(i) {
 
 function fillSettings() {
   const s = config.settings, ui = config.ui;
-  ['finishedDir','tempDir','logDir','checkIntervalSeconds','minFreeBytes','warnFreeBytes'].forEach(k => $(k).value = s[k]);
+  ['finishedDir','tempDir','logDir','checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds'].forEach(k => $(k).value = s[k]);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
@@ -204,7 +207,7 @@ function fillSettings() {
 function readSettings() {
   const s = config.settings;
   ['finishedDir','tempDir','logDir'].forEach(k => s[k] = $(k).value);
-  ['checkIntervalSeconds','minFreeBytes','warnFreeBytes'].forEach(k => s[k] = Number($(k).value));
+  ['checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds'].forEach(k => s[k] = Number($(k).value));
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, theme: $('uiTheme').value, accent: $('uiAccent').value, customCss: $('uiCustomCss').value };
   s.notifications.discordWebhook = $('discordWebhook').value;
@@ -227,20 +230,45 @@ async function stopRec(id, name) {
 }
 
 function playLive(id, audioOnly) {
-  const url = `/api/live/${id}`;
+  const src = state.sources.find(s => s.id === id);
+  const useHls = !!(src && src.liveRewindActive);
+  const url = useHls ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
   const audioEl = $('audio'), videoEl = $('video');
   audioEl.classList.toggle('hidden', !audioOnly);
   videoEl.classList.toggle('hidden', audioOnly);
   const el = audioOnly ? audioEl : videoEl;
   (audioOnly ? videoEl : audioEl).pause();
-  el.src = url;
-  el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
-  if ($('wave-toggle').checked && window.WaveSurfer) {
+
+  if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
+
+  const statusEl = $('player-status');
+  if (useHls) {
+    statusEl.textContent = 'Live rewind buffer connecting — drag the seek bar back to scrub within this recording.';
+    statusEl.classList.remove('hidden');
+  } else {
+    statusEl.classList.add('hidden');
+  }
+
+  if (useHls && window.Hls && Hls.isSupported()) {
+    hlsPlayer = new Hls({ liveSyncDurationCount: 3 });
+    hlsPlayer.on(Hls.Events.ERROR, (_evt, data) => {
+      if (data.fatal) toast(`Live rewind stream error: ${data.details}`, 'error');
+    });
+    hlsPlayer.loadSource(url);
+    hlsPlayer.attachMedia(el);
+    hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error')));
+  } else {
+    el.src = url;
+    el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
+  }
+
+  if (!useHls && $('wave-toggle').checked && window.WaveSurfer) {
     $('wave').classList.remove('hidden');
     if (wave) wave.destroy();
     wave = WaveSurfer.create({ container: '#wave', waveColor: '#52525b', progressColor: accents[config.ui.accent] || accents.red, height: 80 });
     wave.load(url);
   } else {
+    if (wave) { wave.destroy(); wave = null; }
     $('wave').classList.add('hidden');
   }
 }

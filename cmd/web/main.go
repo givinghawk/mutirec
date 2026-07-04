@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -43,20 +44,21 @@ type AppConfig struct {
 }
 
 type Settings struct {
-	FinishedDir           string        `json:"finishedDir"`
-	TempDir               string        `json:"tempDir"`
-	LogDir                string        `json:"logDir"`
-	CheckIntervalSeconds  int           `json:"checkIntervalSeconds"`
-	MinFreeBytes          uint64        `json:"minFreeBytes"`
-	DefaultQuality        string        `json:"defaultQuality"`
-	DefaultContainer      string        `json:"defaultContainer"`
-	EnableNFO             bool          `json:"enableNfo"`
-	EnableWaveform        bool          `json:"enableWaveform"`
-	Backup                BackupConfig  `json:"backup"`
-	Notifications         Notifications `json:"notifications"`
-	AllowLiveProxy        bool          `json:"allowLiveProxy"`
-	WarnFreeBytes         uint64        `json:"warnFreeBytes"`
-	RecordingSetLookahead time.Duration `json:"-"`
+	FinishedDir             string        `json:"finishedDir"`
+	TempDir                 string        `json:"tempDir"`
+	LogDir                  string        `json:"logDir"`
+	CheckIntervalSeconds    int           `json:"checkIntervalSeconds"`
+	MinFreeBytes            uint64        `json:"minFreeBytes"`
+	DefaultQuality          string        `json:"defaultQuality"`
+	DefaultContainer        string        `json:"defaultContainer"`
+	EnableNFO               bool          `json:"enableNfo"`
+	EnableWaveform          bool          `json:"enableWaveform"`
+	Backup                  BackupConfig  `json:"backup"`
+	Notifications           Notifications `json:"notifications"`
+	AllowLiveProxy          bool          `json:"allowLiveProxy"`
+	WarnFreeBytes           uint64        `json:"warnFreeBytes"`
+	LiveRewindWindowSeconds int           `json:"liveRewindWindowSeconds"`
+	RecordingSetLookahead   time.Duration `json:"-"`
 }
 
 type UISettings struct {
@@ -105,6 +107,7 @@ type Source struct {
 	FFmpegArgs     []string `json:"ffmpegArgs"`
 	ExtraNFO       string   `json:"extraNfo"`
 	Color          string   `json:"color"`
+	LiveRewind     bool     `json:"liveRewind"`
 }
 
 type StageSchedule struct {
@@ -133,16 +136,17 @@ type State struct {
 
 type SourceStatus struct {
 	Source
-	Status        string    `json:"status"`
-	OutputPath    string    `json:"outputPath"`
-	MediaPath     string    `json:"mediaPath,omitempty"`
-	Size          int64     `json:"size"`
-	StartedAt     time.Time `json:"startedAt,omitempty"`
-	LastError     string    `json:"lastError,omitempty"`
-	CurrentSet    string    `json:"currentSet,omitempty"`
-	NextSet       string    `json:"nextSet,omitempty"`
-	LogPath       string    `json:"logPath,omitempty"`
-	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
+	Status           string    `json:"status"`
+	OutputPath       string    `json:"outputPath"`
+	MediaPath        string    `json:"mediaPath,omitempty"`
+	Size             int64     `json:"size"`
+	StartedAt        time.Time `json:"startedAt,omitempty"`
+	LastError        string    `json:"lastError,omitempty"`
+	CurrentSet       string    `json:"currentSet,omitempty"`
+	NextSet          string    `json:"nextSet,omitempty"`
+	LogPath          string    `json:"logPath,omitempty"`
+	LastHeartbeat    time.Time `json:"lastHeartbeat,omitempty"`
+	LiveRewindActive bool      `json:"liveRewindActive"`
 }
 
 // RecordingFile describes a single finished recording on disk.
@@ -178,6 +182,7 @@ type recording struct {
 	logFile   *os.File
 	lastErr   string
 	done      chan struct{}
+	hlsDir    string
 }
 
 type App struct {
@@ -371,7 +376,16 @@ func (a *App) start(src Source) {
 		a.event("error", fmt.Sprintf("[%s] cannot create log: %s", src.Name, err))
 		return
 	}
-	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{})}
+	var hlsDir string
+	if src.LiveRewind {
+		hlsDir = filepath.Join(tempDir, "live-hls")
+		_ = os.RemoveAll(hlsDir)
+		if err := os.MkdirAll(hlsDir, 0o755); err != nil {
+			hlsDir = ""
+			a.event("warn", fmt.Sprintf("[%s] could not create live rewind buffer: %s", src.Name, err))
+		}
+	}
+	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{}), hlsDir: hlsDir}
 	a.active[src.ID] = rec
 	a.mu.Unlock()
 
@@ -406,6 +420,10 @@ func (a *App) runRecording(rec *recording) {
 		a.event("warn", fmt.Sprintf("[%s] no output produced", rec.source.Name))
 	}
 
+	if rec.hlsDir != "" {
+		_ = os.RemoveAll(rec.hlsDir)
+	}
+
 	a.mu.Lock()
 	delete(a.active, rec.source.ID)
 	a.mu.Unlock()
@@ -413,8 +431,9 @@ func (a *App) runRecording(rec *recording) {
 
 func (a *App) execute(rec *recording) error {
 	src := rec.source
+	windowSeconds := a.snapshotConfig().Settings.LiveRewindWindowSeconds
 	if src.Type == "http" {
-		args := ffmpegArgs(src, src.URL, rec.tempPath)
+		args := ffmpegArgs(src, src.URL, rec.tempPath, rec.hlsDir, windowSeconds)
 		cmd := exec.CommandContext(rec.ctx, "ffmpeg", args...)
 		rec.cmds = []*exec.Cmd{cmd}
 		return runLogged(cmd, rec.logFile)
@@ -430,7 +449,7 @@ func (a *App) execute(rec *recording) error {
 	slArgs := append([]string{"--stdout"}, src.StreamlinkArgs...)
 	slArgs = append(slArgs, src.URL, quality)
 	streamlink := exec.CommandContext(rec.ctx, "streamlink", slArgs...)
-	ffmpeg := exec.CommandContext(rec.ctx, "ffmpeg", ffmpegArgs(src, "pipe:0", rec.tempPath)...)
+	ffmpeg := exec.CommandContext(rec.ctx, "ffmpeg", ffmpegArgs(src, "pipe:0", rec.tempPath, rec.hlsDir, windowSeconds)...)
 	rec.cmds = []*exec.Cmd{streamlink, ffmpeg}
 
 	pipe, err := streamlink.StdoutPipe()
@@ -459,13 +478,19 @@ func (a *App) execute(rec *recording) error {
 	return ffErr
 }
 
-func ffmpegArgs(src Source, input, output string) []string {
+// ffmpegArgs builds the archival output plus, when hlsDir is set, a second
+// bounded HLS output used for live-rewind DVR playback of the in-progress
+// recording. The HLS branch always transcodes to H.264/AAC since it must be
+// playable by hls.js/Safari regardless of what codec the archival copy uses.
+func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) []string {
 	args := []string{"-hide_banner", "-y", "-nostdin"}
 	if src.HardwareAccel != "" && src.HardwareAccel != "none" {
 		args = append(args, "-hwaccel", src.HardwareAccel)
 	}
 	args = append(args, src.FFmpegArgs...)
 	args = append(args, "-i", input)
+
+	args = append(args, "-map", "0")
 	if src.AudioOnly {
 		if src.Transcode {
 			args = append(args, "-vn", "-c:a", "aac", "-b:a", "192k")
@@ -477,8 +502,62 @@ func ffmpegArgs(src Source, input, output string) []string {
 	} else {
 		args = append(args, "-c", "copy")
 	}
+	// The output path ends in ".part" for atomic renaming, so ffmpeg cannot
+	// infer the container from the extension - it must be told explicitly.
+	args = append(args, "-f", containerFormat(src.Container))
 	args = append(args, output)
+
+	if hlsDir != "" {
+		args = append(args, "-map", "0")
+		if src.AudioOnly {
+			args = append(args, "-vn", "-c:a", "aac", "-b:a", "160k")
+		} else {
+			args = append(args, "-c:v", videoEncoder(src.HardwareAccel), "-preset", "veryfast", "-c:a", "aac", "-b:a", "160k")
+		}
+		args = append(args,
+			"-f", "hls",
+			"-hls_time", "4",
+			"-hls_list_size", strconv.Itoa(hlsListSize(hlsWindowSeconds)),
+			"-hls_flags", "delete_segments+independent_segments",
+			"-hls_segment_filename", filepath.Join(hlsDir, "seg%05d.ts"),
+			filepath.Join(hlsDir, "index.m3u8"),
+		)
+	}
 	return args
+}
+
+// hlsListSize converts a rewind window (seconds) into a segment count for a
+// 4-second HLS segment duration, with a sane floor so a misconfigured or
+// zero window still yields a usable rewind buffer.
+func hlsListSize(windowSeconds int) int {
+	if windowSeconds <= 0 {
+		windowSeconds = 1800
+	}
+	n := windowSeconds / 4
+	if n < 10 {
+		n = 10
+	}
+	return n
+}
+
+// containerFormat maps a container/extension name to the ffmpeg muxer name
+// needed for an explicit -f flag, since the on-disk filename carries a
+// ".part" suffix that prevents ffmpeg from guessing the format itself.
+func containerFormat(container string) string {
+	switch strings.ToLower(container) {
+	case "mkv", "matroska":
+		return "matroska"
+	case "mp4":
+		return "mp4"
+	case "m4a":
+		return "ipod"
+	case "ts", "mpegts":
+		return "mpegts"
+	case "":
+		return "matroska"
+	default:
+		return container
+	}
 }
 
 func videoEncoder(hw string) string {
@@ -773,11 +852,19 @@ func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/live/")
+	parts := strings.SplitN(rest, "/", 3)
+	id := parts[0]
+
+	if len(parts) >= 2 && parts[1] == "hls" {
+		a.handleLiveHLS(w, r, id, parts)
+		return
+	}
+
 	if !a.snapshotConfig().Settings.AllowLiveProxy {
 		http.Error(w, "live proxy disabled", http.StatusForbidden)
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/live/")
 	cfg := a.snapshotConfig()
 	for _, src := range cfg.Sources {
 		if src.ID == id {
@@ -804,6 +891,30 @@ func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// handleLiveHLS serves the rolling HLS playlist/segments for a source that is
+// currently recording with live rewind enabled, addressed as
+// /api/live/{id}/hls/{file}.
+func (a *App) handleLiveHLS(w http.ResponseWriter, r *http.Request, id string, parts []string) {
+	a.mu.RLock()
+	rec := a.active[id]
+	a.mu.RUnlock()
+	if rec == nil || rec.hlsDir == "" {
+		http.Error(w, "live rewind is not active for this source", http.StatusNotFound)
+		return
+	}
+	file := "index.m3u8"
+	if len(parts) >= 3 && parts[2] != "" {
+		file = parts[2]
+	}
+	file = filepath.Clean(file)
+	if strings.Contains(file, "..") || strings.ContainsAny(file, `/\`) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, filepath.Join(rec.hlsDir, file))
 }
 
 func (a *App) handleMedia(w http.ResponseWriter, r *http.Request) {
@@ -834,6 +945,7 @@ func (a *App) state() State {
 			st.StartedAt = rec.startedAt
 			st.LogPath = rec.logPath
 			st.LastError = rec.lastErr
+			st.LiveRewindActive = rec.hlsDir != ""
 			if info, err := os.Stat(rec.tempPath); err == nil {
 				st.Size = info.Size()
 				st.LastHeartbeat = info.ModTime()
@@ -1040,17 +1152,18 @@ func loadConfig(path string) (AppConfig, error) {
 func defaultConfig() AppConfig {
 	return AppConfig{
 		Settings: Settings{
-			FinishedDir:          env("FINISHED_DIR", "/data/recordings"),
-			TempDir:              env("TEMP_DIR", "/data/incomplete"),
-			LogDir:               env("LOG_DIR", "/data/logs"),
-			CheckIntervalSeconds: 30,
-			MinFreeBytes:         1024 * 1024 * 1024,
-			WarnFreeBytes:        5 * 1024 * 1024 * 1024,
-			DefaultQuality:       "best",
-			DefaultContainer:     "mkv",
-			EnableNFO:            true,
-			EnableWaveform:       true,
-			AllowLiveProxy:       true,
+			FinishedDir:             env("FINISHED_DIR", "/data/recordings"),
+			TempDir:                 env("TEMP_DIR", "/data/incomplete"),
+			LogDir:                  env("LOG_DIR", "/data/logs"),
+			CheckIntervalSeconds:    30,
+			MinFreeBytes:            1024 * 1024 * 1024,
+			WarnFreeBytes:           5 * 1024 * 1024 * 1024,
+			DefaultQuality:          "best",
+			DefaultContainer:        "mkv",
+			EnableNFO:               true,
+			EnableWaveform:          true,
+			AllowLiveProxy:          true,
+			LiveRewindWindowSeconds: 1800,
 		},
 		UI: UISettings{AppName: "Defqon Stream Recorder", Theme: "midnight", Accent: "red"},
 		Sources: []Source{{
@@ -1088,6 +1201,9 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Settings.DefaultContainer == "" {
 		cfg.Settings.DefaultContainer = "mkv"
+	}
+	if cfg.Settings.LiveRewindWindowSeconds == 0 {
+		cfg.Settings.LiveRewindWindowSeconds = 1800
 	}
 	if cfg.UI.AppName == "" {
 		cfg.UI.AppName = "Defqon Stream Recorder"

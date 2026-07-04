@@ -19,6 +19,7 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Optional `rclone` backups for Dropbox, Google Drive, S3-compatible storage, and many other remotes.
 - Basic player interface for audio and video streams, with optional WaveSurfer.js waveform rendering.
 - Live stage switching from the WebUI when the browser can play the resolved stream URL.
+- Optional live rewind: scrub backward within an in-progress recording using a rolling HLS buffer.
 - Custom app name, logo URL, colour scheme, accent colour, and custom CSS.
 - Recordings library view with search/filter across all finished files.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
@@ -133,6 +134,21 @@ The timetable is editable in the WebUI as JSON. Entries use RFC3339 timestamps:
   }
 ]
 ```
+
+## Live Rewind
+
+Enable "Live rewind" on a source to let viewers scrub backward while it is
+actively recording, instead of only watching the live edge. While recording,
+the app additionally transcodes the stream to H.264/AAC and segments it into
+a rolling HLS playlist (default: last 30 minutes, configurable via the
+"Live rewind window" setting); the WebUI plays that back through hls.js so
+you get DVR-style seeking. Once the recording finishes, the HLS buffer is
+deleted — the archival file (in its original codec/container) is the
+permanent copy, and normal playback resumes from `/media/`.
+
+This costs extra CPU per rewind-enabled source (it runs a second transcode
+alongside the archival copy) and a bounded amount of temp disk space for the
+rolling window, so it's opt-in per source rather than global.
 
 ## Storage
 

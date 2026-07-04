@@ -6,6 +6,7 @@
   <title>Defqon Stream Recorder</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="min-h-screen bg-zinc-950 text-zinc-100">
@@ -49,6 +50,7 @@
               <h2>Player</h2>
               <label class="flex items-center gap-2 text-sm text-zinc-300"><input id="wave-toggle" type="checkbox" class="accent-red-500"> Waveform</label>
             </div>
+            <div id="player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
             <audio id="audio" controls class="w-full"></audio>
             <video id="video" controls class="mt-3 hidden w-full rounded border border-white/10 bg-black"></video>
             <div id="wave" class="mt-3 hidden h-20 rounded bg-black/30"></div>
@@ -103,6 +105,8 @@
             <label>Check interval seconds<input id="checkIntervalSeconds" type="number" class="input"></label>
             <label>Minimum free bytes<input id="minFreeBytes" type="number" class="input"></label>
             <label>Warning free bytes<input id="warnFreeBytes" type="number" class="input"></label>
+            <label>Live rewind window (seconds)<input id="liveRewindWindowSeconds" type="number" class="input"></label>
+            <p class="-mt-2 mb-3 text-xs text-zinc-500">How far back viewers can scrub on a live, in-progress recording. Only applies to sources with "Live rewind" enabled below.</p>
             <div class="mt-3 flex flex-wrap gap-4 text-sm">
               <label class="inline-flex items-center gap-2"><input id="enableNfo" type="checkbox" class="accent-red-500"> Save NFO</label>
               <label class="inline-flex items-center gap-2"><input id="enableWaveform" type="checkbox" class="accent-red-500"> Waveform default</label>
@@ -147,6 +151,8 @@
 docker compose logs -f recorder</code></pre>
           <p>SMB and NFS are best mounted by the host OS or Docker volume driver, then passed into the container. Raw HTTP sources use ffmpeg directly. Twitch, YouTube, and similar services use streamlink.</p>
           <p>Hardware transcoding requires the matching device passthrough, for example NVIDIA Container Toolkit for <code>h264_nvenc</code>, Intel Quick Sync for <code>qsv</code>, or VAAPI devices mounted into the container.</p>
+          <h2>Live Rewind</h2>
+          <p>Turn on "Live rewind" for a source in the Source Manager to let viewers scrub backward while it's actively recording. This runs a second H.264/AAC transcode into a rolling HLS buffer (window length set in Settings), so only enable it where the extra CPU/disk cost is acceptable. Once a recording finishes, the buffer is discarded and the archived file takes over.</p>
         </div>
       </section>
     </main>
