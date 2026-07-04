@@ -18,15 +18,18 @@
           <h1 id="app-name" class="truncate text-xl font-semibold tracking-normal">Defqon Stream Recorder</h1>
           <p class="text-sm text-zinc-400">Docker-first automatic recorder for Twitch, YouTube, and raw HTTP streams.</p>
         </div>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <button data-view="dashboard" class="nav active">Dashboard</button>
           <button data-view="sources" class="nav">Sources</button>
+          <button data-view="recordings" class="nav">Recordings</button>
           <button data-view="timetable" class="nav">Timetable</button>
           <button data-view="settings" class="nav">Settings</button>
           <button data-view="help" class="nav">Help</button>
         </div>
       </div>
     </header>
+
+    <div id="toasts" class="pointer-events-none fixed right-4 top-4 z-50 flex w-80 flex-col gap-2"></div>
 
     <main class="mx-auto max-w-7xl px-4 py-6">
       <section id="warnings" class="mb-4 space-y-2"></section>
@@ -69,6 +72,16 @@
           <div class="panel-head"><h2>Source Manager</h2><button id="add-source" class="btn">Add Source</button></div>
           <div id="source-editor" class="space-y-3"></div>
           <button id="save-sources" class="btn primary mt-4">Save Sources</button>
+        </div>
+      </section>
+
+      <section id="recordings" class="view hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>Recordings</h2>
+            <input id="recordings-filter" class="input max-w-xs" placeholder="Filter by source or filename" style="margin:0">
+          </div>
+          <div id="recordings-list" class="space-y-2 text-sm"></div>
         </div>
       </section>
 

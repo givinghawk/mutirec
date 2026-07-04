@@ -10,10 +10,10 @@ import (
 
 // Usage is a snapshot of recordings disk usage.
 type Usage struct {
-	Total       uint64            // total size of the recordings directory
-	PerStage    map[string]uint64 // size per immediate subfolder (stage)
-	VolumeTotal uint64            // total size of the holding volume
-	VolumeFree  uint64            // free space on the holding volume
+	Total       uint64            `json:"total"`       // total size of the recordings directory
+	PerStage    map[string]uint64 `json:"perStage"`    // size per immediate subfolder (stage)
+	VolumeTotal uint64            `json:"volumeTotal"` // total size of the holding volume
+	VolumeFree  uint64            `json:"volumeFree"`  // free space on the holding volume
 }
 
 // Scan walks the recordings directory and queries the volume's free space.

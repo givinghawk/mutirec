@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -34,9 +36,9 @@ var version = "dev"
 var staticFiles embed.FS
 
 type AppConfig struct {
-	Settings  Settings       `json:"settings"`
-	UI        UISettings     `json:"ui"`
-	Sources   []Source       `json:"sources"`
+	Settings  Settings        `json:"settings"`
+	UI        UISettings      `json:"ui"`
+	Sources   []Source        `json:"sources"`
 	Timetable []StageSchedule `json:"timetable"`
 }
 
@@ -48,9 +50,9 @@ type Settings struct {
 	MinFreeBytes          uint64        `json:"minFreeBytes"`
 	DefaultQuality        string        `json:"defaultQuality"`
 	DefaultContainer      string        `json:"defaultContainer"`
-	EnableNFO            bool          `json:"enableNfo"`
-	EnableWaveform       bool          `json:"enableWaveform"`
-	Backup               BackupConfig  `json:"backup"`
+	EnableNFO             bool          `json:"enableNfo"`
+	EnableWaveform        bool          `json:"enableWaveform"`
+	Backup                BackupConfig  `json:"backup"`
 	Notifications         Notifications `json:"notifications"`
 	AllowLiveProxy        bool          `json:"allowLiveProxy"`
 	WarnFreeBytes         uint64        `json:"warnFreeBytes"`
@@ -106,8 +108,8 @@ type Source struct {
 }
 
 type StageSchedule struct {
-	Stage string       `json:"stage"`
-	URL   string       `json:"url"`
+	Stage string        `json:"stage"`
+	URL   string        `json:"url"`
 	Sets  []ScheduleSet `json:"sets"`
 }
 
@@ -118,10 +120,10 @@ type ScheduleSet struct {
 }
 
 type State struct {
-	Version     string             `json:"version"`
-	StartedAt   time.Time          `json:"startedAt"`
-	Sources     []SourceStatus     `json:"sources"`
-	Events      []Event            `json:"events"`
+	Version     string              `json:"version"`
+	StartedAt   time.Time           `json:"startedAt"`
+	Sources     []SourceStatus      `json:"sources"`
+	Events      []Event             `json:"events"`
 	Disk        disk.Usage          `json:"disk"`
 	Config      AppConfig           `json:"config"`
 	ActiveCount int                 `json:"activeCount"`
@@ -131,15 +133,25 @@ type State struct {
 
 type SourceStatus struct {
 	Source
-	Status       string    `json:"status"`
-	OutputPath   string    `json:"outputPath"`
-	Size         int64     `json:"size"`
-	StartedAt    time.Time `json:"startedAt,omitempty"`
+	Status        string    `json:"status"`
+	OutputPath    string    `json:"outputPath"`
+	MediaPath     string    `json:"mediaPath,omitempty"`
+	Size          int64     `json:"size"`
+	StartedAt     time.Time `json:"startedAt,omitempty"`
 	LastError     string    `json:"lastError,omitempty"`
 	CurrentSet    string    `json:"currentSet,omitempty"`
 	NextSet       string    `json:"nextSet,omitempty"`
 	LogPath       string    `json:"logPath,omitempty"`
 	LastHeartbeat time.Time `json:"lastHeartbeat,omitempty"`
+}
+
+// RecordingFile describes a single finished recording on disk.
+type RecordingFile struct {
+	Name    string    `json:"name"`
+	Source  string    `json:"source"`
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
 }
 
 type NowItem struct {
@@ -169,12 +181,15 @@ type recording struct {
 }
 
 type App struct {
-	mu        sync.RWMutex
-	cfg       AppConfig
-	config    string
-	startedAt time.Time
-	active    map[string]*recording
-	events    []Event
+	mu           sync.RWMutex
+	cfg          AppConfig
+	config       string
+	startedAt    time.Time
+	active       map[string]*recording
+	events       []Event
+	lastFinished map[string]string
+	authUser     string
+	authPass     string
 }
 
 func main() {
@@ -188,6 +203,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	app.setupAuth()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -197,7 +213,7 @@ func main() {
 	app.routes(mux)
 
 	addr := env("HTTP_ADDR", ":8080")
-	server := &http.Server{Addr: addr, Handler: mux}
+	server := &http.Server{Addr: addr, Handler: securityHeaders(app.requireAuth(mux))}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -218,10 +234,11 @@ func NewApp(configPath string) (*App, error) {
 		return nil, err
 	}
 	app := &App{
-		cfg:       cfg,
-		config:    configPath,
-		startedAt: time.Now(),
-		active:    map[string]*recording{},
+		cfg:          cfg,
+		config:       configPath,
+		startedAt:    time.Now(),
+		active:       map[string]*recording{},
+		lastFinished: map[string]string{},
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -232,15 +249,58 @@ func NewApp(configPath string) (*App, error) {
 	return app, nil
 }
 
+// setupAuth loads AUTH_USERNAME/AUTH_PASSWORD from the environment. If no
+// password is configured, a random one is generated and printed once so the
+// UI is never reachable without credentials, even on a bare first run.
+func (a *App) setupAuth() {
+	a.authUser = env("AUTH_USERNAME", "admin")
+	a.authPass = os.Getenv("AUTH_PASSWORD")
+	if a.authPass == "" {
+		var b [12]byte
+		_, _ = rand.Read(b[:])
+		a.authPass = hex.EncodeToString(b[:])
+		log.Printf("AUTH_PASSWORD not set - generated a one-time password for this run.")
+		log.Printf("Login with username %q and password %q (set AUTH_USERNAME/AUTH_PASSWORD to persist credentials).", a.authUser, a.authPass)
+	}
+}
+
+// requireAuth gates every request (UI and API) behind HTTP Basic Auth.
+func (a *App) requireAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		userMatch := subtle.ConstantTimeCompare([]byte(user), []byte(a.authUser)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(a.authPass)) == 1
+		if !ok || !userMatch || !passMatch {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Defqon Stream Recorder", charset="UTF-8"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// securityHeaders adds a small set of defensive headers to every response.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (a *App) routes(mux *http.ServeMux) {
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/sources", a.handleSources)
+	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
+	mux.HandleFunc("/api/sources/", a.handleSourceItem)
 	mux.HandleFunc("/api/timetable", a.handleTimetable)
 	mux.HandleFunc("/api/record/", a.handleRecordAction)
 	mux.HandleFunc("/api/live/", a.handleLive)
+	mux.HandleFunc("/api/recordings", a.handleRecordings)
 	mux.HandleFunc("/media/", a.handleMedia)
 }
 
@@ -339,6 +399,9 @@ func (a *App) runRecording(rec *recording) {
 		a.backup(rec)
 		a.notify(fmt.Sprintf("%s finished", rec.source.Name), rec.finalPath)
 		a.event("info", fmt.Sprintf("[%s] saved %s", rec.source.Name, rec.finalPath))
+		a.mu.Lock()
+		a.lastFinished[rec.source.ID] = rec.finalPath
+		a.mu.Unlock()
 	} else if rec.ctx.Err() == nil {
 		a.event("warn", fmt.Sprintf("[%s] no output produced", rec.source.Name))
 	}
@@ -513,15 +576,157 @@ func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if strings.TrimSpace(src.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(src.URL) == "" {
+		http.Error(w, "url is required", http.StatusBadRequest)
+		return
+	}
+	if src.Type != "youtube" && src.Type != "twitch" && src.Type != "http" {
+		http.Error(w, "type must be youtube, twitch, or http", http.StatusBadRequest)
+		return
+	}
 	if src.ID == "" {
 		src.ID = newID()
 	}
 	a.mu.Lock()
+	for _, existing := range a.cfg.Sources {
+		if existing.ID == src.ID {
+			a.mu.Unlock()
+			http.Error(w, "source id already exists", http.StatusConflict)
+			return
+		}
+	}
 	a.cfg.Sources = append(a.cfg.Sources, src)
 	cfg := a.cfg
 	a.mu.Unlock()
 	_ = a.persist(cfg)
 	writeJSON(w, src)
+}
+
+// handleSourceItem handles per-source operations addressed as /api/sources/{id}.
+func (a *App) handleSourceItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/sources/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		a.stop(id)
+		a.mu.Lock()
+		found := false
+		out := a.cfg.Sources[:0:0]
+		for _, s := range a.cfg.Sources {
+			if s.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, s)
+		}
+		a.cfg.Sources = out
+		cfg := a.cfg
+		a.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSourceTest resolves a candidate stream URL without starting a recording,
+// so the UI can validate a source before saving it.
+func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Type    string `json:"type"`
+		URL     string `json:"url"`
+		Quality string `json:"quality"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.URL) == "" {
+		writeJSON(w, map[string]any{"ok": false, "error": "url is required"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+
+	if req.Type == "http" {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodHead, req.URL, nil)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		resp, err := http.DefaultClient.Do(httpReq)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			writeJSON(w, map[string]any{"ok": false, "error": fmt.Sprintf("server responded with %s", resp.Status)})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "url": req.URL})
+		return
+	}
+
+	quality := req.Quality
+	if quality == "" {
+		quality = a.snapshotConfig().Settings.DefaultQuality
+	}
+	if quality == "" {
+		quality = "best"
+	}
+	out, err := exec.CommandContext(ctx, "streamlink", "--stream-url", req.URL, quality).Output()
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "streamlink could not resolve this URL/quality"})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "url": strings.TrimSpace(string(out))})
+}
+
+func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
+	root := filepath.Clean(a.snapshotConfig().Settings.FinishedDir)
+	var files []RecordingFile
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if strings.HasSuffix(strings.ToLower(p), ".nfo") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		parts := strings.SplitN(rel, "/", 2)
+		source := ""
+		if len(parts) > 1 {
+			source = parts[0]
+		}
+		files = append(files, RecordingFile{Name: filepath.Base(p), Source: source, Path: rel, Size: info.Size(), ModTime: info.ModTime()})
+		return nil
+	})
+	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.After(files[j].ModTime) })
+	writeJSON(w, files)
 }
 
 func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
@@ -633,6 +838,16 @@ func (a *App) state() State {
 				st.Size = info.Size()
 				st.LastHeartbeat = info.ModTime()
 			}
+		} else if last, ok := a.lastFinished[src.ID]; ok {
+			st.OutputPath = last
+			if info, err := os.Stat(last); err == nil {
+				st.Size = info.Size()
+			}
+		}
+		if st.OutputPath != "" {
+			if rel, err := filepath.Rel(cfg.Settings.FinishedDir, st.OutputPath); err == nil && !strings.HasPrefix(rel, "..") {
+				st.MediaPath = filepath.ToSlash(rel)
+			}
 		}
 		cur, next := scheduleFor(cfg.Timetable, src.Name, time.Now())
 		if cur != nil {
@@ -742,11 +957,64 @@ func (a *App) notify(subject, body string) {
 	}
 	s := cfg.Settings.Notifications.SMTP
 	if s.Enabled && s.Host != "" && s.To != "" {
-		addr := fmt.Sprintf("%s:%d", s.Host, max(25, s.Port))
-		msg := []byte("To: " + s.To + "\r\nSubject: " + subject + "\r\n\r\n" + body)
-		auth := smtp.PlainAuth("", s.Username, s.Password, s.Host)
-		_ = smtp.SendMail(addr, auth, s.From, []string{s.To}, msg)
+		if err := sendSMTP(s, subject, body); err != nil {
+			a.event("error", fmt.Sprintf("email notification failed: %s", err))
+		}
 	}
+}
+
+// sendSMTP delivers a plain-text email, supporting both STARTTLS (typically
+// port 587) and implicit TLS (typically port 465) since net/smtp.SendMail
+// only supports the former and silently fails against implicit-TLS servers.
+func sendSMTP(s SMTPConfig, subject, body string) error {
+	port := s.Port
+	if port == 0 {
+		port = 587
+	}
+	addr := fmt.Sprintf("%s:%d", s.Host, port)
+	from := s.From
+	if from == "" {
+		from = s.Username
+	}
+	msg := []byte("From: " + from + "\r\nTo: " + s.To + "\r\nSubject: " + subject + "\r\n\r\n" + body)
+	auth := smtp.PlainAuth("", s.Username, s.Password, s.Host)
+
+	if port == 465 {
+		conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: s.Host})
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		client, err := smtp.NewClient(conn, s.Host)
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+		if s.Username != "" {
+			if err := client.Auth(auth); err != nil {
+				return err
+			}
+		}
+		if err := client.Mail(from); err != nil {
+			return err
+		}
+		if err := client.Rcpt(s.To); err != nil {
+			return err
+		}
+		w, err := client.Data()
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(msg); err != nil {
+			return err
+		}
+		if err := w.Close(); err != nil {
+			return err
+		}
+		return client.Quit()
+	}
+
+	return smtp.SendMail(addr, auth, from, []string{s.To}, msg)
 }
 
 func loadConfig(path string) (AppConfig, error) {
@@ -778,8 +1046,8 @@ func defaultConfig() AppConfig {
 			CheckIntervalSeconds: 30,
 			MinFreeBytes:         1024 * 1024 * 1024,
 			WarnFreeBytes:        5 * 1024 * 1024 * 1024,
-			DefaultQuality:        "best",
-			DefaultContainer:      "mkv",
+			DefaultQuality:       "best",
+			DefaultContainer:     "mkv",
 			EnableNFO:            true,
 			EnableWaveform:       true,
 			AllowLiveProxy:       true,

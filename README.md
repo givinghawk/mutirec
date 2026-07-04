@@ -20,6 +20,11 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Basic player interface for audio and video streams, with optional WaveSurfer.js waveform rendering.
 - Live stage switching from the WebUI when the browser can play the resolved stream URL.
 - Custom app name, logo URL, colour scheme, accent colour, and custom CSS.
+- Recordings library view with search/filter across all finished files.
+- One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
+- Delete and duplicate buttons for sources, plus validation on required fields.
+- Toast notifications surface API/server errors directly in the WebUI.
+- HTTP Basic Auth in front of the whole app (WebUI and API).
 
 ## Quick Start
 
@@ -209,6 +214,30 @@ Environment variables:
 | `FINISHED_DIR` | `/data/recordings` | Finished recordings |
 | `TEMP_DIR` | `/data/incomplete` | Active partial recordings |
 | `LOG_DIR` | `/data/logs` | Per-recording logs |
+| `AUTH_USERNAME` | `admin` | WebUI/API login username |
+| `AUTH_PASSWORD` | *(random, printed to logs on startup)* | WebUI/API login password |
+
+## Security
+
+The entire WebUI and API sit behind HTTP Basic Auth. Set `AUTH_USERNAME` and
+`AUTH_PASSWORD` explicitly (for example in `docker-compose.yml`) for any
+deployment reachable outside your own machine:
+
+```yaml
+environment:
+  AUTH_USERNAME: yourname
+  AUTH_PASSWORD: a-long-random-password
+```
+
+If `AUTH_PASSWORD` is left unset, a random one is generated on every start and
+printed once to the container logs (`docker compose logs recorder`) — it is
+not persisted, so it changes on every restart. This keeps a bare first run
+from being wide open, but you should set real credentials before exposing the
+port beyond localhost.
+
+Source `streamlinkArgs`/`ffmpegArgs` are passed straight to those tools, so
+treat WebUI access as equivalent to shell access to `streamlink`/`ffmpeg` on
+the host — only share credentials with people you'd trust with that.
 
 ## Disclaimer
 

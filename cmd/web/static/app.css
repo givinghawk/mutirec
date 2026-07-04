@@ -19,3 +19,12 @@ label { display: block; color: #d4d4d8; font-size: 13px; }
 .event-error { color: #fecaca; }
 code { color: #fda4af; }
 a { color: #67e8f9; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn:disabled:hover { background: rgb(255 255 255 / .06); }
+.pill.status-recording { background: rgb(239 68 68 / .2); color: #fca5a5; }
+.pill.status-idle { background: rgb(255 255 255 / .08); color: #d4d4d8; }
+.pill.status-disabled { background: rgb(255 255 255 / .04); color: #71717a; }
+.toast { pointer-events: auto; border-radius: 8px; padding: 10px 14px; font-size: 13px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); border: 1px solid rgb(255 255 255 / .12); background: rgb(24 24 27 / .95); color: #f4f4f5; transition: opacity .4s, transform .4s; }
+.toast-error { border-color: rgb(239 68 68 / .5); color: #fecaca; }
+.toast-info { border-color: rgb(16 185 129 / .4); color: #d1fae5; }
+.toast-out { opacity: 0; transform: translateX(20px); }

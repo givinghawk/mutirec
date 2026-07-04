@@ -1,18 +1,42 @@
 let state = null;
 let config = null;
 let wave = null;
+let recordings = [];
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
 async function api(path, opts) {
-  const res = await fetch(path, opts);
-  if (!res.ok) throw new Error(await res.text());
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (err) {
+    toast(`Network error: ${err.message}`, 'error');
+    throw err;
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    toast(text || `Request failed (${res.status})`, 'error');
+    throw new Error(text || `Request failed (${res.status})`);
+  }
   return res.json();
 }
 
 function $(id) { return document.getElementById(id); }
 
+function toast(message, level) {
+  const el = document.createElement('div');
+  el.className = `toast toast-${level || 'info'}`;
+  el.textContent = message;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.classList.add('toast-out'), 4000);
+  setTimeout(() => el.remove(), 4500);
+}
+
 async function refresh() {
-  state = await api('/api/state');
+  try {
+    state = await api('/api/state');
+  } catch (err) {
+    return;
+  }
   config = state.config;
   applyTheme();
   renderDashboard();
@@ -32,6 +56,15 @@ function applyTheme() {
   }
 }
 
+function elapsed(startedAt) {
+  const start = new Date(startedAt).getTime();
+  if (!start) return '';
+  let secs = Math.max(0, Math.floor((Date.now() - start) / 1000));
+  const h = Math.floor(secs / 3600); secs -= h * 3600;
+  const m = Math.floor(secs / 60); secs -= m * 60;
+  return `${h ? h + 'h ' : ''}${m}m ${secs}s`;
+}
+
 function renderDashboard() {
   $('active-count').textContent = `${state.activeCount} active`;
   $('warnings').innerHTML = state.warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
@@ -42,23 +75,24 @@ function renderDashboard() {
           <h3>${escapeHtml(src.name)}</h3>
           <p class="text-sm text-zinc-400">${escapeHtml(src.type)} · ${escapeHtml(src.quality || 'best')} · ${escapeHtml(src.container || 'mkv')}</p>
         </div>
-        <span class="pill">${escapeHtml(src.status)}</span>
+        <span class="pill status-${escapeHtml(src.status)}">${escapeHtml(src.status)}</span>
       </div>
       <div class="mt-3 text-sm text-zinc-300">
         <div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div>
         <div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>
-        <div>Size: ${formatBytes(src.size || 0)}</div>
+        <div>Size: ${formatBytes(src.size || 0)}${src.status === 'recording' ? ` · Recording for ${elapsed(src.startedAt)}` : ''}</div>
+        ${src.lastError ? `<div class="text-rose-300">Error: ${escapeHtml(src.lastError)}</div>` : ''}
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
-        <button class="btn" onclick="start('${src.id}')">Record</button>
-        <button class="btn" onclick="stopRec('${src.id}')">Stop</button>
+        <button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>
+        <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
         <button class="btn" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">Live</button>
-        ${src.outputPath ? `<a class="btn" href="/media/${mediaRel(src.outputPath)}">Open</a>` : ''}
+        ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
     </article>`).join('');
-  const free = state.disk.volumeFree || state.disk.VolumeFree || 0;
-  const total = state.disk.volumeTotal || state.disk.VolumeTotal || 0;
-  $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || state.disk.Total || 0)}</div>`;
+  const free = state.disk.volumeFree || 0;
+  const total = state.disk.volumeTotal || 0;
+  $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
   $('events').innerHTML = [...state.events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
 }
 
@@ -86,6 +120,12 @@ function drawSourceEditor() {
       <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
       <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
       <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
+      <div class="col-span-full flex flex-wrap items-center gap-2 pt-1">
+        <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
+        <button type="button" class="btn" onclick="duplicateSource(${i})">Duplicate</button>
+        <button type="button" class="btn" style="color:#fda4af" onclick="deleteSource(${i})">Delete</button>
+        <span class="test-result text-sm text-zinc-400" id="test-result-${i}"></span>
+      </div>
     </div>`).join('');
 }
 
@@ -105,6 +145,40 @@ function readSources() {
     audioOnly: el.querySelector('.src-audio').checked,
     transcode: el.querySelector('.src-transcode').checked
   }));
+}
+
+async function testSource(i) {
+  config.sources = readSources();
+  const s = config.sources[i];
+  const label = $(`test-result-${i}`);
+  label.textContent = 'Testing…';
+  try {
+    const result = await api('/api/sources/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: s.type, url: s.url, quality: s.quality })
+    });
+    label.textContent = result.ok ? `Resolved OK` : `Failed: ${result.error}`;
+    label.className = `test-result text-sm ${result.ok ? 'text-emerald-300' : 'text-rose-300'}`;
+    if (result.ok) toast(`${s.name || 'Source'}: stream resolved successfully`, 'info');
+  } catch (err) {
+    label.textContent = 'Test request failed';
+  }
+}
+
+function duplicateSource(i) {
+  config.sources = readSources();
+  const copy = { ...config.sources[i], id: undefined, name: `${config.sources[i].name} copy` };
+  config.sources.splice(i + 1, 0, copy);
+  drawSourceEditor();
+}
+
+function deleteSource(i) {
+  config.sources = readSources();
+  const src = config.sources[i];
+  if (!confirm(`Delete source "${src.name}"? This does not delete existing recordings.`)) return;
+  config.sources.splice(i, 1);
+  drawSourceEditor();
 }
 
 function fillSettings() {
@@ -141,22 +215,33 @@ function readSettings() {
 async function saveConfig() {
   await api('/api/config', { method: 'PUT', body: JSON.stringify(config), headers: { 'Content-Type': 'application/json' } });
   $('source-editor').dataset.loaded = '';
+  toast('Saved', 'info');
   await refresh();
 }
 
-async function start(id) { await api(`/api/record/${id}`, { method: 'POST' }); await refresh(); }
-async function stopRec(id) { await api(`/api/record/${id}`, { method: 'DELETE' }); await refresh(); }
+async function start(id) { try { await api(`/api/record/${id}`, { method: 'POST' }); } catch { return; } await refresh(); }
+async function stopRec(id, name) {
+  if (!confirm(`Stop recording "${name || 'this source'}"? The file recorded so far will be kept.`)) return;
+  try { await api(`/api/record/${id}`, { method: 'DELETE' }); } catch { return; }
+  await refresh();
+}
+
 function playLive(id, audioOnly) {
   const url = `/api/live/${id}`;
-  const el = audioOnly ? $('audio') : $('video');
-  $('video').classList.toggle('hidden', audioOnly);
+  const audioEl = $('audio'), videoEl = $('video');
+  audioEl.classList.toggle('hidden', !audioOnly);
+  videoEl.classList.toggle('hidden', audioOnly);
+  const el = audioOnly ? audioEl : videoEl;
+  (audioOnly ? videoEl : audioEl).pause();
   el.src = url;
-  el.play();
+  el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
   if ($('wave-toggle').checked && window.WaveSurfer) {
     $('wave').classList.remove('hidden');
     if (wave) wave.destroy();
     wave = WaveSurfer.create({ container: '#wave', waveColor: '#52525b', progressColor: accents[config.ui.accent] || accents.red, height: 80 });
     wave.load(url);
+  } else {
+    $('wave').classList.add('hidden');
   }
 }
 
@@ -165,14 +250,56 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = () => {
   document.querySelectorAll('.view').forEach(x => x.classList.add('hidden'));
   b.classList.add('active');
   $(b.dataset.view).classList.remove('hidden');
+  if (b.dataset.view === 'recordings') loadRecordings();
 });
-$('add-source').onclick = () => { config.sources.push({ id: crypto.randomUUID(), name: 'New Source', type: 'youtube', url: '', enabled: true, record: false, quality: 'best', container: 'mkv' }); drawSourceEditor(); };
-$('save-sources').onclick = async () => { config.sources = readSources(); await saveConfig(); };
-$('save-timetable').onclick = async () => { config.timetable = JSON.parse($('timetable-json').value); await saveConfig(); };
+
+$('add-source').onclick = () => { config.sources.push({ id: undefined, name: 'New Source', type: 'youtube', url: '', enabled: true, record: false, quality: 'best', container: 'mkv' }); drawSourceEditor(); };
+$('save-sources').onclick = async () => {
+  config.sources = readSources();
+  const missing = config.sources.find(s => !s.name.trim() || !s.url.trim());
+  if (missing) { toast('Every source needs a name and URL', 'error'); return; }
+  await saveConfig();
+};
+$('save-timetable').onclick = async () => {
+  try {
+    config.timetable = JSON.parse($('timetable-json').value);
+  } catch (err) {
+    toast(`Timetable JSON is invalid: ${err.message}`, 'error');
+    return;
+  }
+  await saveConfig();
+};
 $('save-settings').onclick = async () => { readSettings(); await saveConfig(); };
 
+async function loadRecordings() {
+  try {
+    recordings = await api('/api/recordings');
+  } catch {
+    return;
+  }
+  renderRecordings();
+}
+
+function renderRecordings() {
+  const filter = ($('recordings-filter').value || '').toLowerCase();
+  const rows = recordings.filter(r => !filter || r.name.toLowerCase().includes(filter) || (r.source || '').toLowerCase().includes(filter));
+  if (!rows.length) {
+    $('recordings-list').innerHTML = `<p class="text-zinc-400">No recordings found${filter ? ' matching that filter' : ''}.</p>`;
+    return;
+  }
+  $('recordings-list').innerHTML = rows.map(r => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="truncate font-medium">${escapeHtml(r.name)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(r.source || '')} · ${formatBytes(r.size)} · ${new Date(r.modTime).toLocaleString()}</div>
+      </div>
+      <a class="btn" href="/media/${encodeMediaPath(r.path)}" target="_blank" rel="noopener">Open</a>
+    </div>`).join('');
+}
+$('recordings-filter').addEventListener('input', renderRecordings);
+
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
-function mediaRel(p) { const parts = p.split(/[\\/](recordings)[\\/]/); return parts.length > 1 ? encodeURI(parts[2].replaceAll('\\','/')) : encodeURI(p.split(/[\\/]/).slice(-2).join('/')); }
+function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
