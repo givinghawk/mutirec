@@ -965,7 +965,10 @@ func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) 
 		if src.AudioOnly {
 			args = append(args, "-vn", "-c:a", "aac", "-b:a", "160k")
 		} else {
-			args = append(args, "-c:v", videoEncoder(src.HardwareAccel), "-preset", "veryfast", "-c:a", "aac", "-b:a", "160k")
+			args = append(args, "-c:v", videoEncoder(src.HardwareAccel), "-c:a", "aac", "-b:a", "160k")
+			if src.HardwareAccel == "" || src.HardwareAccel == "none" {
+				args = append(args, "-preset", "veryfast")
+			}
 		}
 		args = append(args,
 			"-f", "hls",
