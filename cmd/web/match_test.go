@@ -83,31 +83,22 @@ func TestArtistSimilarity(t *testing.T) {
 	}
 }
 
-func TestFilenameContainsStage(t *testing.T) {
-	name := "DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3"
-	if !filenameContainsStage(name, "Sacred Oath") {
-		t.Error("expected filename to contain stage name 'Sacred Oath'")
-	}
-	if filenameContainsStage(name, "Waterdance") {
-		t.Error("expected filename to not contain unrelated stage name 'Waterdance'")
-	}
-}
-
 // TestBestMatchSuggestion_UserExample exercises the full matching pipeline
-// against the exact filename/scenario reported: a "BLUE" channel folder that
-// doesn't match the archived timetable's real stage name ("Sacred Oath"),
-// with the date given as day-first and no time-of-day - the artist name and
-// the stage name embedded in the filename should still be enough to
-// confidently identify the set.
+// against the exact filename/scenario reported: "BLUE" is the real stage
+// name (matching the recording's folder/channel), "Defqon_1_Sacred_Oath" is
+// the festival name plus that year's edition/theme name (not a stage, and
+// not parsed further), and the date is given day-first with no
+// time-of-day - the channel match, guessed date, and guessed artist name
+// together should be enough to confidently identify the set.
 func TestBestMatchSuggestion_UserExample(t *testing.T) {
 	cfg := AppConfig{
 		LibraryEvents: []LibraryEvent{
 			{
 				ID:   "ev1",
-				Name: "Defqon.1 2026",
+				Name: "Defqon.1 - Sacred Oath (2026)",
 				Timetable: []StageSchedule{
 					{
-						Stage: "Sacred Oath",
+						Stage: "BLUE",
 						Sets: []ScheduleSet{
 							{ID: "s1", Name: "DJ Isaac", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
 							{ID: "s2", Name: "Wildstylez", Start: "2026-06-25T15:00:00Z", End: "2026-06-25T16:00:00Z"},

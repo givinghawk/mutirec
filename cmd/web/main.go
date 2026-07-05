@@ -1820,24 +1820,6 @@ func artistSimilarity(guessed, setName string) float64 {
 	return float64(matches) / float64(shorter)
 }
 
-// compactNormalize strips everything but letters/digits and lowercases, so
-// two names can be compared regardless of separator style (underscore,
-// dash, space) - e.g. "Sacred_Oath" and "Sacred Oath" both become
-// "sacredoath".
-func compactNormalize(s string) string {
-	return nonAlnumRe.ReplaceAllString(strings.ToLower(s), "")
-}
-
-// filenameContainsStage reports whether an archived timetable stage's own
-// name appears in the filename - useful when a recording's folder/channel
-// name is just a video-feed label (e.g. "BLUE") that doesn't match the
-// festival's real stage name, but the real stage name was still baked into
-// the filename by whatever tool produced it (e.g. "..._Sacred_Oath_...").
-func filenameContainsStage(filename, stageName string) bool {
-	stage := compactNormalize(stageName)
-	return stage != "" && strings.Contains(compactNormalize(filename), stage)
-}
-
 // MatchSuggestion is one recording's best-guess event/set match, offered to
 // the user for approval or correction rather than applied automatically.
 type MatchSuggestion struct {
@@ -1899,28 +1881,23 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 // matchCandidate is one archived timetable set considered as a possible
 // match for a recording, scored by candidateScore.
 type matchCandidate struct {
-	eventID, eventName, setID, stage, artist           string
-	delta                                              time.Duration
-	contained, stageMatch, filenameStageMatch, sameDay bool
-	artistScore                                        float64
+	eventID, eventName, setID, stage, artist string
+	delta                                    time.Duration
+	contained, stageMatch, sameDay           bool
+	artistScore                              float64
 }
 
 // candidateScore combines every signal available for one candidate set into
 // a single comparable number, so bestMatchSuggestion can just pick the max
 // rather than hand-rolling a comparator. Roughly, in descending weight: an
-// exact time-window match, a filename-embedded stage name matching the
-// archived stage's own name (stronger than a folder/channel-name guess,
-// since it's the festival's real stage name rather than a video-feed
-// label), the guessed artist name matching the set's name, a folder/channel
-// name match, being on the right calendar day, and - only as a tiebreaker
-// when an actual clock time was parsed - closeness in time.
+// exact time-window match, the guessed artist name matching the set's name,
+// the folder/channel name matching the archived stage, being on the right
+// calendar day, and - only as a tiebreaker when an actual clock time was
+// parsed - closeness in time.
 func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 	score := 0.0
 	if c.contained {
 		score += 100
-	}
-	if c.filenameStageMatch {
-		score += 60
 	}
 	if c.stageMatch {
 		score += 40
@@ -1941,10 +1918,12 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 
 // bestMatchSuggestion checks every LibraryEvent's archived timetable for the
 // set that best matches this recording, using whichever signals are
-// available: the channel/stage name (from its folder, and/or found baked
-// into the filename itself), the guessed artist name parsed from the
-// filename, and the guessed date/time (exact window containment if the
-// filename included a clock time, otherwise same-calendar-day only).
+// available: the channel/stage name (from its folder), the guessed artist
+// name parsed from the filename, and the guessed date/time (exact window
+// containment if the filename included a clock time, otherwise
+// same-calendar-day only). Anything after the date in the filename (e.g.
+// festival name, edition/theme name, genre) is display-only and not parsed
+// further - the channel/date/artist signals already fully disambiguate.
 func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time.Time, fromName, hasTimeOfDay bool) MatchSuggestion {
 	base := MatchSuggestion{Path: path, Name: name, Channel: channel, GuessedFromName: fromName, Confidence: "none", Reason: "Could not find a matching set - assign manually."}
 	if fromName {
@@ -1959,7 +1938,6 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	for _, ev := range cfg.LibraryEvents {
 		for _, stage := range ev.Timetable {
 			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
-			filenameStageMatch := filenameContainsStage(name, stage.Stage)
 			for _, set := range stage.Sets {
 				start, errS := time.Parse(time.RFC3339, set.Start)
 				end, errE := time.Parse(time.RFC3339, set.End)
@@ -1987,8 +1965,7 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 				}
 				cand := matchCandidate{
 					eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name,
-					delta: delta, contained: contained, stageMatch: stageMatch, filenameStageMatch: filenameStageMatch,
-					sameDay: sameDay, artistScore: artistScore,
+					delta: delta, contained: contained, stageMatch: stageMatch, sameDay: sameDay, artistScore: artistScore,
 				}
 				if score := candidateScore(cand, hasTimeOfDay); best == nil || score > bestScore {
 					c := cand
@@ -2007,30 +1984,28 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	base.SetID = best.setID
 	base.Stage = best.stage
 	base.Artist = best.artist
-	matchedStage := best.stageMatch || best.filenameStageMatch
 	switch {
-	case best.contained && matchedStage:
+	case best.contained && best.stageMatch:
 		base.Confidence = "high"
-		base.Reason = fmt.Sprintf("%s on %s matches the channel/stage and the guessed time falls within this set's window.", best.artist, best.stage)
-	case best.artistScore >= 0.99 && (best.contained || best.sameDay):
+		base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+	case best.artistScore >= 0.99 && best.stageMatch && (best.contained || best.sameDay):
 		base.Confidence = "high"
-		if matchedStage {
-			base.Reason = fmt.Sprintf("Filename matches \"%s\" on %s, on the right day.", best.artist, best.stage)
-		} else {
-			base.Reason = fmt.Sprintf("Filename matches \"%s\" on the right day.", best.artist)
-		}
+		base.Reason = fmt.Sprintf("Filename matches \"%s\" on %s, on the right day.", best.artist, best.stage)
 	case best.contained:
 		base.Confidence = "medium"
 		base.Reason = fmt.Sprintf("Guessed time falls within %s's window, but the channel doesn't match \"%s\" - double check.", best.artist, channel)
-	case best.artistScore >= 0.5 && best.sameDay:
+	case best.artistScore >= 0.99 && best.sameDay:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("Filename matches \"%s\", playing that day, but on a different channel than \"%s\" - double check.", best.artist, channel)
+	case best.artistScore >= 0.5 && best.stageMatch && best.sameDay:
 		base.Confidence = "medium"
 		base.Reason = fmt.Sprintf("Filename partially matches \"%s\" on %s, playing that day - double check.", best.artist, best.stage)
-	case matchedStage && hasTimeOfDay && best.delta <= 30*time.Minute:
+	case best.stageMatch && hasTimeOfDay && best.delta <= 30*time.Minute:
 		base.Confidence = "medium"
-		base.Reason = fmt.Sprintf("Channel/stage matches %s; closest set by time (%s away).", best.stage, best.delta.Round(time.Minute))
-	case matchedStage && best.sameDay:
+		base.Reason = fmt.Sprintf("Channel matches %s; closest set by time (%s away).", best.stage, best.delta.Round(time.Minute))
+	case best.stageMatch && best.sameDay:
 		base.Confidence = "medium"
-		base.Reason = fmt.Sprintf("Channel/stage matches %s, and it's the right day - verify the exact set.", best.stage)
+		base.Reason = fmt.Sprintf("Channel matches %s, and it's the right day - verify the exact set.", best.stage)
 	default:
 		base.Confidence = "low"
 		if hasTimeOfDay {
