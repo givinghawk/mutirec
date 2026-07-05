@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,9 @@ var version = "dev"
 
 //go:embed static/*
 var staticFiles embed.FS
+
+//go:embed presets/presets.json
+var presetsFile embed.FS
 
 type AppConfig struct {
 	Settings        Settings                 `json:"settings"`
@@ -134,12 +138,12 @@ type Settings struct {
 }
 
 type UISettings struct {
-	AppName    string            `json:"appName"`
-	LogoURL    string            `json:"logoUrl"`
-	Theme      string            `json:"theme"`
-	Accent     string            `json:"accent"`
-	CustomCSS  string            `json:"customCss"`
-	CustomTheme string           `json:"customTheme"`
+	AppName     string            `json:"appName"`
+	LogoURL     string            `json:"logoUrl"`
+	Theme       string            `json:"theme"`
+	Accent      string            `json:"accent"`
+	CustomCSS   string            `json:"customCss"`
+	CustomTheme string            `json:"customTheme"`
 	ThemeColors map[string]string `json:"themeColors"`
 }
 
@@ -166,24 +170,39 @@ type SMTPConfig struct {
 }
 
 type Source struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Type           string   `json:"type"`
-	URL            string   `json:"url"`
-	Enabled        bool     `json:"enabled"`
-	Record         bool     `json:"record"`
-	Quality        string   `json:"quality"`
-	Container      string   `json:"container"`
-	AudioOnly      bool     `json:"audioOnly"`
-	Transcode      bool     `json:"transcode"`
-	HardwareAccel  string   `json:"hardwareAccel"`
-	StreamlinkArgs []string `json:"streamlinkArgs"`
-	FFmpegArgs     []string `json:"ffmpegArgs"`
-	ExtraNFO       string   `json:"extraNfo"`
-	Color          string   `json:"color"`
-	LiveRewind     bool     `json:"liveRewind"`
-	TimetableStage string   `json:"timetableStage,omitempty"`
-	FestivalID     string   `json:"festivalId,omitempty"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Type              string   `json:"type"`
+	URL               string   `json:"url"`
+	Enabled           bool     `json:"enabled"`
+	Record            bool     `json:"record"`
+	Quality           string   `json:"quality"`
+	Container         string   `json:"container"`
+	AudioOnly         bool     `json:"audioOnly"`
+	Transcode         bool     `json:"transcode"`
+	HardwareAccel     string   `json:"hardwareAccel"`
+	StreamlinkArgs    []string `json:"streamlinkArgs"`
+	FFmpegArgs        []string `json:"ffmpegArgs"`
+	ExtraNFO          string   `json:"extraNfo"`
+	Color             string   `json:"color"`
+	LiveRewind        bool     `json:"liveRewind"`
+	TimetableStage    string   `json:"timetableStage,omitempty"`
+	FestivalID        string   `json:"festivalId,omitempty"`
+	LoudnessNormalize bool     `json:"loudnessNormalize,omitempty"`
+}
+
+// SourcePreset is one bundled, ready-to-add pack of sources - a DJ/streamer,
+// an event, or (in the future) a whole festival's set of stages - offered in
+// the Sources tab so a common setup can be added in one click instead of
+// hand-entering each URL. Bundled read-only in presets/presets.json; nothing
+// here is user-editable (users still add/edit their own sources normally).
+type SourcePreset struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Category    string   `json:"category,omitempty"`
+	Description string   `json:"description,omitempty"`
+	LogoURL     string   `json:"logoUrl,omitempty"`
+	Sources     []Source `json:"sources"`
 }
 
 type StageSchedule struct {
@@ -225,18 +244,20 @@ type State struct {
 
 type SourceStatus struct {
 	Source
-	Status           string    `json:"status"`
-	OutputPath       string    `json:"outputPath"`
-	MediaPath        string    `json:"mediaPath,omitempty"`
-	Size             int64     `json:"size"`
-	StartedAt        time.Time `json:"startedAt,omitempty"`
-	LastError        string    `json:"lastError,omitempty"`
-	CurrentSet       string    `json:"currentSet,omitempty"`
-	NextSet          string    `json:"nextSet,omitempty"`
-	LogPath          string    `json:"logPath,omitempty"`
-	LastHeartbeat    time.Time `json:"lastHeartbeat,omitempty"`
-	LiveRewindActive bool      `json:"liveRewindActive"`
-	Orphaned         bool      `json:"orphaned,omitempty"`
+	Status            string    `json:"status"`
+	OutputPath        string    `json:"outputPath"`
+	MediaPath         string    `json:"mediaPath,omitempty"`
+	Size              int64     `json:"size"`
+	StartedAt         time.Time `json:"startedAt,omitempty"`
+	LastError         string    `json:"lastError,omitempty"`
+	CurrentSet        string    `json:"currentSet,omitempty"`
+	NextSet           string    `json:"nextSet,omitempty"`
+	LogPath           string    `json:"logPath,omitempty"`
+	LastHeartbeat     time.Time `json:"lastHeartbeat,omitempty"`
+	LiveRewindActive  bool      `json:"liveRewindActive"`
+	Orphaned          bool      `json:"orphaned,omitempty"`
+	ReconnectAttempts int       `json:"reconnectAttempts,omitempty"`
+	NextRetryAt       time.Time `json:"nextRetryAt,omitempty"`
 }
 
 // RecordingFile describes a single finished recording on disk, enriched with
@@ -270,17 +291,18 @@ type Event struct {
 }
 
 type recording struct {
-	source    Source
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startedAt time.Time
-	tempPath  string
-	finalPath string
-	logPath   string
-	logFile   *os.File
-	lastErr   string
-	done      chan struct{}
-	hlsDir    string
+	source     Source
+	ctx        context.Context
+	cancel     context.CancelFunc
+	startedAt  time.Time
+	tempPath   string
+	finalPath  string
+	logPath    string
+	logFile    *os.File
+	lastErr    string
+	done       chan struct{}
+	hlsDir     string
+	manualStop atomic.Bool
 }
 
 type App struct {
@@ -296,6 +318,9 @@ type App struct {
 	authFile      string
 	remindersSent map[string]time.Time
 
+	retryMu sync.Mutex
+	retry   map[string]*retryState
+
 	sessMu   sync.Mutex
 	sessions map[string]time.Time
 
@@ -306,6 +331,8 @@ type App struct {
 
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
+
+	sourcePresets []SourcePreset
 }
 
 // hashCacheEntry remembers the sha256 hash last computed for a recording, so
@@ -371,7 +398,9 @@ func NewApp(configPath string) (*App, error) {
 		active:        map[string]*recording{},
 		lastFinished:  map[string]string{},
 		remindersSent: map[string]time.Time{},
+		retry:         map[string]*retryState{},
 		sessions:      map[string]time.Time{},
+		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -495,10 +524,13 @@ func (a *App) checkCredentials(username, password string) bool {
 // redirected back to themselves.
 func isPublicPath(p string) bool {
 	switch p {
-	case "/login", "/api/login", "/setup", "/api/setup", "/app.css":
+	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js":
 		return true
 	}
-	return false
+	// Icons are pure branding assets (no user data) and need to load
+	// unauthenticated for the browser's install/add-to-home-screen prompt
+	// and for the login/setup pages themselves.
+	return strings.HasPrefix(p, "/icons/")
 }
 
 // requireAuth gates every request (UI and API) behind a session cookie set by
@@ -771,6 +803,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/system-check", a.handleSystemCheck)
 	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/api/presets", a.handlePresets)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
@@ -826,6 +859,9 @@ func (a *App) evaluate() {
 			continue
 		}
 		if a.isActive(src.ID) {
+			continue
+		}
+		if _, blocked := a.retryBlocked(src.ID); blocked {
 			continue
 		}
 		a.start(src)
@@ -889,6 +925,91 @@ func (a *App) start(src Source) {
 // unplayable files.
 const minViableRecordingBytes = 64 * 1024
 
+// retryState tracks the auto-reconnect backoff for a single source: how many
+// consecutive short-lived failures it has had in a row, and when it's next
+// allowed to try again. Kept in memory only - a restart just starts clean.
+type retryState struct {
+	attempts    int
+	nextAttempt time.Time
+}
+
+// minStableRecordingDuration is how long a recording has to run before it's
+// considered "the stream was actually working" rather than an immediate
+// connection failure. A recording that produced output but died before this
+// elapsed (bad URL, offline channel, network blip right at start) counts
+// toward the reconnect backoff instead of being retried every scheduler tick.
+const minStableRecordingDuration = 60 * time.Second
+
+const (
+	reconnectBaseDelay = 5 * time.Second
+	reconnectMaxDelay  = 5 * time.Minute
+)
+
+// reconnectDelay computes an exponential backoff (5s, 10s, 20s, ... capped at
+// reconnectMaxDelay) from the number of consecutive failures so far, so a
+// stream that's genuinely down doesn't get hammered with a restart every
+// scheduler tick.
+func reconnectDelay(attempts int) time.Duration {
+	shift := attempts - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 6 {
+		shift = 6
+	}
+	d := reconnectBaseDelay * time.Duration(1<<uint(shift))
+	if d > reconnectMaxDelay {
+		d = reconnectMaxDelay
+	}
+	return d
+}
+
+// retryBlocked reports whether a source is still within its reconnect
+// backoff window and, if so, when it'll next be eligible.
+func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil || !time.Now().Before(st.nextAttempt) {
+		return time.Time{}, false
+	}
+	return st.nextAttempt, true
+}
+
+// clearRetry resets a source's reconnect backoff, used both on a manual stop
+// (the user is in control, not a dropped connection) and after a stable run.
+func (a *App) clearRetry(sourceID string) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	delete(a.retry, sourceID)
+}
+
+// recordFailure bumps a source's reconnect attempt counter and schedules the
+// next allowed retry, returning the new attempt count and delay for logging.
+func (a *App) recordFailure(sourceID string) (int, time.Duration) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil {
+		st = &retryState{}
+		a.retry[sourceID] = st
+	}
+	st.attempts++
+	delay := reconnectDelay(st.attempts)
+	st.nextAttempt = time.Now().Add(delay)
+	return st.attempts, delay
+}
+
+func (a *App) reconnectStatus(sourceID string) (attempts int, nextAttempt time.Time, ok bool) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil {
+		return 0, time.Time{}, false
+	}
+	return st.attempts, st.nextAttempt, true
+}
+
 func (a *App) runRecording(rec *recording) {
 	defer close(rec.done)
 	defer rec.logFile.Close()
@@ -937,6 +1058,22 @@ func (a *App) runRecording(rec *recording) {
 
 	if rec.hlsDir != "" {
 		_ = os.RemoveAll(rec.hlsDir)
+	}
+
+	// Auto-reconnect bookkeeping: a manual stop (or app shutdown, which also
+	// goes through stop()) is the user/operator in control, not a dropped
+	// connection, so it's exempt from backoff. Otherwise, a recording that
+	// ran long enough to be considered stable clears any prior backoff;
+	// anything shorter (or with no output at all) counts as a failed
+	// connection attempt and schedules the next retry with backoff instead
+	// of letting the scheduler hammer a dead stream every tick.
+	if !rec.manualStop.Load() {
+		if hasOutput && time.Since(rec.startedAt) >= minStableRecordingDuration {
+			a.clearRetry(rec.source.ID)
+		} else {
+			attempts, delay := a.recordFailure(rec.source.ID)
+			a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", rec.source.Name, delay.Round(time.Second), attempts))
+		}
 	}
 
 	a.mu.Lock()
@@ -1037,6 +1174,13 @@ func (a *App) execute(rec *recording) error {
 	return ffErr
 }
 
+// loudnormFilter applies EBU R128 loudness normalization in a single pass
+// (as opposed to ffmpeg's two-pass loudnorm, which needs to measure the
+// whole file before encoding it and so can't run on a live recording).
+// Single-pass is less precise but keeps levels in a sane, consistent range
+// across sources/artists that otherwise vary wildly in recorded volume.
+const loudnormFilter = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
 // ffmpegArgs builds the archival output plus, when hlsDir is set, a second
 // bounded HLS output used for live-rewind DVR playback of the in-progress
 // recording. The HLS branch always transcodes to H.264/AAC since it must be
@@ -1057,16 +1201,25 @@ func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) 
 	// file and failing the recording before a single frame is written. The
 	// "?" suffix means ffmpeg won't error if a source has no subtitle track.
 	args = append(args, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?")
+	// Loudness normalization needs to re-encode audio (a filter can't run on
+	// a stream-copied track), even when the source otherwise stream-copies
+	// video - so audio and video codecs are chosen independently here rather
+	// than the single "-c copy"/"-c:a aac" shortcuts used before.
+	encodeAudio := src.Transcode || src.LoudnessNormalize
 	if src.AudioOnly {
-		if src.Transcode {
-			args = append(args, "-vn", "-c:a", "aac", "-b:a", "192k")
-		} else {
-			args = append(args, "-vn", "-c:a", "copy")
-		}
+		args = append(args, "-vn")
 	} else if src.Transcode {
-		args = append(args, "-c:v", videoEncoder(src.HardwareAccel), "-c:a", "aac", "-b:a", "192k")
+		args = append(args, "-c:v", videoEncoder(src.HardwareAccel))
 	} else {
-		args = append(args, "-c", "copy")
+		args = append(args, "-c:v", "copy", "-c:s", "copy")
+	}
+	if encodeAudio {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+		if src.LoudnessNormalize {
+			args = append(args, "-af", loudnormFilter)
+		}
+	} else {
+		args = append(args, "-c:a", "copy")
 	}
 	// The output path ends in ".part" for atomic renaming, so ffmpeg cannot
 	// infer the container from the extension - it must be told explicitly.
@@ -1159,6 +1312,8 @@ func (a *App) stop(id string) {
 	if rec == nil {
 		return
 	}
+	rec.manualStop.Store(true)
+	a.clearRetry(id)
 	rec.cancel()
 }
 
@@ -1220,6 +1375,34 @@ func validateSource(src Source) error {
 		return errors.New("type must be youtube, twitch, or http")
 	}
 	return nil
+}
+
+// loadSourcePresets parses the bundled presets/presets.json into the list of
+// preset packs served by /api/presets. Errors are swallowed to a nil/empty
+// slice - a broken embedded file should never take down the whole app, and
+// this is checked once at startup.
+func loadSourcePresets() []SourcePreset {
+	data, err := presetsFile.ReadFile("presets/presets.json")
+	if err != nil {
+		return nil
+	}
+	var presets []SourcePreset
+	if err := json.Unmarshal(data, &presets); err != nil {
+		log.Printf("presets/presets.json is invalid, ignoring: %s", err)
+		return nil
+	}
+	return presets
+}
+
+// handlePresets serves the bundled preset packs (well-known DJs/streamers/
+// events, ready to add as sources). Read-only - applying one just POSTs each
+// of its sources through the normal /api/sources endpoint from the client.
+func (a *App) handlePresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, a.sourcePresets)
 }
 
 func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {
@@ -1874,8 +2057,36 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName, hasTimeOfDay))
 		return nil
 	})
+	flagSharedSetCandidates(suggestions)
 	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].Path < suggestions[j].Path })
 	writeJSON(w, suggestions)
+}
+
+// flagSharedSetCandidates appends a warning to every suggestion whose
+// matched set is also the top pick for another recording in this same
+// batch. A set normally has exactly one recording; two files landing on the
+// same one is almost always either a genuine duplicate, or - since a
+// dropped stream now auto-reconnects mid-recording (see the auto-reconnect
+// backoff in runRecording) - two parts of what was originally one
+// continuous set, split across separate files by the reconnect. Either way
+// the user needs to notice before approving more than one of them onto the
+// same set silently.
+func flagSharedSetCandidates(suggestions []MatchSuggestion) {
+	groups := map[string][]int{}
+	for i, s := range suggestions {
+		if s.SetID == "" {
+			continue
+		}
+		groups[s.EventID+"\x00"+s.SetID] = append(groups[s.EventID+"\x00"+s.SetID], i)
+	}
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue
+		}
+		for _, i := range idxs {
+			suggestions[i].Reason += fmt.Sprintf(" Note: %d other recording(s) in this batch also match this same set - likely duplicate files or parts split by a dropped/reconnected stream; verify before approving more than one.", len(idxs)-1)
+		}
+	}
 }
 
 // matchCandidate is one archived timetable set considered as a possible
@@ -1885,15 +2096,22 @@ type matchCandidate struct {
 	delta                                    time.Duration
 	contained, stageMatch, sameDay           bool
 	artistScore                              float64
+	festivalMatch, festivalConflict          bool
 }
 
 // candidateScore combines every signal available for one candidate set into
 // a single comparable number, so bestMatchSuggestion can just pick the max
 // rather than hand-rolling a comparator. Roughly, in descending weight: an
 // exact time-window match, the guessed artist name matching the set's name,
-// the folder/channel name matching the archived stage, being on the right
-// calendar day, and - only as a tiebreaker when an actual clock time was
-// parsed - closeness in time.
+// the folder/channel name matching the archived stage, the candidate's event
+// belonging to the same Festival the recording's source is explicitly
+// linked to (an authoritative signal set by the user, not a guess - see
+// festivalIDForChannel), being on the right calendar day, and - only as a
+// tiebreaker when an actual clock time was parsed - closeness in time. A
+// festival conflict (the source is linked to a *different* Festival than
+// this candidate's event) is a strong negative signal, since it usually
+// means this candidate is from an unrelated edition that merely happens to
+// share a stage name or artist.
 func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 	score := 0.0
 	if c.contained {
@@ -1901,6 +2119,12 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 	}
 	if c.stageMatch {
 		score += 40
+	}
+	if c.festivalMatch {
+		score += 50
+	}
+	if c.festivalConflict {
+		score -= 60
 	}
 	if c.sameDay {
 		score += 30
@@ -1914,6 +2138,25 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 		score += 10 / (1 + hours)
 	}
 	return score
+}
+
+// festivalIDForChannel looks up which Festival (if any) the recording's
+// source is explicitly linked to, by matching the recording's folder name
+// (channel) back to a configured source's safeName. This is an authoritative
+// signal - set by hand on the source, in the Sources tab's "Event" picker -
+// rather than a guess, so it's a much stronger disambiguator than stage-name
+// or artist-name similarity when multiple festival editions reuse the same
+// stage names (e.g. "RED", "MAIN STAGE") or share touring artists.
+func festivalIDForChannel(cfg AppConfig, channel string) string {
+	if channel == "" {
+		return ""
+	}
+	for _, src := range cfg.Sources {
+		if src.FestivalID != "" && safeName(src.Name) == channel {
+			return src.FestivalID
+		}
+	}
+	return ""
 }
 
 // bestMatchSuggestion checks every LibraryEvent's archived timetable for the
@@ -1932,10 +2175,14 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	guessedArtist := guessArtistFromName(name, channel)
 	base.GuessedArtist = guessedArtist
 
+	sourceFestivalID := festivalIDForChannel(cfg, channel)
+
 	var best *matchCandidate
 	var bestScore float64
 
 	for _, ev := range cfg.LibraryEvents {
+		festivalMatch := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID == sourceFestivalID
+		festivalConflict := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID != sourceFestivalID
 		for _, stage := range ev.Timetable {
 			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
 			for _, set := range stage.Sets {
@@ -1966,6 +2213,7 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 				cand := matchCandidate{
 					eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name,
 					delta: delta, contained: contained, stageMatch: stageMatch, sameDay: sameDay, artistScore: artistScore,
+					festivalMatch: festivalMatch, festivalConflict: festivalConflict,
 				}
 				if score := candidateScore(cand, hasTimeOfDay); best == nil || score > bestScore {
 					c := cand
@@ -1984,10 +2232,18 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	base.SetID = best.setID
 	base.Stage = best.stage
 	base.Artist = best.artist
+	strongUnderlyingMatch := (best.contained && best.stageMatch) || (best.artistScore >= 0.99 && best.stageMatch && (best.contained || best.sameDay))
 	switch {
+	case best.festivalConflict && strongUnderlyingMatch:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("%s on %s looks like a strong match, but this recording's source is linked to a different Event than \"%s\" - double check the source's Event setting (Sources tab) or approve if this is intentional.", best.artist, best.stage, best.eventName)
 	case best.contained && best.stageMatch:
 		base.Confidence = "high"
-		base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+		if best.festivalMatch {
+			base.Reason = fmt.Sprintf("%s on %s matches the channel, this source's linked Event, and the guessed time falls within this set's window.", best.artist, best.stage)
+		} else {
+			base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+		}
 	case best.artistScore >= 0.99 && best.stageMatch && (best.contained || best.sameDay):
 		base.Confidence = "high"
 		base.Reason = fmt.Sprintf("Filename matches \"%s\" on %s, on the right day.", best.artist, best.stage)
@@ -2807,6 +3063,7 @@ func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
 		cfg := a.snapshotConfig()
 		for _, src := range cfg.Sources {
 			if src.ID == id {
+				a.clearRetry(src.ID)
 				a.start(src)
 				writeJSON(w, map[string]string{"status": "started"})
 				return
@@ -2953,6 +3210,13 @@ func (a *App) state() State {
 			st.OutputPath = last
 			if info, err := os.Stat(last); err == nil {
 				st.Size = info.Size()
+			}
+		}
+		if st.Status == "idle" {
+			if attempts, next, ok := a.reconnectStatus(src.ID); ok && time.Now().Before(next) {
+				st.Status = "reconnecting"
+				st.ReconnectAttempts = attempts
+				st.NextRetryAt = next
 			}
 		}
 		if st.OutputPath != "" {

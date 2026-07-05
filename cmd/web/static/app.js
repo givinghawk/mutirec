@@ -14,6 +14,15 @@ let evEditingOrgId = null;
 let evEditingFestId = null;
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
+// Registers the PWA service worker so the app can be installed to a phone's
+// home screen. The worker only caches the static app shell (see sw.js) -
+// live state, recordings, and API calls always go straight to the network.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 async function api(path, opts) {
   let res;
   try {
@@ -61,10 +70,26 @@ async function refresh() {
     renderDashboard();
     renderEditors();
     updateWatchIfActive();
+    maybeStartOnboarding();
   } catch (err) {
     console.error('Render failed:', err);
     toast(`UI failed to render: ${err.message}`, 'error');
   }
+}
+
+// The first-run setup wizard (setup.html) redirects here with ?onboarding=1
+// right after account creation, so a brand new install lands straight in
+// the Quick Add Source wizard instead of an empty dashboard. Runs at most
+// once per page load, and strips the query param so a later manual refresh
+// doesn't reopen it.
+let onboardingHandled = false;
+function maybeStartOnboarding() {
+  if (onboardingHandled) return;
+  onboardingHandled = true;
+  if (new URLSearchParams(location.search).get('onboarding') !== '1') return;
+  history.replaceState(null, '', location.pathname);
+  switchToView('sources');
+  openWizard();
 }
 
 function renderVersion() {
@@ -91,6 +116,12 @@ function applyTheme() {
   } else {
     document.documentElement.style.setProperty('--accent', accents[config.ui.accent] || accents.red);
   }
+}
+
+function retryCountdown(nextRetryAt) {
+  const ms = new Date(nextRetryAt).getTime() - Date.now();
+  const secs = Math.max(0, Math.ceil(ms / 1000));
+  return secs >= 60 ? `${Math.ceil(secs / 60)}m` : `${secs}s`;
 }
 
 function elapsed(startedAt) {
@@ -121,6 +152,7 @@ function sourceCardHtml(src) {
         ${src.id === nowPlayingId ? '<div class="now-playing-tag">&#9654; Now watching</div>' : ''}
         ${!src.orphaned ? `<div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div><div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>` : ''}
         <div>Size: ${formatBytes(src.size || 0)}${src.status === 'recording' ? ` · Recording for ${elapsed(src.startedAt)}` : ''}</div>
+        ${src.status === 'reconnecting' ? `<div class="text-amber-300">Stream appears down - retrying in ${retryCountdown(src.nextRetryAt)} (attempt ${src.reconnectAttempts})</div>` : ''}
         ${src.lastError ? `<div class="text-rose-300">Error: ${escapeHtml(src.lastError)}</div>` : ''}
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
@@ -525,6 +557,7 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
+          <label class="inline-flex items-center gap-2" title="Normalizes recorded volume to a consistent loudness (EBU R128). Forces audio to be re-encoded even if video is stream-copied."><input class="src-loudnorm" type="checkbox" ${s.loudnessNormalize ? 'checked' : ''}> Loudness normalize</label>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
@@ -572,6 +605,7 @@ function readSourceCard(el) {
     enabled: el.querySelector('.src-enabled').checked,
     record: el.querySelector('.src-record').checked,
     audioOnly: el.querySelector('.src-audio').checked,
+    loudnessNormalize: el.querySelector('.src-loudnorm').checked,
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value,
@@ -1183,6 +1217,80 @@ $('wiz-test').onclick = async () => {
     label.textContent = 'Test request failed';
   }
 };
+
+// --- Preset Packs: bundled, ready-to-add DJs/streamers/events ---
+
+let presetPacks = [];
+
+$('open-presets').onclick = openPresets;
+$('presets-close').onclick = () => $('presets-overlay').classList.add('hidden');
+
+async function openPresets() {
+  $('presets-overlay').classList.remove('hidden');
+  $('presets-list').innerHTML = '<p class="text-sm text-zinc-400">Loading…</p>';
+  try {
+    presetPacks = await api('/api/presets');
+  } catch {
+    presetPacks = [];
+  }
+  renderPresetsList();
+}
+
+function presetIsFullyAdded(preset) {
+  const existingUrls = new Set((config.sources || []).map(s => s.url.toLowerCase()));
+  return preset.sources.every(s => existingUrls.has(s.url.toLowerCase()));
+}
+
+function renderPresetsList() {
+  if (!presetPacks.length) {
+    $('presets-list').innerHTML = '<p class="text-sm text-zinc-400">No presets available.</p>';
+    return;
+  }
+  $('presets-list').innerHTML = presetPacks.map(p => {
+    const added = presetIsFullyAdded(p);
+    return `
+    <div class="flex flex-wrap items-center justify-between gap-3 rounded border border-white/10 px-3 py-2">
+      <div class="flex min-w-0 items-center gap-3">
+        ${p.logoUrl ? `<img src="${escapeAttr(p.logoUrl)}" class="h-10 w-10 flex-shrink-0 rounded object-cover" alt="">` : ''}
+        <div class="min-w-0">
+          <div class="font-medium">${escapeHtml(p.name)} ${p.category ? `<span class="pill">${escapeHtml(p.category)}</span>` : ''}</div>
+          ${p.description ? `<div class="text-xs text-zinc-400">${escapeHtml(p.description)}</div>` : ''}
+          <div class="truncate text-xs text-zinc-500">${p.sources.map(s => escapeHtml(s.url)).join(', ')}</div>
+        </div>
+      </div>
+      <button type="button" class="btn flex-shrink-0 ${added ? '' : 'primary'}" ${added ? 'disabled' : ''} onclick="applyPreset('${escapeAttr(p.id)}')">${added ? 'Added' : 'Add'}</button>
+    </div>`;
+  }).join('');
+}
+
+async function applyPreset(id) {
+  const preset = presetPacks.find(p => p.id === id);
+  if (!preset) return;
+  const existingUrls = new Set((config.sources || []).map(s => s.url.toLowerCase()));
+  const toAdd = preset.sources.filter(s => !existingUrls.has(s.url.toLowerCase()));
+  if (!toAdd.length) {
+    toast(`${preset.name} is already added`, 'info');
+    return;
+  }
+  let added = 0;
+  for (const src of toAdd) {
+    try {
+      await api('/api/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...src, enabled: true, record: false })
+      });
+      added++;
+    } catch { /* toast already shown by api() */ }
+  }
+  if (added) {
+    toast(`Added ${added} source${added === 1 ? '' : 's'} from "${preset.name}"`, 'info');
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+    renderPresetsList();
+  }
+}
+
 $('save-timetable').onclick = async () => {
   try {
     config.timetable = JSON.parse($('timetable-json').value);

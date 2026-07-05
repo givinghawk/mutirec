@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Defqon Stream Recorder</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#09090b">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="StreamRec">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
   <link href="https://unpkg.com/video.js@8/dist/video-js.min.css" rel="stylesheet">
@@ -185,7 +192,10 @@
             <h2 class="text-base font-semibold">Sources</h2>
             <p class="mt-1 text-xs text-zinc-500">Add a new stream to record, or expand one below to edit it.</p>
           </div>
-          <button type="button" id="open-wizard" class="btn primary">+ Add Source</button>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="open-presets" class="btn">Preset Packs</button>
+            <button type="button" id="open-wizard" class="btn primary">+ Add Source</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -194,6 +204,17 @@
           <datalist id="timetable-stage-names"></datalist>
         </div>
       </section>
+
+      <div id="presets-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Preset Packs</h2>
+            <button type="button" id="presets-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Bundled DJs/streamers/events, ready to add as sources in one click. Adding one only adds its source(s) - enabled but not auto-recording, same as adding manually.</p>
+          <div id="presets-list" class="space-y-2"></div>
+        </div>
+      </div>
 
       <div id="wizard-overlay" class="modal-overlay hidden">
         <div class="modal-panel panel">
