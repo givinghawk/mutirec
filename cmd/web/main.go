@@ -69,11 +69,13 @@ type Settings struct {
 }
 
 type UISettings struct {
-	AppName   string `json:"appName"`
-	LogoURL   string `json:"logoUrl"`
-	Theme     string `json:"theme"`
-	Accent    string `json:"accent"`
-	CustomCSS string `json:"customCss"`
+	AppName    string            `json:"appName"`
+	LogoURL    string            `json:"logoUrl"`
+	Theme      string            `json:"theme"`
+	Accent     string            `json:"accent"`
+	CustomCSS  string            `json:"customCss"`
+	CustomTheme string           `json:"customTheme"`
+	ThemeColors map[string]string `json:"themeColors"`
 }
 
 type BackupConfig struct {

@@ -1,4 +1,5 @@
 # Go build artifacts
+/defqon-stream-recorder
 /defqon-recorder
 /bin/
 /dist/
