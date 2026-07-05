@@ -1,7 +1,6 @@
 let state = null;
 let config = null;
-let wave = null;
-let livePlayer = null;
+let watchPlayer = null;
 let recPlayer = null;
 let recordings = [];
 let lolEvents = [];
@@ -57,6 +56,7 @@ async function refresh() {
     renderVersion();
     renderDashboard();
     renderEditors();
+    updateWatchIfActive();
   } catch (err) {
     console.error('Render failed:', err);
     toast(`UI failed to render: ${err.message}`, 'error');
@@ -123,7 +123,7 @@ function renderDashboard() {
       <div class="mt-3 flex flex-wrap gap-2">
         ${src.orphaned ? '' : `<button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>`}
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
-        ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}', ${src.audioOnly ? 'true' : 'false'})">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
+        ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
         ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
     </article>`).join('') : '<p class="text-sm text-zinc-400 md:col-span-2">No sources yet — add one from the Sources tab.</p>';
@@ -157,6 +157,11 @@ function renderFavoritesPanel() {
       </div>
     </div>`).join('');
 }
+
+// Named callbacks a dropdown option can trigger instead of selecting a value
+// (see the "action" handling in setupCustomDropdowns below), keyed by the
+// option's data-action attribute.
+const dropdownActions = {};
 
 // Wires up every .custom-dropdown under `root` (defaults to the whole page)
 // that hasn't already been bound - safe to call repeatedly (e.g. once after
@@ -193,6 +198,16 @@ function setupCustomDropdowns(root) {
 
     dropdown.querySelectorAll('.dropdown-option').forEach(option => {
       option.addEventListener('click', () => {
+        // A handful of dropdowns (e.g. "+ New Event…" in the source editor)
+        // want a click to trigger an action - opening another modal - rather
+        // than actually selecting a value. dropdownActions maps the action
+        // name to a callback; the option's own value/label are never applied.
+        if (option.dataset.action) {
+          menu.classList.add('hidden');
+          const handler = dropdownActions[option.dataset.action];
+          if (handler) handler(dropdown);
+          return;
+        }
         hiddenInput.value = option.dataset.value;
         label.textContent = option.querySelector('.font-semibold').textContent;
         // Copy through any other data-* the option carries (e.g. a
@@ -236,12 +251,21 @@ function setDropdownOptions(id, options, opts) {
   const value = opts.value !== undefined ? opts.value : '';
   const current = options.find(o => o.value === value);
   const label = current ? current.label : (opts.placeholder || '');
+  let lastGroup;
   const menuHtml = options.length
-    ? options.map(o => `
+    ? options.map(o => {
+        // Options can carry a `group` (e.g. an event/festival name) to
+        // cluster related entries under a non-clickable header, like an
+        // <optgroup> - assumes the caller has already sorted by group.
+        const header = o.group !== undefined && o.group !== lastGroup
+          ? (lastGroup = o.group, `<div class="dropdown-group-label">${escapeHtml(o.group || 'Ungrouped')}</div>`)
+          : '';
+        return `${header}
         <div class="dropdown-option" data-value="${escapeAttr(o.value)}"${o.name !== undefined ? ` data-name="${escapeAttr(o.name)}"` : ''}>
           <div class="font-semibold">${escapeHtml(o.label)}</div>
           ${o.description ? `<div class="text-xs text-zinc-400">${escapeHtml(o.description)}</div>` : ''}
-        </div>`).join('')
+        </div>`;
+      }).join('')
     : `<div class="dropdown-option-empty">${escapeHtml(opts.placeholder || 'No options')}</div>`;
   container.innerHTML = `
     <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(label)}</span><span class="ml-auto">▼</span></button>
@@ -403,6 +427,17 @@ function drawSourceEditor() {
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
           <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
+          <label title="Groups this source under a recurring event (e.g. Defqon.1) for the Watch tab's source picker and Dashboard groups.">Event
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(festivalName(s.festivalId) || 'None')}</span><span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value=""><div class="font-semibold">None</div></div>
+                ${(config.festivals || []).map(f => `<div class="dropdown-option" data-value="${escapeAttr(f.id)}"><div class="font-semibold">${escapeHtml(f.name)}</div></div>`).join('')}
+                <div class="dropdown-option" data-action="new-festival"><div class="font-semibold">+ New Event…</div></div>
+              </div>
+              <input type="hidden" class="src-festival" value="${escapeAttr(s.festivalId || '')}">
+            </div>
+          </label>
           <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
@@ -455,11 +490,64 @@ function readSourceCard(el) {
     audioOnly: el.querySelector('.src-audio').checked,
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
-    timetableStage: el.querySelector('.src-ttstage').value
+    timetableStage: el.querySelector('.src-ttstage').value,
+    festivalId: el.querySelector('.src-festival').value
   };
 }
 
+function festivalName(id) {
+  const f = (config.festivals || []).find(f => f.id === id);
+  return f ? f.name : '';
+}
+
 function sourceCardEl(i) { return document.querySelector(`.source-row[data-source="${i}"]`); }
+
+// --- Quick-create modal for a Festival ("Event" grouping for live sources) ---
+
+let festivalEditorTargetRowId = null; // stable source id, since refresh() replaces the row's DOM entirely
+
+dropdownActions['new-festival'] = (dropdown) => openFestivalEditor(dropdown);
+
+function openFestivalEditor(dropdown) {
+  // Captured now, before any refresh() can replace the row's DOM (which
+  // would detach `dropdown` and break a later dropdown.closest() lookup).
+  const sourceRow = dropdown.closest('.source-row');
+  festivalEditorTargetRowId = sourceRow ? sourceRow.dataset.id : null;
+  $('festival-name').value = '';
+  $('festival-color').value = '#ef4444';
+  $('festival-editor-error').classList.add('hidden');
+  $('festival-editor-overlay').classList.remove('hidden');
+}
+function closeFestivalEditor() { $('festival-editor-overlay').classList.add('hidden'); festivalEditorTargetRowId = null; }
+$('festival-editor-close').onclick = closeFestivalEditor;
+$('festival-editor-overlay').addEventListener('click', (e) => { if (e.target.id === 'festival-editor-overlay') closeFestivalEditor(); });
+
+$('festival-editor-save').onclick = async () => {
+  const name = $('festival-name').value.trim();
+  if (!name) {
+    $('festival-editor-error').textContent = 'Name is required';
+    $('festival-editor-error').classList.remove('hidden');
+    return;
+  }
+  let created;
+  try {
+    created = await api('/api/festivals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, color: $('festival-color').value }) });
+  } catch {
+    return;
+  }
+  toast(`Created "${name}"`, 'info');
+  const rowId = festivalEditorTargetRowId;
+  closeFestivalEditor();
+  await refresh();
+  if (rowId) {
+    openSourceIds.add(rowId);
+    drawSourceEditor();
+    const sourceRow = document.querySelector(`.source-row[data-id="${CSS.escape(rowId)}"]`);
+    const rebuilt = sourceRow && [...sourceRow.querySelectorAll('.custom-dropdown')].find(d => d.querySelector('.dropdown-option[data-action="new-festival"]'));
+    const option = rebuilt && [...rebuilt.querySelectorAll('.dropdown-option')].find(o => o.dataset.value === created.id);
+    if (option) option.click();
+  }
+};
 
 async function saveSourceCard(i) {
   const el = sourceCardEl(i);
@@ -532,7 +620,6 @@ function fillSettings() {
   $('backupAfterComplete').checked = !!s.backup.afterComplete;
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
-  $('wave-toggle').checked = !!s.enableWaveform;
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -605,61 +692,227 @@ function techVideoEl(player) {
   return el.querySelector('video') || el.querySelector('audio') || el;
 }
 
-function ensureLivePlayer() {
-  if (livePlayer) return livePlayer;
-  livePlayer = videojs('live-video', { autoplay: false, controls: true, preload: 'auto', fluid: false, liveui: true });
-  livePlayer.on('error', () => {
-    const err = livePlayer.error();
-    toast(`Live stream error: ${err ? err.message : 'playback failed'}`, 'error');
-  });
-  return livePlayer;
+// playLive() is called from a source card's "Watch Live" button - it just
+// hands off to the Watch tab (which owns the actual player) instead of
+// playing inline on the Dashboard, so there's only ever one live player
+// instance in the whole app.
+function playLive(id) {
+  document.querySelector('.nav[data-view="watch"]').click();
+  watchSelectSource(id);
 }
 
-function playLive(id, audioOnly) {
-  const src = state.sources.find(s => s.id === id);
+// --- Watch tab (Live View) ---
+
+let watchPlayerBound = false;
+let watchSourceId = null;
+
+function initWatch() {
+  populateWatchSourceDropdown();
+  if (watchSourceId) watchSelectSource(watchSourceId);
+}
+
+function populateWatchSourceDropdown() {
+  const sources = (state && state.sources) || [];
+  const groupFor = (s) => {
+    const f = (config.festivals || []).find(f => f.id === s.festivalId);
+    return f ? f.name : 'Ungrouped';
+  };
+  const sorted = [...sources].sort((a, b) => {
+    const ga = groupFor(a), gb = groupFor(b);
+    // "Ungrouped" always sorts last, other groups alphabetically.
+    if (ga !== gb) {
+      if (ga === 'Ungrouped') return 1;
+      if (gb === 'Ungrouped') return -1;
+      return ga.localeCompare(gb);
+    }
+    return a.name.localeCompare(b.name);
+  });
+  const options = sorted.map(s => ({
+    value: s.id,
+    label: s.name + (s.status === 'recording' ? ' ●' : ''),
+    group: groupFor(s),
+  }));
+  setDropdownOptions('watch-source', options, { value: watchSourceId || '', placeholder: 'Choose a source' });
+}
+
+$('watch-source-dropdown').addEventListener('change', (e) => {
+  if (e.target.id === 'watch-source') watchSelectSource(e.target.value);
+});
+
+function ensureWatchPlayer() {
+  if (watchPlayer) return watchPlayer;
+  watchPlayer = videojs('watch-video', { controls: false, autoplay: false, preload: 'auto', bigPlayButton: false, fluid: false, liveui: true });
+  setupWatchPlayerControls(watchPlayer);
+  return watchPlayer;
+}
+
+function watchSelectSource(id) {
+  watchSourceId = id;
+  nowPlayingId = id || null;
+  if (!id) {
+    $('watch-player').classList.add('hidden');
+    $('watch-empty').classList.remove('hidden');
+    $('watch-stats').classList.add('hidden');
+    renderDashboard();
+    return;
+  }
+  const src = (state.sources || []).find(s => s.id === id);
   if (!src) return;
-  const url = src.liveRewindActive ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
-  // Twitch/YouTube (resolved via streamlink) and most raw HTTP sources are
-  // served as HLS (.m3u8); Video.js's built-in HLS support (VHS) needs an
-  // explicit mimetype to pick the right tech since the URL itself has no
-  // .m3u8 extension for proxied/live-rewind sources.
-  const looksLikeHls = src.liveRewindActive || src.type !== 'http' || /\.m3u8(\?|$)/i.test(src.url || '');
 
-  const player = ensureLivePlayer();
-  $('live-video').classList.remove('hidden');
-  $('live-video').classList.toggle('audio-mode', !!audioOnly);
-
-  nowPlayingId = id;
-  $('player-empty').classList.add('hidden');
-  $('player-now').textContent = `— ${src.name}${audioOnly ? ' (audio)' : ''}`;
+  const player = ensureWatchPlayer();
+  $('watch-empty').classList.add('hidden');
+  $('watch-player').classList.remove('hidden');
+  $('watch-stats').classList.remove('hidden');
+  populateWatchSourceDropdown();
   renderDashboard();
 
-  const panel = $('player-panel');
-  panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  panel.classList.remove('flash');
-  void panel.offsetWidth;
-  panel.classList.add('flash');
+  const url = src.liveRewindActive ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
+  const looksLikeHls = src.liveRewindActive || src.type !== 'http' || /\.m3u8(\?|$)/i.test(src.url || '');
+  player.src(looksLikeHls ? { src: url, type: 'application/x-mpegURL' } : { src: url });
+  player.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
 
-  const statusEl = $('player-status');
+  const statusEl = $('watch-player-status');
   if (src.liveRewindActive) {
     statusEl.textContent = 'Live rewind buffer connecting — drag the seek bar back to scrub within this recording.';
     statusEl.classList.remove('hidden');
   } else {
     statusEl.classList.add('hidden');
   }
+  $('watch-seek-wrap').classList.toggle('watch-seek-disabled', !src.liveRewindActive);
 
-  player.src(looksLikeHls ? { src: url, type: 'application/x-mpegURL' } : { src: url });
-  player.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
+  renderWatchStats(src);
+}
 
-  if (!looksLikeHls && $('wave-toggle').checked && window.WaveSurfer) {
-    $('wave').classList.remove('hidden');
-    if (wave) wave.destroy();
-    wave = WaveSurfer.create({ container: '#wave', waveColor: '#52525b', progressColor: accents[config.ui.accent] || accents.red, height: 80 });
-    wave.load(url);
-  } else {
-    if (wave) { wave.destroy(); wave = null; }
-    $('wave').classList.add('hidden');
+// Called on every periodic refresh() tick regardless of which tab is
+// active, so the stats/source list stay current if the user leaves the
+// Watch tab open in the background - but never touches the player itself
+// unless a source is actually selected.
+function updateWatchIfActive() {
+  if (!watchSourceId) return;
+  const src = (state.sources || []).find(s => s.id === watchSourceId);
+  if (!src) {
+    watchSelectSource('');
+    return;
   }
+  renderWatchStats(src);
+}
+
+function renderWatchStats(src) {
+  const rows = [
+    { label: 'Status', value: src.status },
+    { label: 'Elapsed', value: src.status === 'recording' ? elapsed(src.startedAt) : '—' },
+    { label: 'Now playing', value: src.currentSet || 'No current set' },
+    { label: 'Next set', value: src.nextSet || 'No upcoming set' },
+    { label: 'Size', value: formatBytes(src.size || 0) },
+    { label: 'Quality / container', value: `${src.quality || 'best'} · ${src.container || 'mkv'}` },
+    { label: 'Live rewind', value: src.liveRewindActive ? 'Active' : (src.liveRewind ? 'Enabled (not active)' : 'Disabled') },
+    { label: 'Type', value: src.type },
+  ];
+  $('watch-stats').innerHTML = rows.map(r => `
+    <div class="rounded border border-white/10 px-3 py-2">
+      <div class="text-xs text-zinc-400">${escapeHtml(r.label)}</div>
+      <div class="font-medium truncate">${escapeHtml(String(r.value))}</div>
+    </div>`).join('');
+}
+
+// Bound once: ensureWatchPlayer() only creates the Player instance the
+// first time it's needed, so controls only ever get wired up once too.
+function setupWatchPlayerControls(player) {
+  const playPauseBtn = $('watch-playpause');
+  const centerPlay = $('watch-center-play');
+  const back10 = $('watch-back10');
+  const fwd10 = $('watch-fwd10');
+  const timeEl = $('watch-time');
+  const seek = $('watch-seek');
+  const seekWrap = $('watch-seek-wrap');
+  const seekProgress = $('watch-seek-progress');
+  const seekBuffer = $('watch-seek-buffer');
+  const muteBtn = $('watch-mute');
+  const volume = $('watch-volume');
+  const vizToggle = $('watch-visualizer-toggle');
+  let scrubbing = false;
+
+  const setPlayIcon = (playing) => { playPauseBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9658;'; };
+  const togglePlay = () => { if (player.paused()) player.play().catch(() => {}); else player.pause(); };
+
+  playPauseBtn.onclick = togglePlay;
+  centerPlay.onclick = togglePlay;
+  player.el().addEventListener('click', togglePlay);
+  player.on('play', () => { setPlayIcon(true); centerPlay.classList.add('hidden'); });
+  player.on('pause', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  player.on('waiting', () => $('watch-player').classList.add('cp-buffering'));
+  player.on('playing', () => $('watch-player').classList.remove('cp-buffering'));
+  player.on('error', () => {
+    const err = player.error();
+    toast(`Live stream error: ${err ? err.message : 'playback failed'}`, 'error');
+  });
+
+  back10.onclick = () => { if (isFinite(player.duration())) player.currentTime(Math.max(0, player.currentTime() - 10)); };
+  fwd10.onclick = () => { if (isFinite(player.duration())) player.currentTime(Math.min(player.duration(), player.currentTime() + 10)); };
+
+  player.on('timeupdate', () => {
+    const duration = player.duration();
+    if (scrubbing) return;
+    if (!isFinite(duration) || !duration) {
+      timeEl.textContent = 'LIVE';
+      return;
+    }
+    const pct = (player.currentTime() / duration) * 1000;
+    seek.value = pct;
+    seekProgress.style.width = `${pct / 10}%`;
+    timeEl.textContent = `${formatTime(player.currentTime())} / ${formatTime(duration)}`;
+  });
+  player.on('progress', () => {
+    const duration = player.duration();
+    const bufferedEnd = player.bufferedEnd();
+    if (isFinite(duration) && duration && bufferedEnd) seekBuffer.style.width = `${(bufferedEnd / duration) * 100}%`;
+  });
+
+  seek.addEventListener('input', () => {
+    scrubbing = true;
+    const duration = player.duration();
+    if (!isFinite(duration) || !duration) return;
+    const pct = seek.value / 1000;
+    seekProgress.style.width = `${pct * 100}%`;
+    timeEl.textContent = `${formatTime(pct * duration)} / ${formatTime(duration)}`;
+  });
+  seek.addEventListener('change', () => {
+    const duration = player.duration();
+    if (isFinite(duration) && duration) player.currentTime((seek.value / 1000) * duration);
+    scrubbing = false;
+  });
+  seekWrap.addEventListener('mousedown', () => { scrubbing = true; });
+
+  volume.addEventListener('input', () => {
+    player.volume(parseFloat(volume.value));
+    player.muted(player.volume() === 0);
+    muteBtn.innerHTML = player.muted() ? '&#128263;' : '&#128266;';
+  });
+  muteBtn.onclick = () => {
+    player.muted(!player.muted());
+    muteBtn.innerHTML = player.muted() ? '&#128263;' : '&#128266;';
+    if (!player.muted() && player.volume() === 0) { player.volume(1); volume.value = 1; }
+  };
+
+  setupPiP($('watch-pip'), () => techVideoEl(player));
+
+  $('watch-fullscreen').onclick = () => {
+    if (player.isFullscreen()) player.exitFullscreen();
+    else player.requestFullscreen();
+  };
+
+  const updateVisualizerVisibility = () => {
+    const isAudioOnly = player.videoWidth() === 0 && player.videoHeight() === 0;
+    $('watch-player').classList.toggle('audio-mode', isAudioOnly);
+    vizToggle.disabled = isAudioOnly;
+    if (isAudioOnly) vizToggle.checked = true;
+    const showViz = isAudioOnly || vizToggle.checked;
+    $('watch-audio-stage').classList.toggle('hidden', !showViz);
+    if (showViz) startVisualizer(techVideoEl(player), 'watch-visualizer');
+    else stopVisualizer('watch-visualizer');
+  };
+  player.on('loadedmetadata', updateVisualizerVisibility);
+  vizToggle.addEventListener('change', () => { if (!vizToggle.disabled) updateVisualizerVisibility(); });
 }
 
 document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
@@ -675,6 +928,7 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   await refresh();
   if (b.dataset.view === 'recordings') initLibrary();
   if (b.dataset.view === 'diagnostics') runDiagnostics();
+  if (b.dataset.view === 'watch') initWatch();
 });
 
 // --- Diagnostics (system check) ---
@@ -1683,6 +1937,8 @@ function setupCustomPlayerControls(player) {
 
   speed.addEventListener('change', () => { player.playbackRate(parseFloat(speed.value)); });
 
+  setupPiP($('cp-pip'), () => techVideoEl(player));
+
   fullscreenBtn.onclick = () => {
     if (player.isFullscreen()) player.exitFullscreen();
     else player.requestFullscreen();
@@ -1725,51 +1981,54 @@ function setupWaveform(url, videoEl) {
 
 // The audio graph (AudioContext + AnalyserNode + MediaElementSourceNode) can
 // only ever be built once per <video> element - a second
-// createMediaElementSource call on the same element throws - so it's built
-// lazily on first use and then reused for every recording played afterward.
-let vizAudioCtx = null;
-let vizAnalyser = null;
-let vizData = null;
-let vizRAF = null;
+// createMediaElementSource call on the same element throws - so each one is
+// built lazily on first use and cached per canvas id (there are two
+// independent visualizers in the app: the Recordings player's #cp-visualizer
+// and the Watch tab's #watch-visualizer, each bound to its own video element).
+const vizInstances = {};
 
-function ensureVizGraph(videoEl) {
-  if (vizAudioCtx) return true;
+function ensureVizGraph(videoEl, canvasId) {
+  const existing = vizInstances[canvasId];
+  if (existing && existing.sourceEl === videoEl) return existing;
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  if (!AudioCtx) return false;
+  if (!AudioCtx) return null;
   try {
-    vizAudioCtx = new AudioCtx();
-    vizAnalyser = vizAudioCtx.createAnalyser();
-    vizAnalyser.fftSize = 128;
-    vizData = new Uint8Array(vizAnalyser.frequencyBinCount);
-    const source = vizAudioCtx.createMediaElementSource(videoEl);
-    source.connect(vizAnalyser);
-    vizAnalyser.connect(vizAudioCtx.destination);
+    const audioCtx = new AudioCtx();
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 128;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const source = audioCtx.createMediaElementSource(videoEl);
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    const inst = { audioCtx, analyser, data, raf: null, sourceEl: videoEl };
+    vizInstances[canvasId] = inst;
+    return inst;
   } catch {
-    vizAudioCtx = null;
-    return false;
+    return null;
   }
-  return true;
 }
 
-function startVisualizer(videoEl) {
-  if (!ensureVizGraph(videoEl)) return;
-  if (vizAudioCtx.state === 'suspended') vizAudioCtx.resume().catch(() => {});
-  const canvas = $('cp-visualizer');
+function startVisualizer(videoEl, canvasId) {
+  canvasId = canvasId || 'cp-visualizer';
+  const inst = ensureVizGraph(videoEl, canvasId);
+  if (!inst) return;
+  if (inst.audioCtx.state === 'suspended') inst.audioCtx.resume().catch(() => {});
+  const canvas = $(canvasId);
   const ctx2d = canvas.getContext('2d');
-  cancelAnimationFrame(vizRAF);
+  if (inst.raf) cancelAnimationFrame(inst.raf);
 
   const draw = () => {
-    vizRAF = requestAnimationFrame(draw);
+    inst.raf = requestAnimationFrame(draw);
     const w = canvas.clientWidth, h = canvas.clientHeight;
     if (canvas.width !== w) canvas.width = w;
     if (canvas.height !== h) canvas.height = h;
-    vizAnalyser.getByteFrequencyData(vizData);
+    inst.analyser.getByteFrequencyData(inst.data);
     ctx2d.clearRect(0, 0, w, h);
     const accent = accents[config.ui.accent] || accents.red;
-    const barCount = vizData.length;
+    const barCount = inst.data.length;
     const barWidth = w / barCount;
     for (let i = 0; i < barCount; i++) {
-      const v = vizData[i] / 255;
+      const v = inst.data[i] / 255;
       const barHeight = Math.max(2, v * h);
       ctx2d.globalAlpha = 0.5 + v * 0.5;
       ctx2d.fillStyle = accent;
@@ -1780,14 +2039,37 @@ function startVisualizer(videoEl) {
   draw();
 }
 
-function stopVisualizer() {
-  if (vizRAF) cancelAnimationFrame(vizRAF);
-  vizRAF = null;
-  const canvas = $('cp-visualizer');
+function stopVisualizer(canvasId) {
+  canvasId = canvasId || 'cp-visualizer';
+  const inst = vizInstances[canvasId];
+  if (inst && inst.raf) cancelAnimationFrame(inst.raf);
+  if (inst) inst.raf = null;
+  const canvas = $(canvasId);
   if (canvas) {
     const ctx2d = canvas.getContext('2d');
     if (ctx2d) ctx2d.clearRect(0, 0, canvas.width, canvas.height);
   }
+}
+
+// Toggles Picture-in-Picture for a player's underlying <video> element.
+// getVideoEl is a function (not the element itself) since Video.js may not
+// have finished attaching its tech element yet when setupPiP() runs.
+function setupPiP(button, getVideoEl) {
+  if (!document.pictureInPictureEnabled) {
+    button.classList.add('hidden');
+    return;
+  }
+  button.onclick = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await getVideoEl().requestPictureInPicture();
+      }
+    } catch (err) {
+      toast(`Picture-in-picture failed: ${err.message}`, 'error');
+    }
+  };
 }
 
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }

@@ -48,6 +48,22 @@ type AppConfig struct {
 	TimetableSource *TimetableLink           `json:"timetableSource,omitempty"`
 	LibraryEvents   []LibraryEvent           `json:"libraryEvents"`
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
+	Festivals       []Festival               `json:"festivals"`
+}
+
+// Festival is the recurring franchise a live Source belongs to (e.g.
+// "Defqon.1", "Sensation") - shown to the user simply as "Event". It's
+// intentionally a separate, lighter-weight concept from LibraryEvent (which
+// represents one specific yearly edition/recording archive): a live Source's
+// stream URL is reused every year, so it's grouped by the franchise rather
+// than any one edition. Named Festival in code only to avoid colliding with
+// the unrelated Event type used for the activity log below.
+type Festival struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Color       string `json:"color,omitempty"`
+	LogoURL     string `json:"logoUrl,omitempty"`
 }
 
 // LibraryEvent groups recorded files into one edition of a festival (e.g.
@@ -150,6 +166,7 @@ type Source struct {
 	Color          string   `json:"color"`
 	LiveRewind     bool     `json:"liveRewind"`
 	TimetableStage string   `json:"timetableStage,omitempty"`
+	FestivalID     string   `json:"festivalId,omitempty"`
 }
 
 type StageSchedule struct {
@@ -730,6 +747,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/meta", a.handleRecordingMeta)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
+	mux.HandleFunc("/api/festivals", a.handleFestivals)
+	mux.HandleFunc("/api/festivals/", a.handleFestivalItem)
 	mux.HandleFunc("/media/", a.handleMedia)
 }
 
@@ -1461,6 +1480,105 @@ func (a *App) handleLibraryEventItem(w http.ResponseWriter, r *http.Request) {
 			if meta.EventID == id {
 				meta.EventID = ""
 				a.cfg.RecordingMeta[path] = meta
+			}
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleFestivals lists or creates Festivals - the "which recurring event
+// does this live Source belong to" grouping shown to the user as "Event",
+// used by the Watch tab's source picker and the Dashboard's source groups.
+func (a *App) handleFestivals(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, a.snapshotConfig().Festivals)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var f Festival
+	if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(f.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	f.ID = newID()
+	a.mu.Lock()
+	a.cfg.Festivals = append(a.cfg.Festivals, f)
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, f)
+}
+
+// handleFestivalItem handles per-festival operations addressed as
+// /api/festivals/{id}.
+func (a *App) handleFestivalItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/festivals/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var f Festival
+		if err := json.NewDecoder(r.Body).Decode(&f); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(f.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		f.ID = id
+		a.mu.Lock()
+		idx := -1
+		for i, existing := range a.cfg.Festivals {
+			if existing.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		a.cfg.Festivals[idx] = f
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, f)
+	case http.MethodDelete:
+		a.mu.Lock()
+		found := false
+		out := a.cfg.Festivals[:0:0]
+		for _, f := range a.cfg.Festivals {
+			if f.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, f)
+		}
+		a.cfg.Festivals = out
+		// Unassign (not delete) any sources that referenced this festival.
+		for i := range a.cfg.Sources {
+			if a.cfg.Sources[i].FestivalID == id {
+				a.cfg.Sources[i].FestivalID = ""
 			}
 		}
 		cfg := a.cfg
@@ -2422,6 +2540,9 @@ func normalizeConfig(cfg *AppConfig) {
 	if cfg.RecordingMeta == nil {
 		cfg.RecordingMeta = map[string]RecordingMeta{}
 	}
+	if cfg.Festivals == nil {
+		cfg.Festivals = []Festival{}
+	}
 	assignScheduleIDs(cfg.Timetable)
 	for i := range cfg.LibraryEvents {
 		if cfg.LibraryEvents[i].ID == "" {
@@ -2431,6 +2552,11 @@ func normalizeConfig(cfg *AppConfig) {
 			cfg.LibraryEvents[i].Timetable = []StageSchedule{}
 		}
 		assignScheduleIDs(cfg.LibraryEvents[i].Timetable)
+	}
+	for i := range cfg.Festivals {
+		if cfg.Festivals[i].ID == "" {
+			cfg.Festivals[i].ID = newID()
+		}
 	}
 }
 
