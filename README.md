@@ -207,17 +207,23 @@ Defqon preset since its stages already ship as the default source list.
 
 ## Auto-Reconnect
 
-If a source's stream drops mid-recording (a network blip, a brief outage, a
-stage going temporarily offline), the recorder retries it automatically
-instead of requiring a manual restart. A recording that ran for at least a
-minute before ending is treated as "the stream was working" and clears any
-backoff; one that fails faster than that (or produces no output at all)
-schedules a retry with exponential backoff - 5s, 10s, 20s, ... up to a 5
-minute cap - so a stream that's genuinely down for a while isn't hammered
-with a reconnect attempt on every scheduler tick. The dashboard shows a
-"reconnecting" status with a countdown and attempt count while this is
-happening; clicking Record on a source clears its backoff and retries
-immediately.
+Every enabled, auto-record source that isn't currently live gets retried by
+the scheduler automatically, with exponential backoff (5s, 10s, 20s, ... up
+to a 5 minute cap) so a source that's genuinely offline isn't hammered with a
+restart attempt on every scheduler tick. Most of the time this is silent -
+a source waiting for its DJ/event to go live for the first time doesn't show
+up in the dashboard or event log at all, since that's just normal background
+polling, not a problem.
+
+If a source *was* confirmed live (recorded for at least a minute) and then
+stops - a dropped connection, a brief outage, or just the broadcaster ending
+their stream - retry attempts for the next 10 minutes are surfaced: the
+dashboard shows a "reconnecting" status with a countdown and attempt count,
+and each attempt is logged. If nothing comes back within those 10 minutes,
+it quietly goes back to silent background retries (a final "no reconnect
+within 10m0s" note is logged once) - by that point it's more likely the
+stream is over for now than that it's about to come back any second.
+Clicking Record on a source clears its backoff and retries immediately.
 
 ## Progressive Web App
 

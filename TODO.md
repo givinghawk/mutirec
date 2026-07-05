@@ -114,6 +114,28 @@
   the field is left empty rather than guessed. If avatars matter later, fetch them for real via
   Twitch's Helix API (needs a registered app + OAuth token, so it's a deliberate follow-up, not
   something to wire in speculatively) rather than guessing URLs.
+- **Auto-reconnect: silent-until-live, then a 10-minute visible window**: the original
+  auto-reconnect (previous session) logged/showed every single retry attempt uniformly,
+  including a source that's simply never gone live yet - noisy in exactly the wrong case,
+  since "waiting for a DJ to go live" is normal, expected, and can go on for hours/days, while
+  the actually-interesting case (a source that *was* live and then stopped) got no special
+  treatment. `retryState` gained a `windowUntil` field (zero = silent); a new
+  `startReconnectWindow` opens a `reconnectVisibilityWindow` (10 minutes) the moment a
+  *stable* recording ends (`runRecording`'s bookkeeping calls it instead of the old
+  `clearRetry`) - it doesn't matter whether that end was a genuine drop or the broadcaster
+  just stopping normally, since either way the scheduler is about to start silently retrying
+  it and this is the one case worth surfacing. `recordFailure` now takes the source name too
+  and does its own logging: silent while `windowUntil` is zero or already lapsed, logs the
+  usual "stream appears down - will retry in Xs (attempt N)" while inside an open window, and
+  logs exactly one "no reconnect within 10m0s - will keep checking quietly" the moment the
+  window lapses (clearing `windowUntil` so that notice doesn't repeat). `reconnectStatus`
+  (used by `state()` for the dashboard's "reconnecting" badge) now returns `ok=false` outside
+  an open window, so a never-been-live source never shows that status either.
+  `retryBlocked` (used by `evaluate()` to skip a source still in backoff) is unchanged and
+  applies identically whether the retries are silent or visible - only the *display* differs,
+  not whether the scheduler keeps trying. Covered by four new tests in `reconnect_test.go`:
+  silent-without-a-window, visible-within-a-window, gives-up-after-the-window-lapses (and
+  stays quiet after, doesn't repeat the notice), and manual clearRetry resetting everything.
 
 ## Remaining (in suggested order)
 

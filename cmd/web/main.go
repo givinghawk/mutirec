@@ -926,11 +926,23 @@ func (a *App) start(src Source) {
 const minViableRecordingBytes = 64 * 1024
 
 // retryState tracks the auto-reconnect backoff for a single source: how many
-// consecutive short-lived failures it has had in a row, and when it's next
-// allowed to try again. Kept in memory only - a restart just starts clean.
+// consecutive short-lived failures it has had in a row, when it's next
+// allowed to try again, and - separately - whether those retries are
+// currently "visible" (logged and shown as a dashboard status) or silent.
+// Kept in memory only - a restart just starts clean.
+//
+// A source that simply hasn't gone live yet retries silently forever (see
+// windowUntil): that's normal, expected background polling, not an error.
+// Only a source that *was* confirmed live and then stopped - whether that's
+// a genuine dropped connection or just the broadcaster ending their stream -
+// opens a visible reconnect window (see startReconnectWindow), so the user
+// sees retry activity right when it's actually relevant (right after a
+// stream they were recording went away) and it quietly stops being noisy if
+// nothing comes back within reconnectVisibilityWindow.
 type retryState struct {
 	attempts    int
 	nextAttempt time.Time
+	windowUntil time.Time // zero => not currently in a visible reconnect window
 }
 
 // minStableRecordingDuration is how long a recording has to run before it's
@@ -939,6 +951,14 @@ type retryState struct {
 // elapsed (bad URL, offline channel, network blip right at start) counts
 // toward the reconnect backoff instead of being retried every scheduler tick.
 const minStableRecordingDuration = 60 * time.Second
+
+// reconnectVisibilityWindow is how long retry attempts stay visible (logged
+// and shown as a "reconnecting" dashboard status) after a source that was
+// confirmed live stops. Past this, the scheduler keeps quietly trying in the
+// background - same as a source that simply hasn't gone live yet - since by
+// this point it's more likely the broadcaster is done than that they're
+// about to come back any second.
+const reconnectVisibilityWindow = 10 * time.Minute
 
 const (
 	reconnectBaseDelay = 5 * time.Second
@@ -965,7 +985,9 @@ func reconnectDelay(attempts int) time.Duration {
 }
 
 // retryBlocked reports whether a source is still within its reconnect
-// backoff window and, if so, when it'll next be eligible.
+// backoff window and, if so, when it'll next be eligible. Applies equally to
+// silent and visible retries - only the logging/dashboard status cares about
+// the difference, not whether the scheduler should currently try again.
 func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
@@ -976,35 +998,68 @@ func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
 	return st.nextAttempt, true
 }
 
-// clearRetry resets a source's reconnect backoff, used both on a manual stop
-// (the user is in control, not a dropped connection) and after a stable run.
+// clearRetry resets a source's reconnect backoff entirely (including any
+// visible window), used on a manual stop/start - the user is in control,
+// not a dropped connection.
 func (a *App) clearRetry(sourceID string) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
 	delete(a.retry, sourceID)
 }
 
-// recordFailure bumps a source's reconnect attempt counter and schedules the
-// next allowed retry, returning the new attempt count and delay for logging.
-func (a *App) recordFailure(sourceID string) (int, time.Duration) {
+// startReconnectWindow opens a fresh, visible reconnect window for a source
+// whose recording just ended after running stably (see
+// minStableRecordingDuration) - it doesn't matter whether that end was a
+// genuine drop or just the broadcaster stopping normally, since either way
+// the scheduler is about to start silently retrying it and, unlike a source
+// that's never gone live, this one's worth surfacing for a little while.
+func (a *App) startReconnectWindow(sourceID string) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
+	a.retry[sourceID] = &retryState{windowUntil: time.Now().Add(reconnectVisibilityWindow)}
+}
+
+// recordFailure bumps a source's reconnect attempt counter and schedules the
+// next allowed retry. It only logs the attempt (and only counts as a visible
+// "reconnecting" status via reconnectStatus) while an active window from
+// startReconnectWindow is still open; once that window lapses, it logs one
+// final "giving up" notice and every attempt after that goes quiet, exactly
+// like a source that's never gone live at all.
+func (a *App) recordFailure(name, sourceID string) {
+	a.retryMu.Lock()
 	st := a.retry[sourceID]
 	if st == nil {
 		st = &retryState{}
 		a.retry[sourceID] = st
 	}
+	wasVisible := !st.windowUntil.IsZero()
+	stillVisible := wasVisible && time.Now().Before(st.windowUntil)
 	st.attempts++
 	delay := reconnectDelay(st.attempts)
 	st.nextAttempt = time.Now().Add(delay)
-	return st.attempts, delay
+	attempts := st.attempts
+	if wasVisible && !stillVisible {
+		st.windowUntil = time.Time{} // only report "giving up" once
+	}
+	a.retryMu.Unlock()
+
+	switch {
+	case stillVisible:
+		a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", name, delay.Round(time.Second), attempts))
+	case wasVisible:
+		a.event("info", fmt.Sprintf("[%s] no reconnect within %s - will keep checking quietly in the background", name, reconnectVisibilityWindow))
+	}
 }
 
+// reconnectStatus reports a source's live reconnect attempt count and next
+// retry time, but only while it's within a visible window (see
+// startReconnectWindow) - a source silently waiting to go live for the first
+// time never reports as "reconnecting" on the dashboard.
 func (a *App) reconnectStatus(sourceID string) (attempts int, nextAttempt time.Time, ok bool) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
 	st := a.retry[sourceID]
-	if st == nil {
+	if st == nil || st.windowUntil.IsZero() || !time.Now().Before(st.windowUntil) {
 		return 0, time.Time{}, false
 	}
 	return st.attempts, st.nextAttempt, true
@@ -1063,16 +1118,17 @@ func (a *App) runRecording(rec *recording) {
 	// Auto-reconnect bookkeeping: a manual stop (or app shutdown, which also
 	// goes through stop()) is the user/operator in control, not a dropped
 	// connection, so it's exempt from backoff. Otherwise, a recording that
-	// ran long enough to be considered stable clears any prior backoff;
-	// anything shorter (or with no output at all) counts as a failed
-	// connection attempt and schedules the next retry with backoff instead
-	// of letting the scheduler hammer a dead stream every tick.
+	// ran long enough to be considered stable opens a visible reconnect
+	// window - the next several retry attempts (if any) will be logged and
+	// shown on the dashboard, since the source was just confirmed live and
+	// might come right back. Anything shorter (or with no output at all)
+	// schedules the next retry with backoff same as always, but stays silent
+	// unless it's within an already-open window (recordFailure decides).
 	if !rec.manualStop.Load() {
 		if hasOutput && time.Since(rec.startedAt) >= minStableRecordingDuration {
-			a.clearRetry(rec.source.ID)
+			a.startReconnectWindow(rec.source.ID)
 		} else {
-			attempts, delay := a.recordFailure(rec.source.ID)
-			a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", rec.source.Name, delay.Round(time.Second), attempts))
+			a.recordFailure(rec.source.Name, rec.source.ID)
 		}
 	}
 
