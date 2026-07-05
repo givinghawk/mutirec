@@ -157,6 +157,42 @@ function renderFavoritesPanel() {
     </div>`).join('');
 }
 
+function setupCustomDropdowns() {
+  document.querySelectorAll('.custom-dropdown').forEach(dropdown => {
+    const toggle = dropdown.querySelector('.dropdown-toggle');
+    const menu = dropdown.querySelector('.dropdown-menu');
+    const hiddenInput = dropdown.querySelector('input[type="hidden"]');
+    const sourceRow = dropdown.closest('.source-row');
+
+    toggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
+        if (m !== menu) m.classList.add('hidden');
+      });
+      menu.classList.toggle('hidden');
+    });
+
+    dropdown.querySelectorAll('.dropdown-option').forEach(option => {
+      option.addEventListener('click', () => {
+        const value = option.dataset.value;
+        const label = option.querySelector('.font-semibold').textContent;
+        hiddenInput.value = value;
+        toggle.textContent = label + '▼';
+        menu.classList.add('hidden');
+        if (sourceRow) markCardUnsaved(sourceRow);
+      });
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.custom-dropdown')) {
+      document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
+        m.classList.add('hidden');
+      });
+    }
+  });
+}
+
 function renderEditors() {
   if (!$('source-editor').dataset.loaded) {
     $('source-editor').dataset.loaded = '1';
@@ -208,7 +244,62 @@ function drawSourceEditor() {
           <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
           <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
           <label>Quality<input class="input src-quality" value="${escapeAttr(s.quality || 'best')}"></label>
-          <label>Container<input class="input src-container" value="${escapeAttr(s.container || 'mkv')}"></label>
+          <label>Container
+            <div class="custom-dropdown" data-field="src-container" data-value="${escapeAttr(s.container || 'mkv')}">
+              <button type="button" class="dropdown-toggle input">${s.container || 'mkv'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="mkv">
+                  <div class="font-semibold">Matroska (MKV)</div>
+                  <div class="text-xs text-zinc-400">Best quality, flexible</div>
+                </div>
+                <div class="dropdown-option" data-value="mp4">
+                  <div class="font-semibold">MP4</div>
+                  <div class="text-xs text-zinc-400">Streaming-friendly</div>
+                </div>
+                <div class="dropdown-option" data-value="ts">
+                  <div class="font-semibold">MPEG-TS (.ts)</div>
+                  <div class="text-xs text-zinc-400">Live playback, low overhead</div>
+                </div>
+                <div class="dropdown-option" data-value="m4a">
+                  <div class="font-semibold">M4A</div>
+                  <div class="text-xs text-zinc-400">Audio only, compact</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-container" value="${escapeAttr(s.container || 'mkv')}">
+            </div>
+          </label>
+          <label>Transcode
+            <div class="custom-dropdown" data-field="src-transcode" data-value="${s.transcode ? 'yes' : 'no'}">
+              <button type="button" class="dropdown-toggle input">${s.transcode ? 'Yes (re-encode)' : 'No (copy codec)'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="no">
+                  <div class="font-semibold">No - Copy codec</div>
+                  <div class="text-xs text-zinc-400">Fastest, lowest CPU</div>
+                </div>
+                <div class="dropdown-option" data-value="yes">
+                  <div class="font-semibold">Yes - Re-encode</div>
+                  <div class="text-xs text-zinc-400">H.264/AAC, more compatible</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-transcode" value="${s.transcode ? 'yes' : 'no'}">
+            </div>
+          </label>
+          <label>Live Rewind
+            <div class="custom-dropdown" data-field="src-liverewind" data-value="${s.liveRewind ? 'hls' : 'none'}">
+              <button type="button" class="dropdown-toggle input">${s.liveRewind ? 'HLS Buffer' : 'Disabled'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="none">
+                  <div class="font-semibold">Disabled</div>
+                  <div class="text-xs text-zinc-400">No live playback</div>
+                </div>
+                <div class="dropdown-option" data-value="hls">
+                  <div class="font-semibold">HLS Buffer</div>
+                  <div class="text-xs text-zinc-400">Scrubbing, extra CPU</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-liverewind" value="${s.liveRewind ? 'hls' : 'none'}">
+            </div>
+          </label>
           <label>HW accel<select class="input src-hw"><option ${sel(s.hardwareAccel,'')}>none</option><option ${sel(s.hardwareAccel,'cuda')}>cuda</option><option ${sel(s.hardwareAccel,'qsv')}>qsv</option><option ${sel(s.hardwareAccel,'vaapi')}>vaapi</option></select></label>
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
@@ -216,8 +307,6 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
-          <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
-          <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
@@ -233,6 +322,8 @@ function drawSourceEditor() {
   document.querySelectorAll('.source-row').forEach(el => {
     el.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => markCardUnsaved(el)));
   });
+
+  setupCustomDropdowns();
 
   if (highlightSourceId) {
     openSourceIds.add(highlightSourceId);
@@ -263,8 +354,8 @@ function readSourceCard(el) {
     enabled: el.querySelector('.src-enabled').checked,
     record: el.querySelector('.src-record').checked,
     audioOnly: el.querySelector('.src-audio').checked,
-    transcode: el.querySelector('.src-transcode').checked,
-    liveRewind: el.querySelector('.src-liverewind').checked,
+    transcode: el.querySelector('.src-transcode').value === 'yes',
+    liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value
   };
 }
