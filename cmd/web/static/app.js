@@ -8,6 +8,10 @@ let selectedTimetableDay = null;
 let editingSet = null;
 let nowPlayingId = null;
 let highlightSourceId = null;
+let playerPreviousView = 'recordings';
+let evCurrentFestivalId = null;
+let evEditingOrgId = null;
+let evEditingFestId = null;
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
 async function api(path, opts) {
@@ -995,20 +999,24 @@ function setupWatchPlayerControls(player) {
   vizToggle.addEventListener('change', () => { if (!vizToggle.disabled) updateVisualizerVisibility(); });
 }
 
-document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
+function switchToView(viewId) {
   document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.view').forEach(x => x.classList.add('hidden'));
-  b.classList.add('active');
-  $(b.dataset.view).classList.remove('hidden');
-  // Each tab keeps its own view element rather than navigating to a real
-  // separate page, but it must still behave like one: pull fresh data from
-  // the server and redraw from scratch every time it's opened, instead of
-  // showing whatever was rendered (possibly stale) the last time it was open.
+  const navBtn = document.querySelector(`.nav[data-view="${viewId}"]`);
+  if (navBtn) navBtn.classList.add('active');
+  const section = $(viewId);
+  if (section) section.classList.remove('hidden');
+}
+
+document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
+  switchToView(b.dataset.view);
+  // Each tab must pull fresh data on every open instead of showing stale state.
   $('source-editor').dataset.loaded = '';
   await refresh();
   if (b.dataset.view === 'recordings') initLibrary();
   if (b.dataset.view === 'diagnostics') runDiagnostics();
   if (b.dataset.view === 'watch') initWatch();
+  if (b.dataset.view === 'events-tab') renderEventsTab();
 });
 
 // --- Diagnostics (system check) ---
@@ -1635,11 +1643,28 @@ function renderLibraryEventView(id) {
     return;
   }
   $('lib-channel-rows').innerHTML = channels.map(ch => {
-    const items = byChannel.get(ch).sort((a, b) => (b.start || b.modTime || '').localeCompare(a.start || a.modTime || ''));
+    const items = byChannel.get(ch).sort((a, b) => (a.start || a.modTime || '').localeCompare(b.start || b.modTime || ''));
+    // Group by day (YYYY-MM-DD extracted from r.start, or fallback to mod date)
+    const byDay = new Map();
+    items.forEach(r => {
+      const day = r.start ? r.start.slice(0, 10) : new Date(r.modTime).toISOString().slice(0, 10);
+      if (!byDay.has(day)) byDay.set(day, []);
+      byDay.get(day).push(r);
+    });
+    const days = [...byDay.keys()].sort();
+    const dayHtml = days.length > 1
+      ? days.map(day => {
+          const label = new Date(day + 'T12:00:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
+          return `<div class="mb-3">
+            <div class="mb-1 text-xs text-zinc-500 font-medium">${escapeHtml(label)}</div>
+            <div class="lib-row-scroll">${byDay.get(day).map(r => libSetCardHtml(r)).join('')}</div>
+          </div>`;
+        }).join('')
+      : `<div class="lib-row-scroll">${items.map(r => libSetCardHtml(r)).join('')}</div>`;
     return `
       <div class="lib-channel-row">
         <h3 class="mb-2 font-semibold">${escapeHtml(ch)}</h3>
-        <div class="lib-row-scroll">${items.map(r => libSetCardHtml(r)).join('')}</div>
+        ${dayHtml}
       </div>`;
   }).join('');
 
@@ -1718,6 +1743,10 @@ function openEventEditor(ev) {
   $('ev-color').value = (ev && ev.color) || '#ef4444';
   $('ev-cover').value = ev ? (ev.coverUrl || '') : '';
   $('ev-desc').value = ev ? (ev.description || '') : '';
+  // Populate festival (franchise) dropdown; setDropdownOptions creates the hidden input inside the container
+  const festOpts = [{ value: '', label: 'None' }, ...(config.festivals || []).map(f => ({ value: f.id, label: f.name }))];
+  setDropdownOptions('ev-festival', festOpts, { value: ev ? (ev.festivalId || '') : '' });
+  setDropdownValue('ev-festival', ev ? (ev.festivalId || '') : '');
   $('event-editor-error').classList.add('hidden');
   $('event-editor-overlay').classList.remove('hidden');
 }
@@ -1741,6 +1770,7 @@ $('event-editor-save').onclick = async () => {
     color: $('ev-color').value,
     coverUrl: $('ev-cover').value.trim(),
     description: $('ev-desc').value.trim(),
+    festivalId: ($('ev-festival') || {}).value || '',
   };
   try {
     if (libEditingEventId) {
@@ -1969,28 +1999,86 @@ function ensureRecPlayer() {
 }
 
 function openRecordingPlayer(path, name) {
+  // Track where we came from so the back button returns there.
+  const activeNav = document.querySelector('.nav.active');
+  playerPreviousView = activeNav ? activeNav.dataset.view : 'recordings';
+
   $('rec-player-title').textContent = name || 'Recording';
-  $('recording-player-overlay').classList.remove('hidden');
+  switchToView('player');
+
   const player = ensureRecPlayer();
   currentPlaybackUrl = `/media/${encodeMediaPath(path)}`;
   player.src({ src: currentPlaybackUrl });
   player.currentTime(0);
-  player.play().catch(() => { /* autoplay may be blocked; controls still work */ });
+  player.play().catch(() => {});
+
+  // Download link
+  $('rec-player-download').href = currentPlaybackUrl;
+
+  // Details panel
+  const r = recordings.find(x => x.path === path);
+  renderRecordingDetails(r);
+
+  // Recommendations sidebar
+  renderRecordingRecommendations(r);
+}
+
+function renderRecordingDetails(r) {
+  const dl = $('rec-details');
+  if (!r) { dl.innerHTML = ''; return; }
+  const ev = r.eventId ? (config.libraryEvents || []).find(e => e.id === r.eventId) : null;
+  const rows = [
+    r.artist && ['Artist', r.artist],
+    r.channel && ['Channel', r.channel],
+    ev && ['Event', ev.name],
+    r.start && ['Start', new Date(r.start).toLocaleString()],
+    r.end && ['End', new Date(r.end).toLocaleString()],
+    ['File', r.name],
+    ['Size', formatBytes(r.size)],
+  ].filter(Boolean);
+  dl.innerHTML = rows.map(([k, v]) => `<div class="flex gap-2"><dt class="w-16 flex-shrink-0 text-zinc-400">${escapeHtml(k)}</dt><dd class="min-w-0 truncate">${escapeHtml(String(v))}</dd></div>`).join('');
+  const tracklist = r.tracklist;
+  if (tracklist) {
+    $('rec-tracklist').textContent = tracklist;
+    $('rec-tracklist-panel').classList.remove('hidden');
+  } else {
+    $('rec-tracklist-panel').classList.add('hidden');
+  }
+}
+
+function renderRecordingRecommendations(r) {
+  const panel = $('rec-more-panel');
+  const list = $('rec-more-list');
+  if (!r) { panel.classList.add('hidden'); return; }
+  // Find up to 10 recordings from the same channel/event
+  const channel = r.channel || r.source;
+  const related = recordings.filter(x => x.path !== r.path && (
+    (channel && (x.channel || x.source) === channel) ||
+    (r.eventId && x.eventId === r.eventId)
+  )).slice(0, 10);
+  if (!related.length) { panel.classList.add('hidden'); return; }
+  $('rec-more-title').textContent = channel ? `More from ${channel}` : 'More from this event';
+  list.innerHTML = related.map(x => libSetCardHtml(x)).join('');
+  list.querySelectorAll('.lib-set-card').forEach(card => {
+    const path = card.dataset.path;
+    const rec = recordings.find(x => x.path === path);
+    if (!rec) return;
+    card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(rec.path, libDisplayTitle(rec)));
+    card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(rec); });
+  });
+  panel.classList.remove('hidden');
 }
 
 function closeRecordingPlayer() {
   if (recPlayer) recPlayer.pause();
   stopVisualizer();
-  $('recording-player-overlay').classList.add('hidden');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  switchToView(playerPreviousView);
 }
 
 $('rec-player-close').onclick = closeRecordingPlayer;
-$('recording-player-overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'recording-player-overlay') closeRecordingPlayer();
-});
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('recording-player-overlay').classList.contains('hidden')) closeRecordingPlayer();
+  if (e.key === 'Escape' && !$('player').classList.contains('hidden')) closeRecordingPlayer();
 });
 
 function formatTime(s) {
@@ -2359,6 +2447,311 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 });
+
+// ─── Events tab ──────────────────────────────────────────────────────────────
+
+function renderEventsTab() {
+  evCurrentFestivalId = null;
+  $('ev-home').classList.remove('hidden');
+  $('ev-detail').classList.add('hidden');
+  $('ev-tab-back').classList.add('hidden');
+  $('ev-tab-title').textContent = 'Events';
+  renderEventsHome();
+}
+
+function renderEventsHome() {
+  const festivals = config.festivals || [];
+  const orgs = config.organisations || [];
+  const libEvents = config.libraryEvents || [];
+  const now = new Date();
+
+  // Upcoming sets (next 12h from live timetable)
+  const upcoming = [];
+  (config.timetable || []).forEach(stage => {
+    (stage.sets || []).forEach(set => {
+      const start = new Date(set.start);
+      const diff = (start - now) / 60000;
+      if (diff > 0 && diff <= 720) upcoming.push({ ...set, stage: stage.stage });
+    });
+  });
+  upcoming.sort((a, b) => new Date(a.start) - new Date(b.start));
+  const upcomingEl = $('ev-upcoming');
+  if (upcoming.length) {
+    $('ev-upcoming-list').innerHTML = upcoming.slice(0, 8).map(s => {
+      const t = new Date(s.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return `<div class="flex items-center gap-3 py-1 border-b border-white/5 last:border-0">
+        <span class="text-zinc-400 w-12 flex-shrink-0">${escapeHtml(t)}</span>
+        <span class="font-medium">${escapeHtml(s.name)}</span>
+        <span class="text-xs text-zinc-500 ml-auto">${escapeHtml(s.stage)}</span>
+      </div>`;
+    }).join('');
+    upcomingEl.classList.remove('hidden');
+  } else {
+    upcomingEl.classList.add('hidden');
+  }
+
+  // Active editions (LibraryEvents where today is within startDate/endDate)
+  const active = libEvents.filter(e => {
+    if (!e.startDate || !e.endDate) return false;
+    const start = new Date(e.startDate), end = new Date(e.endDate + 'T23:59:59');
+    return now >= start && now <= end;
+  });
+  const activeEl = $('ev-active');
+  if (active.length) {
+    $('ev-active-list').innerHTML = active.map(e => {
+      const bg = `background:linear-gradient(135deg, ${e.color || 'var(--accent)'}44, transparent);`;
+      return `<div class="rounded-lg border border-white/10 p-3 cursor-pointer hover:border-white/20" style="${bg}" onclick="openEvFestivalDetail(null, '${escapeAttr(e.id)}')">
+        <div class="font-semibold">${escapeHtml(e.name)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(e.startDate)} – ${escapeHtml(e.endDate)}</div>
+      </div>`;
+    }).join('');
+    activeEl.classList.remove('hidden');
+  } else {
+    activeEl.classList.add('hidden');
+  }
+
+  // Festival/Org grid — group festivals under their org, standalone festivals ungrouped
+  const grouped = new Map(); // orgId ("") -> { org, festivals }
+  const orgMap = new Map(orgs.map(o => [o.id, o]));
+  festivals.forEach(f => {
+    const oid = f.organisationId || '';
+    if (!grouped.has(oid)) grouped.set(oid, { org: orgMap.get(oid) || null, festivals: [] });
+    grouped.get(oid).festivals.push(f);
+  });
+  // Orgs with no festivals still show up as group headers
+  orgs.forEach(o => { if (!grouped.has(o.id)) grouped.set(o.id, { org: o, festivals: [] }); });
+
+  let gridHtml = '';
+  // Ungrouped festivals first
+  const ungrouped = grouped.get('');
+  if (ungrouped && ungrouped.festivals.length) {
+    gridHtml += ungrouped.festivals.map(f => evFestivalCardHtml(f, libEvents, recordings)).join('');
+  }
+  // Then org groups
+  [...grouped.entries()].filter(([k]) => k !== '').forEach(([, { org, festivals: fests }]) => {
+    if (org) {
+      gridHtml += `<div class="col-span-full flex items-center gap-2 mt-2 mb-1">
+        <span class="font-semibold text-sm">${escapeHtml(org.name)}</span>
+        <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(org).replace(/"/g, '&quot;')})">Edit</button>
+        <button class="btn danger text-xs" onclick="deleteOrg('${escapeAttr(org.id)}')">Delete</button>
+      </div>`;
+    }
+    gridHtml += fests.map(f => evFestivalCardHtml(f, libEvents, recordings)).join('');
+  });
+  // Standalone orgs with no festivals
+  orgs.forEach(o => {
+    if (!grouped.has(o.id) || !grouped.get(o.id).festivals.length) {
+      if (!grouped.has(o.id)) {
+        gridHtml += `<div class="col-span-full flex items-center gap-2 mt-2 mb-1">
+          <span class="font-semibold text-sm">${escapeHtml(o.name)}</span>
+          <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(o).replace(/"/g, '&quot;')})">Edit</button>
+          <button class="btn danger text-xs" onclick="deleteOrg('${escapeAttr(o.id)}')">Delete</button>
+        </div>`;
+      }
+    }
+  });
+  $('ev-grid').innerHTML = gridHtml || '<p class="col-span-full text-sm text-zinc-400">No events yet — create one with "+ New Event" above.</p>';
+  // Wire up card clicks (can't use inline onclick with festival objects, so use data-id)
+  $('ev-grid').querySelectorAll('.ev-festival-card').forEach(card => {
+    card.addEventListener('click', () => openEvFestivalDetail(card.dataset.id, null));
+  });
+}
+
+function evFestivalCardHtml(f, libEvents, recs) {
+  const editionCount = libEvents.filter(e => e.festivalId === f.id).length;
+  const recCount = recs.filter(r => {
+    const ev = (config.libraryEvents || []).find(e => e.id === r.eventId);
+    return ev && ev.festivalId === f.id;
+  }).length;
+  const bg = f.logoUrl
+    ? `background-image:url('${escapeAttr(f.logoUrl)}');background-size:cover;background-position:center;`
+    : `background:linear-gradient(160deg, ${f.color || 'var(--accent)'}66, rgb(0 0 0/.45) 75%);`;
+  return `<div class="ev-festival-card lib-event-card" data-id="${escapeAttr(f.id)}" style="${bg}">
+    <div class="lib-event-card-overlay">
+      <div class="truncate font-semibold">${escapeHtml(f.name)}</div>
+      <div class="text-xs text-zinc-300">${editionCount} edition${editionCount === 1 ? '' : 's'}</div>
+      <div class="text-xs text-zinc-400">${recCount} recording${recCount === 1 ? '' : 's'}</div>
+    </div>
+  </div>`;
+}
+
+function openEvFestivalDetail(festivalId, libEventId) {
+  evCurrentFestivalId = festivalId;
+  $('ev-home').classList.add('hidden');
+  $('ev-detail').classList.remove('hidden');
+  $('ev-tab-back').classList.remove('hidden');
+  renderEvFestivalDetail(festivalId, libEventId);
+}
+
+function renderEvFestivalDetail(festivalId, libEventId) {
+  const festival = festivalId ? (config.festivals || []).find(f => f.id === festivalId) : null;
+  const libEvent = libEventId ? (config.libraryEvents || []).find(e => e.id === libEventId) : null;
+  const subject = festival || libEvent;
+  if (!subject) return;
+
+  $('ev-tab-title').textContent = subject.name;
+  $('ev-detail-name').textContent = subject.name;
+  $('ev-detail-desc').textContent = subject.description || '';
+  $('ev-detail-banner').style.borderLeftColor = subject.color || 'var(--accent)';
+
+  // Stats
+  const editions = festival
+    ? (config.libraryEvents || []).filter(e => e.festivalId === festival.id)
+    : (libEvent ? [libEvent] : []);
+  const eventIds = new Set(editions.map(e => e.id));
+  const recCount = recordings.filter(r => eventIds.has(r.eventId)).length;
+  const totalBytes = recordings.filter(r => eventIds.has(r.eventId)).reduce((s, r) => s + (r.size || 0), 0);
+  $('ev-detail-stats').innerHTML = [
+    festival && `<span>${editions.length} edition${editions.length === 1 ? '' : 's'}</span>`,
+    `<span>${recCount} recording${recCount === 1 ? '' : 's'}</span>`,
+    totalBytes && `<span>${formatBytes(totalBytes)} total</span>`,
+  ].filter(Boolean).join('');
+
+  if (festival) {
+    $('ev-detail-edit').onclick = () => openEvFestivalEditor(festival);
+    $('ev-detail-delete').onclick = () => deleteEvFestival(festival.id);
+  } else {
+    $('ev-detail-edit').classList.add('hidden');
+    $('ev-detail-delete').classList.add('hidden');
+  }
+
+  // Sources linked to this festival
+  const sources = festival
+    ? (state.sources || []).filter(s => s.festivalId === festival.id)
+    : [];
+  $('ev-detail-sources').innerHTML = sources.length
+    ? sources.map(s => `<div class="flex items-center gap-2 py-1">
+        <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${escapeAttr(s.color || '#71717a')}"></span>
+        <span>${escapeHtml(s.name)}</span>
+        <span class="text-xs text-zinc-500 ml-auto">${escapeHtml(s.status || '')}</span>
+      </div>`).join('')
+    : '<p class="text-zinc-400">No live sources linked.</p>';
+
+  // Editions (library events)
+  $('ev-detail-editions').innerHTML = editions.length
+    ? editions.map(e => {
+        const eRecCount = recordings.filter(r => r.eventId === e.id).length;
+        return `<div class="flex items-center justify-between rounded border border-white/10 px-3 py-2 cursor-pointer hover:border-white/20" onclick="openLibraryEvent('${escapeAttr(e.id)}'); document.querySelector('.nav[data-view=\\'recordings\\']').click()">
+          <div>
+            <div class="font-medium">${escapeHtml(e.name)}</div>
+            <div class="text-xs text-zinc-400">${escapeHtml(e.startDate || String(e.year || ''))} · ${eRecCount} recording${eRecCount === 1 ? '' : 's'}</div>
+          </div>
+          <span class="text-zinc-400">&#8594;</span>
+        </div>`;
+      }).join('')
+    : '<p class="text-zinc-400">No recording archives linked to this event.</p>';
+
+  // Live timetable stages
+  const timetable = config.timetable || [];
+  const relevantStages = festival
+    ? (state.sources || []).filter(s => s.festivalId === festival.id && s.timetableStage).map(s => s.timetableStage)
+    : [];
+  const stageData = relevantStages.length
+    ? timetable.filter(st => relevantStages.includes(st.stage))
+    : timetable;
+  $('ev-detail-timetable').innerHTML = stageData.length
+    ? stageData.map(st => `<div class="mb-2">
+        <div class="font-medium text-sm">${escapeHtml(st.stage)}</div>
+        <div class="text-xs text-zinc-500">${(st.sets || []).length} sets</div>
+      </div>`).join('')
+    : '<p class="text-zinc-400">No timetable configured.</p>';
+}
+
+$('ev-tab-back').onclick = () => renderEventsTab();
+$('ev-new-org').onclick = () => openOrgEditor(null);
+$('ev-new-festival').onclick = () => openEvFestivalEditor(null);
+
+// ─── Organisation CRUD ────────────────────────────────────────────────────────
+
+function openOrgEditor(org) {
+  evEditingOrgId = org ? org.id : null;
+  $('org-editor-title').textContent = org ? 'Edit Organisation' : 'New Organisation';
+  $('org-name').value = org ? org.name : '';
+  $('org-desc').value = org ? (org.description || '') : '';
+  $('org-color').value = (org && org.color) || '#ef4444';
+  $('org-logo').value = org ? (org.logoUrl || '') : '';
+  $('org-editor-error').classList.add('hidden');
+  $('org-editor-overlay').classList.remove('hidden');
+}
+function closeOrgEditor() { $('org-editor-overlay').classList.add('hidden'); evEditingOrgId = null; }
+$('org-editor-close').onclick = closeOrgEditor;
+$('org-editor-overlay').addEventListener('click', e => { if (e.target.id === 'org-editor-overlay') closeOrgEditor(); });
+
+$('org-editor-save').onclick = async () => {
+  const name = $('org-name').value.trim();
+  if (!name) { $('org-editor-error').textContent = 'Name is required'; $('org-editor-error').classList.remove('hidden'); return; }
+  const payload = { name, description: $('org-desc').value.trim(), color: $('org-color').value, logoUrl: $('org-logo').value.trim() };
+  try {
+    if (evEditingOrgId) {
+      await api(`/api/organisations/${evEditingOrgId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Saved "${name}"`, 'info');
+    } else {
+      await api('/api/organisations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Created "${name}"`, 'info');
+    }
+  } catch { return; }
+  closeOrgEditor();
+  await refresh();
+  renderEventsHome();
+};
+
+async function deleteOrg(id) {
+  const org = (config.organisations || []).find(o => o.id === id);
+  if (!org) return;
+  if (!confirm(`Delete organisation "${org.name}"? Festivals linked to it become standalone.`)) return;
+  try { await api(`/api/organisations/${id}`, { method: 'DELETE' }); toast(`Deleted "${org.name}"`, 'info'); } catch { return; }
+  await refresh();
+  renderEventsHome();
+}
+
+// ─── Festival CRUD (from Events tab) ─────────────────────────────────────────
+
+function openEvFestivalEditor(festival) {
+  evEditingFestId = festival ? festival.id : null;
+  $('ev-festival-editor-title').textContent = festival ? 'Edit Event' : 'New Event';
+  $('ev-fest-name').value = festival ? festival.name : '';
+  $('ev-fest-desc').value = festival ? (festival.description || '') : '';
+  $('ev-fest-color').value = (festival && festival.color) || '#ef4444';
+  $('ev-fest-logo').value = festival ? (festival.logoUrl || '') : '';
+  // Populate organisation dropdown; setDropdownOptions creates the hidden input inside the container
+  const orgOpts = [{ value: '', label: 'None' }, ...(config.organisations || []).map(o => ({ value: o.id, label: o.name }))];
+  setDropdownOptions('ev-fest-org', orgOpts, { value: festival ? (festival.organisationId || '') : '' });
+  setDropdownValue('ev-fest-org', festival ? (festival.organisationId || '') : '');
+  $('ev-festival-editor-error').classList.add('hidden');
+  $('ev-festival-editor-overlay').classList.remove('hidden');
+}
+function closeEvFestivalEditor() { $('ev-festival-editor-overlay').classList.add('hidden'); evEditingFestId = null; }
+$('ev-festival-editor-close').onclick = closeEvFestivalEditor;
+$('ev-festival-editor-overlay').addEventListener('click', e => { if (e.target.id === 'ev-festival-editor-overlay') closeEvFestivalEditor(); });
+
+$('ev-festival-editor-save').onclick = async () => {
+  const name = $('ev-fest-name').value.trim();
+  if (!name) { $('ev-festival-editor-error').textContent = 'Name is required'; $('ev-festival-editor-error').classList.remove('hidden'); return; }
+  const payload = { name, description: $('ev-fest-desc').value.trim(), color: $('ev-fest-color').value, logoUrl: $('ev-fest-logo').value.trim(), organisationId: ($('ev-fest-org') || {}).value || '' };
+  try {
+    if (evEditingFestId) {
+      await api(`/api/festivals/${evEditingFestId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Saved "${name}"`, 'info');
+    } else {
+      await api('/api/festivals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Created "${name}"`, 'info');
+    }
+  } catch { return; }
+  closeEvFestivalEditor();
+  await refresh();
+  renderEventsHome();
+};
+
+async function deleteEvFestival(id) {
+  const f = (config.festivals || []).find(x => x.id === id);
+  if (!f) return;
+  if (!confirm(`Delete event "${f.name}"? Sources linked to it become ungrouped.`)) return;
+  try { await api(`/api/festivals/${id}`, { method: 'DELETE' }); toast(`Deleted "${f.name}"`, 'info'); } catch { return; }
+  await refresh();
+  renderEventsTab();
+}
+
+// ─── End of Events tab ────────────────────────────────────────────────────────
 
 // Wires up the handful of custom dropdowns that are static parts of the page
 // (not rebuilt by drawSourceEditor() or setDropdownOptions()) as soon as the

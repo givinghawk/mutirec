@@ -49,6 +49,7 @@ type AppConfig struct {
 	LibraryEvents   []LibraryEvent           `json:"libraryEvents"`
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
 	Festivals       []Festival               `json:"festivals"`
+	Organisations   []Organisation           `json:"organisations"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
@@ -59,6 +60,19 @@ type AppConfig struct {
 // than any one edition. Named Festival in code only to avoid colliding with
 // the unrelated Event type used for the activity log below.
 type Festival struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	Color          string `json:"color,omitempty"`
+	LogoURL        string `json:"logoUrl,omitempty"`
+	OrganisationID string `json:"organisationId,omitempty"`
+}
+
+// Organisation is the parent label above Festivals — a promoter, brand, or
+// collective (e.g. "Q-dance", "ID&T") that owns one or more Festival
+// franchises. Optional: Festivals that don't belong to an Organisation still
+// show up as standalone entries.
+type Organisation struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
@@ -80,6 +94,7 @@ type LibraryEvent struct {
 	Color       string          `json:"color,omitempty"`
 	CoverURL    string          `json:"coverUrl,omitempty"`
 	Description string          `json:"description,omitempty"`
+	FestivalID  string          `json:"festivalId,omitempty"`
 	Timetable   []StageSchedule `json:"timetable,omitempty"`
 }
 
@@ -750,6 +765,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
 	mux.HandleFunc("/api/festivals/", a.handleFestivalItem)
+	mux.HandleFunc("/api/organisations", a.handleOrganisations)
+	mux.HandleFunc("/api/organisations/", a.handleOrganisationItem)
 	mux.HandleFunc("/media/", a.handleMedia)
 }
 
@@ -1775,6 +1792,104 @@ func (a *App) handleFestivalItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleOrganisations lists or creates Organisations - the parent grouping
+// above Festivals (e.g. the promoter "Q-dance" owns "Defqon.1", "Rebirth").
+func (a *App) handleOrganisations(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, a.snapshotConfig().Organisations)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var o Organisation
+	if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(o.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	o.ID = newID()
+	a.mu.Lock()
+	a.cfg.Organisations = append(a.cfg.Organisations, o)
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, o)
+}
+
+// handleOrganisationItem handles per-organisation operations at
+// /api/organisations/{id}.
+func (a *App) handleOrganisationItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/organisations/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var o Organisation
+		if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(o.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		o.ID = id
+		a.mu.Lock()
+		idx := -1
+		for i, existing := range a.cfg.Organisations {
+			if existing.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		a.cfg.Organisations[idx] = o
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, o)
+	case http.MethodDelete:
+		a.mu.Lock()
+		found := false
+		out := a.cfg.Organisations[:0:0]
+		for _, o := range a.cfg.Organisations {
+			if o.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, o)
+		}
+		a.cfg.Organisations = out
+		// Unassign (not delete) any festivals that referenced this organisation.
+		for i := range a.cfg.Festivals {
+			if a.cfg.Festivals[i].OrganisationID == id {
+				a.cfg.Festivals[i].OrganisationID = ""
+			}
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // handleLibraryEventTimetable serves and imports the archived timetable for
 // one LibraryEvent. POST accepts the same raw JSON shape as dq-timetable.json
 // (an array of stage objects with [year,month,day,hour,minute,name] set
@@ -2724,6 +2839,9 @@ func normalizeConfig(cfg *AppConfig) {
 	if cfg.Festivals == nil {
 		cfg.Festivals = []Festival{}
 	}
+	if cfg.Organisations == nil {
+		cfg.Organisations = []Organisation{}
+	}
 	assignScheduleIDs(cfg.Timetable)
 	for i := range cfg.LibraryEvents {
 		if cfg.LibraryEvents[i].ID == "" {
@@ -2737,6 +2855,11 @@ func normalizeConfig(cfg *AppConfig) {
 	for i := range cfg.Festivals {
 		if cfg.Festivals[i].ID == "" {
 			cfg.Festivals[i].ID = newID()
+		}
+	}
+	for i := range cfg.Organisations {
+		if cfg.Organisations[i].ID == "" {
+			cfg.Organisations[i].ID = newID()
 		}
 	}
 }

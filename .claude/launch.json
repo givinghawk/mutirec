@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "auto-recorder",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./cmd/web/", "-addr", ":8080"],
+      "port": 8080
+    }
+  ]
+}
