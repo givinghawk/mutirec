@@ -130,3 +130,20 @@ a { color: #67e8f9; }
 .cp-speed { flex-shrink: 0; border: 1px solid rgb(255 255 255 / .12); border-radius: 6px; background: rgb(0 0 0 / .3); color: #f4f4f5; padding: 5px 6px; font-size: 12px; }
 .custom-player:fullscreen { display: flex; flex-direction: column; justify-content: center; background: #000; }
 .custom-player:fullscreen .custom-player-video { max-height: calc(100vh - 52px); flex: 1; }
+
+/* Recordings Library (Events -> Channels -> Sets) */
+.lib-event-card { position: relative; height: 140px; border-radius: 10px; overflow: hidden; cursor: pointer; border: 1px solid rgb(255 255 255 / .1); transition: transform .15s ease, box-shadow .15s ease; }
+.lib-event-card:hover { transform: translateY(-2px); box-shadow: 0 10px 26px rgb(0 0 0 / .35); }
+.lib-event-card-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 10px 12px; background: linear-gradient(to top, rgb(0 0 0 / .78), rgb(0 0 0 / .1) 60%); }
+.lib-event-banner { border-left: 4px solid var(--accent, #ef4444); }
+.lib-channel-row h3 { font-size: 14px; }
+.lib-row-scroll { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 6px; }
+.lib-set-card { flex: 0 0 150px; width: 150px; }
+.lib-set-thumb { position: relative; height: 100px; border-radius: 8px; background: linear-gradient(160deg, var(--accent, #ef4444) 0%, rgb(0 0 0 / .55) 75%); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.lib-set-thumb:hover .lib-set-play-icon { opacity: 1; transform: scale(1.1); }
+.lib-set-play-icon { color: #fff; font-size: 26px; opacity: .85; transition: transform .15s ease, opacity .15s ease; filter: drop-shadow(0 2px 6px rgb(0 0 0 / .5)); }
+.lib-set-organize { position: absolute; top: 4px; right: 4px; border: none; background: rgb(0 0 0 / .45); color: #fff; border-radius: 6px; padding: 2px 6px; font-size: 14px; cursor: pointer; line-height: 1.4; }
+.lib-set-organize:hover { background: rgb(0 0 0 / .7); }
+.lib-set-info { padding: 6px 2px 0; }
+.assign-mode-btn.active { background: var(--accent, #ef4444); border-color: transparent; color: #fff; }
+.assign-mode-panel.hidden { display: none; }

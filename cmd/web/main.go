@@ -41,11 +41,43 @@ var version = "dev"
 var staticFiles embed.FS
 
 type AppConfig struct {
-	Settings        Settings        `json:"settings"`
-	UI              UISettings      `json:"ui"`
-	Sources         []Source        `json:"sources"`
-	Timetable       []StageSchedule `json:"timetable"`
-	TimetableSource *TimetableLink  `json:"timetableSource,omitempty"`
+	Settings        Settings                 `json:"settings"`
+	UI              UISettings               `json:"ui"`
+	Sources         []Source                 `json:"sources"`
+	Timetable       []StageSchedule          `json:"timetable"`
+	TimetableSource *TimetableLink           `json:"timetableSource,omitempty"`
+	LibraryEvents   []LibraryEvent           `json:"libraryEvents"`
+	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
+}
+
+// LibraryEvent groups recorded files into one edition of a festival (e.g.
+// "Defqon.1 2022"), independent of whatever Sources/Timetable are currently
+// configured for live recording. Each event can carry its own archived
+// timetable, imported separately, so old recordings can be matched back up
+// to the artist/set that was actually playing when they were captured.
+type LibraryEvent struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Year        int             `json:"year,omitempty"`
+	StartDate   string          `json:"startDate,omitempty"`
+	EndDate     string          `json:"endDate,omitempty"`
+	Color       string          `json:"color,omitempty"`
+	CoverURL    string          `json:"coverUrl,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Timetable   []StageSchedule `json:"timetable,omitempty"`
+}
+
+// RecordingMeta links one recorded file (keyed by its path relative to
+// FinishedDir) to a LibraryEvent and, optionally, a specific archived
+// timetable set. Channel is an optional display-name override for grouping
+// in the library UI - if blank, the recording's source folder name is used.
+type RecordingMeta struct {
+	EventID string `json:"eventId,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	SetID   string `json:"setId,omitempty"`
+	Artist  string `json:"artist,omitempty"`
+	Start   string `json:"start,omitempty"`
+	End     string `json:"end,omitempty"`
 }
 
 type Settings struct {
@@ -173,13 +205,21 @@ type SourceStatus struct {
 	Orphaned         bool      `json:"orphaned,omitempty"`
 }
 
-// RecordingFile describes a single finished recording on disk.
+// RecordingFile describes a single finished recording on disk, enriched with
+// whatever library metadata (event/channel/artist/set) has been assigned to
+// it via RecordingMeta.
 type RecordingFile struct {
 	Name    string    `json:"name"`
 	Source  string    `json:"source"`
 	Path    string    `json:"path"`
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"modTime"`
+	EventID string    `json:"eventId,omitempty"`
+	Channel string    `json:"channel,omitempty"`
+	SetID   string    `json:"setId,omitempty"`
+	Artist  string    `json:"artist,omitempty"`
+	Start   string    `json:"start,omitempty"`
+	End     string    `json:"end,omitempty"`
 }
 
 type NowItem struct {
@@ -679,6 +719,9 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/record/", a.handleRecordAction)
 	mux.HandleFunc("/api/live/", a.handleLive)
 	mux.HandleFunc("/api/recordings", a.handleRecordings)
+	mux.HandleFunc("/api/recordings/meta", a.handleRecordingMeta)
+	mux.HandleFunc("/api/events", a.handleLibraryEvents)
+	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/media/", a.handleMedia)
 }
 
@@ -1266,7 +1309,8 @@ func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
-	root := filepath.Clean(a.snapshotConfig().Settings.FinishedDir)
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
 	var files []RecordingFile
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -1289,11 +1333,262 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 1 {
 			source = parts[0]
 		}
-		files = append(files, RecordingFile{Name: filepath.Base(p), Source: source, Path: rel, Size: info.Size(), ModTime: info.ModTime()})
+		rf := RecordingFile{Name: filepath.Base(p), Source: source, Path: rel, Size: info.Size(), ModTime: info.ModTime(), Channel: source}
+		if meta, ok := cfg.RecordingMeta[rel]; ok {
+			rf.EventID = meta.EventID
+			rf.SetID = meta.SetID
+			rf.Artist = meta.Artist
+			rf.Start = meta.Start
+			rf.End = meta.End
+			if meta.Channel != "" {
+				rf.Channel = meta.Channel
+			}
+		}
+		files = append(files, rf)
 		return nil
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.After(files[j].ModTime) })
 	writeJSON(w, files)
+}
+
+// handleLibraryEvents lists or creates LibraryEvents - the "album" grouping
+// used to organize recordings from a specific edition of a festival.
+func (a *App) handleLibraryEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, a.snapshotConfig().LibraryEvents)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var ev LibraryEvent
+	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(ev.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	ev.ID = newID()
+	assignScheduleIDs(ev.Timetable)
+	a.mu.Lock()
+	a.cfg.LibraryEvents = append(a.cfg.LibraryEvents, ev)
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, ev)
+}
+
+// handleLibraryEventItem handles per-event operations addressed as
+// /api/events/{id}, plus /api/events/{id}/timetable for the archived
+// timetable belonging to that event.
+func (a *App) handleLibraryEventItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/events/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "timetable" {
+		a.handleLibraryEventTimetable(w, r, id)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var ev LibraryEvent
+		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(ev.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		ev.ID = id
+		a.mu.Lock()
+		idx := -1
+		for i, existing := range a.cfg.LibraryEvents {
+			if existing.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		// The event edit form only sends name/dates/branding, never the
+		// archived timetable - preserve whatever was previously imported
+		// unless this request explicitly included one.
+		if ev.Timetable == nil {
+			ev.Timetable = a.cfg.LibraryEvents[idx].Timetable
+		} else {
+			assignScheduleIDs(ev.Timetable)
+		}
+		a.cfg.LibraryEvents[idx] = ev
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, ev)
+	case http.MethodDelete:
+		a.mu.Lock()
+		found := false
+		out := a.cfg.LibraryEvents[:0:0]
+		for _, e := range a.cfg.LibraryEvents {
+			if e.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, e)
+		}
+		a.cfg.LibraryEvents = out
+		// Unassign (not delete) any recordings that referenced this event, so
+		// the underlying files just fall back into "Unsorted" instead of
+		// losing their event link silently.
+		for path, meta := range a.cfg.RecordingMeta {
+			if meta.EventID == id {
+				meta.EventID = ""
+				a.cfg.RecordingMeta[path] = meta
+			}
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleLibraryEventTimetable serves and imports the archived timetable for
+// one LibraryEvent. POST accepts the same raw JSON shape as dq-timetable.json
+// (an array of stage objects with [year,month,day,hour,minute,name] set
+// tuples) so a previous year's schedule can be pasted in directly.
+func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		cfg := a.snapshotConfig()
+		for _, e := range cfg.LibraryEvents {
+			if e.ID == id {
+				writeJSON(w, e.Timetable)
+				return
+			}
+		}
+		http.NotFound(w, r)
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		tt, err := parseDQTimetableJSON(body)
+		if err != nil {
+			http.Error(w, "could not parse timetable JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(tt) == 0 {
+			http.Error(w, "no stages/sets found in that JSON", http.StatusBadRequest)
+			return
+		}
+		assignScheduleIDs(tt)
+		a.mu.Lock()
+		idx := -1
+		for i, e := range a.cfg.LibraryEvents {
+			if e.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		a.cfg.LibraryEvents[idx].Timetable = tt
+		name := a.cfg.LibraryEvents[idx].Name
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		a.event("info", fmt.Sprintf("Imported archived timetable for %q (%d stages)", name, len(tt)))
+		writeJSON(w, tt)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleRecordingMeta assigns (PUT) or clears (DELETE) the library metadata
+// for one recorded file, keyed by its path relative to FinishedDir.
+func (a *App) handleRecordingMeta(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			Path    string `json:"path"`
+			EventID string `json:"eventId"`
+			Channel string `json:"channel,omitempty"`
+			SetID   string `json:"setId,omitempty"`
+			Artist  string `json:"artist,omitempty"`
+			Start   string `json:"start,omitempty"`
+			End     string `json:"end,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Path) == "" || strings.Contains(req.Path, "..") {
+			http.Error(w, "a valid path is required", http.StatusBadRequest)
+			return
+		}
+		meta := RecordingMeta{EventID: req.EventID, Channel: req.Channel, SetID: req.SetID, Artist: req.Artist, Start: req.Start, End: req.End}
+		// A specific timetable set was picked ("by artist") rather than a
+		// manual time entry - look up its name/start/end so the client
+		// doesn't have to duplicate that logic.
+		if req.SetID != "" {
+			a.mu.RLock()
+			for _, e := range a.cfg.LibraryEvents {
+				if e.ID != req.EventID {
+					continue
+				}
+				if _, set := findSetByID(e.Timetable, req.SetID); set != nil {
+					meta.Artist = set.Name
+					meta.Start = set.Start
+					meta.End = set.End
+				}
+				break
+			}
+			a.mu.RUnlock()
+		}
+		a.mu.Lock()
+		if a.cfg.RecordingMeta == nil {
+			a.cfg.RecordingMeta = map[string]RecordingMeta{}
+		}
+		a.cfg.RecordingMeta[req.Path] = meta
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, meta)
+	case http.MethodDelete:
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			http.Error(w, "path is required", http.StatusBadRequest)
+			return
+		}
+		a.mu.Lock()
+		delete(a.cfg.RecordingMeta, path)
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "unassigned"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
@@ -2084,7 +2379,22 @@ func normalizeConfig(cfg *AppConfig) {
 	if cfg.Settings.FavoriteSetIDs == nil {
 		cfg.Settings.FavoriteSetIDs = []string{}
 	}
+	if cfg.LibraryEvents == nil {
+		cfg.LibraryEvents = []LibraryEvent{}
+	}
+	if cfg.RecordingMeta == nil {
+		cfg.RecordingMeta = map[string]RecordingMeta{}
+	}
 	assignScheduleIDs(cfg.Timetable)
+	for i := range cfg.LibraryEvents {
+		if cfg.LibraryEvents[i].ID == "" {
+			cfg.LibraryEvents[i].ID = newID()
+		}
+		if cfg.LibraryEvents[i].Timetable == nil {
+			cfg.LibraryEvents[i].Timetable = []StageSchedule{}
+		}
+		assignScheduleIDs(cfg.LibraryEvents[i].Timetable)
+	}
 }
 
 // assignScheduleIDs gives every set a stable ID (used for favoriting/reminders)
@@ -2110,9 +2420,22 @@ func loadDQTimetable(path string) []StageSchedule {
 	if err != nil {
 		return nil
 	}
+	tt, err := parseDQTimetableJSON(data)
+	if err != nil {
+		return nil
+	}
+	return tt
+}
+
+// parseDQTimetableJSON parses the raw per-stage timetable JSON shape used by
+// dq-timetable.json (and, by extension, any archived timetable pasted into a
+// LibraryEvent): an array of stage objects whose "sets" are
+// [year, month, day, hour, minute, name?] tuples. A row with no name marks
+// only the end time of the previous set.
+func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
 	var raw []rawStage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil
+		return nil, err
 	}
 	var out []StageSchedule
 	for _, stage := range raw {
@@ -2149,7 +2472,7 @@ func loadDQTimetable(path string) []StageSchedule {
 		}
 		out = append(out, StageSchedule{Stage: stage.Stage, URL: stage.URL, Sets: sets})
 	}
-	return out
+	return out, nil
 }
 
 func sourcesFromTimetable(tt []StageSchedule) []Source {
