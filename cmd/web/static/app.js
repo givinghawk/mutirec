@@ -1,7 +1,8 @@
 let state = null;
 let config = null;
 let wave = null;
-let hlsPlayer = null;
+let livePlayer = null;
+let recPlayer = null;
 let recordings = [];
 let lolEvents = [];
 let selectedTimetableDay = null;
@@ -157,9 +158,27 @@ function renderFavoritesPanel() {
     </div>`).join('');
 }
 
-function setupCustomDropdowns() {
-  document.querySelectorAll('.custom-dropdown').forEach(dropdown => {
+// Wires up every .custom-dropdown under `root` (defaults to the whole page)
+// that hasn't already been bound - safe to call repeatedly (e.g. once after
+// every drawSourceEditor() re-render, and again after setDropdownOptions()
+// rebuilds a single dropdown's contents) since already-bound dropdowns are
+// skipped rather than getting a second stacked set of listeners.
+function setupCustomDropdowns(root) {
+  const scope = root || document;
+  const dropdowns = [...scope.querySelectorAll('.custom-dropdown')];
+  if (scope.classList && scope.classList.contains('custom-dropdown')) dropdowns.unshift(scope);
+
+  dropdowns.forEach(dropdown => {
+    if (dropdown.dataset.bound === '1') return;
+    // Dropdowns populated later via setDropdownOptions() (assign-event,
+    // assign-set) start out as empty containers with nothing to bind yet -
+    // skip them without marking bound, so they get wired up for real once
+    // setDropdownOptions() gives them a toggle/menu to work with.
     const toggle = dropdown.querySelector('.dropdown-toggle');
+    if (!toggle) return;
+    dropdown.dataset.bound = '1';
+
+    const label = toggle.querySelector('.dropdown-toggle-label');
     const menu = dropdown.querySelector('.dropdown-menu');
     const hiddenInput = dropdown.querySelector('input[type="hidden"]');
     const sourceRow = dropdown.closest('.source-row');
@@ -174,23 +193,82 @@ function setupCustomDropdowns() {
 
     dropdown.querySelectorAll('.dropdown-option').forEach(option => {
       option.addEventListener('click', () => {
-        const value = option.dataset.value;
-        const label = option.querySelector('.font-semibold').textContent;
-        hiddenInput.value = value;
-        toggle.textContent = label + '▼';
+        hiddenInput.value = option.dataset.value;
+        label.textContent = option.querySelector('.font-semibold').textContent;
+        // Copy through any other data-* the option carries (e.g. a
+        // timetable set's bare artist name alongside its display label) so
+        // callers can read it straight off the hidden input afterward
+        // instead of re-parsing the visible label text.
+        for (const key in option.dataset) {
+          if (key === 'value') continue;
+          hiddenInput.dataset[key] = option.dataset[key];
+        }
         menu.classList.add('hidden');
         if (sourceRow) markCardUnsaved(sourceRow);
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
       });
     });
   });
 
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('.custom-dropdown')) {
-      document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
-        m.classList.add('hidden');
-      });
+  if (!setupCustomDropdowns._docBound) {
+    setupCustomDropdowns._docBound = true;
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.custom-dropdown')) {
+        document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
+          m.classList.add('hidden');
+        });
+      }
+    });
+  }
+}
+
+// Builds/rebuilds the standard custom-dropdown markup (toggle button +
+// option menu + backing hidden input) inside an existing empty
+// `<div id="{id}-dropdown" class="custom-dropdown">` container, for
+// dropdowns whose option list is fetched or changes at runtime rather than
+// being fixed per row (assign-event, assign-set, tt-lol-event). The hidden
+// input keeps id={id}, so every existing `$(id).value` read and `change`
+// listener elsewhere in the code keeps working unchanged.
+function setDropdownOptions(id, options, opts) {
+  opts = opts || {};
+  const container = $(id + '-dropdown');
+  if (!container) return;
+  const value = opts.value !== undefined ? opts.value : '';
+  const current = options.find(o => o.value === value);
+  const label = current ? current.label : (opts.placeholder || '');
+  const menuHtml = options.length
+    ? options.map(o => `
+        <div class="dropdown-option" data-value="${escapeAttr(o.value)}"${o.name !== undefined ? ` data-name="${escapeAttr(o.name)}"` : ''}>
+          <div class="font-semibold">${escapeHtml(o.label)}</div>
+          ${o.description ? `<div class="text-xs text-zinc-400">${escapeHtml(o.description)}</div>` : ''}
+        </div>`).join('')
+    : `<div class="dropdown-option-empty">${escapeHtml(opts.placeholder || 'No options')}</div>`;
+  container.innerHTML = `
+    <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(label)}</span><span class="ml-auto">▼</span></button>
+    <div class="dropdown-menu hidden">${menuHtml}</div>
+    <input type="hidden" id="${escapeAttr(id)}" class="${escapeAttr(id)}" value="${escapeAttr(value)}">`;
+  container.dataset.bound = '';
+  setupCustomDropdowns(container);
+}
+
+// Updates a dropdown built by setDropdownOptions to a specific value
+// programmatically (as opposed to the user clicking an option) - used when
+// code picks a value on the user's behalf, e.g. "Find closest set".
+function setDropdownValue(id, value) {
+  const container = $(id + '-dropdown');
+  const input = $(id);
+  if (!container || !input) return;
+  const option = container.querySelector(`.dropdown-option[data-value="${CSS.escape(String(value))}"]`);
+  input.value = value;
+  if (option) {
+    const labelEl = container.querySelector('.dropdown-toggle-label');
+    if (labelEl) labelEl.textContent = option.querySelector('.font-semibold').textContent;
+    for (const key in option.dataset) {
+      if (key === 'value') continue;
+      input.dataset[key] = option.dataset[key];
     }
-  });
+  }
+  input.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 function renderEditors() {
@@ -241,12 +319,22 @@ function drawSourceEditor() {
       <div class="source-row-body ${open ? '' : 'hidden'}">
         <div class="grid gap-2 md:grid-cols-4">
           <label>Name<input class="input src-name" value="${escapeAttr(s.name)}"></label>
-          <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
+          <label>Type
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(s.type || 'youtube')}</span><span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="youtube"><div class="font-semibold">youtube</div></div>
+                <div class="dropdown-option" data-value="twitch"><div class="font-semibold">twitch</div></div>
+                <div class="dropdown-option" data-value="http"><div class="font-semibold">http</div></div>
+              </div>
+              <input type="hidden" class="src-type" value="${escapeAttr(s.type || 'youtube')}">
+            </div>
+          </label>
           <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
           <label>Quality<input class="input src-quality" value="${escapeAttr(s.quality || 'best')}"></label>
           <label>Container
-            <div class="custom-dropdown" data-field="src-container" data-value="${escapeAttr(s.container || 'mkv')}">
-              <button type="button" class="dropdown-toggle input">${s.container || 'mkv'}<span class="ml-auto">▼</span></button>
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(s.container || 'mkv')}</span><span class="ml-auto">▼</span></button>
               <div class="dropdown-menu hidden">
                 <div class="dropdown-option" data-value="mkv">
                   <div class="font-semibold">Matroska (MKV)</div>
@@ -269,8 +357,8 @@ function drawSourceEditor() {
             </div>
           </label>
           <label>Transcode
-            <div class="custom-dropdown" data-field="src-transcode" data-value="${s.transcode ? 'yes' : 'no'}">
-              <button type="button" class="dropdown-toggle input">${s.transcode ? 'Yes (re-encode)' : 'No (copy codec)'}<span class="ml-auto">▼</span></button>
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${s.transcode ? 'Yes (re-encode)' : 'No (copy codec)'}</span><span class="ml-auto">▼</span></button>
               <div class="dropdown-menu hidden">
                 <div class="dropdown-option" data-value="no">
                   <div class="font-semibold">No - Copy codec</div>
@@ -285,8 +373,8 @@ function drawSourceEditor() {
             </div>
           </label>
           <label>Live Rewind
-            <div class="custom-dropdown" data-field="src-liverewind" data-value="${s.liveRewind ? 'hls' : 'none'}">
-              <button type="button" class="dropdown-toggle input">${s.liveRewind ? 'HLS Buffer' : 'Disabled'}<span class="ml-auto">▼</span></button>
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${s.liveRewind ? 'HLS Buffer' : 'Disabled'}</span><span class="ml-auto">▼</span></button>
               <div class="dropdown-menu hidden">
                 <div class="dropdown-option" data-value="none">
                   <div class="font-semibold">Disabled</div>
@@ -300,7 +388,18 @@ function drawSourceEditor() {
               <input type="hidden" class="src-liverewind" value="${s.liveRewind ? 'hls' : 'none'}">
             </div>
           </label>
-          <label>HW accel<select class="input src-hw"><option ${sel(s.hardwareAccel,'')}>none</option><option ${sel(s.hardwareAccel,'cuda')}>cuda</option><option ${sel(s.hardwareAccel,'qsv')}>qsv</option><option ${sel(s.hardwareAccel,'vaapi')}>vaapi</option></select></label>
+          <label>HW accel
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(s.hardwareAccel || 'none')}</span><span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="none"><div class="font-semibold">none</div></div>
+                <div class="dropdown-option" data-value="cuda"><div class="font-semibold">cuda</div></div>
+                <div class="dropdown-option" data-value="qsv"><div class="font-semibold">qsv</div></div>
+                <div class="dropdown-option" data-value="vaapi"><div class="font-semibold">vaapi</div></div>
+              </div>
+              <input type="hidden" class="src-hw" value="${escapeAttr(s.hardwareAccel || 'none')}">
+            </div>
+          </label>
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
           <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
@@ -496,21 +595,39 @@ async function stopRec(id, name) {
   await refresh();
 }
 
+// The tech element Video.js actually plays through is either the element
+// you handed it (when it can use your tag directly) or nested inside the
+// wrapper it builds around it - checking both covers either case without
+// caring which one this particular version/config produces.
+function techVideoEl(player) {
+  const el = player.el();
+  if (el.tagName === 'VIDEO' || el.tagName === 'AUDIO') return el;
+  return el.querySelector('video') || el.querySelector('audio') || el;
+}
+
+function ensureLivePlayer() {
+  if (livePlayer) return livePlayer;
+  livePlayer = videojs('live-video', { autoplay: false, controls: true, preload: 'auto', fluid: false, liveui: true });
+  livePlayer.on('error', () => {
+    const err = livePlayer.error();
+    toast(`Live stream error: ${err ? err.message : 'playback failed'}`, 'error');
+  });
+  return livePlayer;
+}
+
 function playLive(id, audioOnly) {
   const src = state.sources.find(s => s.id === id);
   if (!src) return;
-  // Twitch/YouTube (resolved via streamlink) and most raw HTTP sources are
-  // served as HLS (.m3u8), which only Safari can play natively - every other
-  // browser needs hls.js or "Watch Live" silently does nothing. The live
-  // rewind buffer is always HLS; otherwise guess from the source itself.
-  const looksLikeHls = src.liveRewindActive || src.type !== 'http' || /\.m3u8(\?|$)/i.test(src.url || '');
-  const useHls = looksLikeHls && window.Hls && Hls.isSupported();
   const url = src.liveRewindActive ? `/api/live/${id}/hls/index.m3u8` : `/api/live/${id}`;
-  const audioEl = $('audio'), videoEl = $('video');
-  audioEl.classList.toggle('hidden', !audioOnly);
-  videoEl.classList.toggle('hidden', audioOnly);
-  const el = audioOnly ? audioEl : videoEl;
-  (audioOnly ? videoEl : audioEl).pause();
+  // Twitch/YouTube (resolved via streamlink) and most raw HTTP sources are
+  // served as HLS (.m3u8); Video.js's built-in HLS support (VHS) needs an
+  // explicit mimetype to pick the right tech since the URL itself has no
+  // .m3u8 extension for proxied/live-rewind sources.
+  const looksLikeHls = src.liveRewindActive || src.type !== 'http' || /\.m3u8(\?|$)/i.test(src.url || '');
+
+  const player = ensureLivePlayer();
+  $('live-video').classList.remove('hidden');
+  $('live-video').classList.toggle('audio-mode', !!audioOnly);
 
   nowPlayingId = id;
   $('player-empty').classList.add('hidden');
@@ -523,8 +640,6 @@ function playLive(id, audioOnly) {
   void panel.offsetWidth;
   panel.classList.add('flash');
 
-  if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
-
   const statusEl = $('player-status');
   if (src.liveRewindActive) {
     statusEl.textContent = 'Live rewind buffer connecting — drag the seek bar back to scrub within this recording.';
@@ -533,21 +648,10 @@ function playLive(id, audioOnly) {
     statusEl.classList.add('hidden');
   }
 
-  if (useHls) {
-    hlsPlayer = new Hls({ liveSyncDurationCount: 3 });
-    hlsPlayer.on(Hls.Events.ERROR, (_evt, data) => {
-      if (data.fatal) toast(`Live stream error: ${data.details}`, 'error');
-    });
-    hlsPlayer.loadSource(url);
-    hlsPlayer.attachMedia(el);
-    hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error')));
-  } else {
-    // Safari (and anything without hls.js) can play HLS natively via <video src>.
-    el.src = url;
-    el.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
-  }
+  player.src(looksLikeHls ? { src: url, type: 'application/x-mpegURL' } : { src: url });
+  player.play().catch(err => toast(`Could not start playback: ${err.message}`, 'error'));
 
-  if (!useHls && $('wave-toggle').checked && window.WaveSurfer) {
+  if (!looksLikeHls && $('wave-toggle').checked && window.WaveSurfer) {
     $('wave').classList.remove('hidden');
     if (wave) wave.destroy();
     wave = WaveSurfer.create({ container: '#wave', waveColor: '#52525b', progressColor: accents[config.ui.accent] || accents.red, height: 80 });
@@ -914,14 +1018,14 @@ async function toggleFavorite(id) {
 // --- timetable.lol integration (optional) ---
 
 async function loadLolEvents() {
-  const select = $('tt-lol-event');
   try {
     const result = await api('/api/timetable/lol-events');
     lolEvents = result.events || [];
-    select.innerHTML = lolEvents.map(e => `<option value="${escapeAttr(e.slug)}">${escapeHtml(e.title || e.slug)}${e.year ? ' (' + escapeHtml(e.year) + ')' : ''}</option>`).join('') || '<option value="">No events found</option>';
+    const options = lolEvents.map(e => ({ value: e.slug, label: `${e.title || e.slug}${e.year ? ' (' + e.year + ')' : ''}` }));
+    setDropdownOptions('tt-lol-event', options, { value: options.length ? options[0].value : '', placeholder: 'No events found' });
     $('tt-lol-status').textContent = `${lolEvents.length} events available from timetable.lol.`;
   } catch {
-    select.innerHTML = '<option value="">Could not reach timetable.lol</option>';
+    setDropdownOptions('tt-lol-event', [], { placeholder: 'Could not reach timetable.lol' });
     $('tt-lol-status').textContent = 'Could not reach timetable.lol — you can still build a timetable by hand below.';
   }
 }
@@ -1323,8 +1427,9 @@ function openAssignModal(r) {
   $('assign-find-result').textContent = '';
   $('assign-error').classList.add('hidden');
 
-  $('assign-event').innerHTML = `<option value="">Unsorted</option>` + libraryEvents().map(e => `<option value="${escapeAttr(e.id)}">${escapeHtml(e.name)}</option>`).join('');
-  $('assign-event').value = r.eventId || '';
+  setDropdownOptions('assign-event',
+    [{ value: '', label: 'Unsorted' }, ...libraryEvents().map(e => ({ value: e.id, label: e.name }))],
+    { value: r.eventId || '' });
 
   setAssignMode('artist');
   populateAssignSetOptions();
@@ -1340,35 +1445,35 @@ function setAssignMode(mode) {
   $('assign-mode-time').classList.toggle('hidden', mode !== 'time');
 }
 document.querySelectorAll('.assign-mode-btn').forEach(b => b.addEventListener('click', () => setAssignMode(b.dataset.mode)));
-$('assign-event').addEventListener('change', () => populateAssignSetOptions());
+
+// assign-event and assign-set are hidden inputs that don't exist in the DOM
+// until setDropdownOptions() first builds them (when the modal opens), so
+// their 'change' listeners are delegated from the always-present modal
+// panel instead of attached directly at page-load time.
+$('assign-overlay').addEventListener('change', (e) => {
+  if (e.target.id === 'assign-event') populateAssignSetOptions();
+  if (e.target.id === 'assign-set' && e.target.value) $('assign-artist').value = e.target.dataset.name || '';
+});
 
 async function populateAssignSetOptions() {
   const eventId = $('assign-event').value;
-  const setSel = $('assign-set');
   if (!eventId) {
-    setSel.innerHTML = `<option value="">Choose an event first</option>`;
+    setDropdownOptions('assign-set', [], { placeholder: 'Choose an event first' });
     return;
   }
-  setSel.innerHTML = `<option value="">Loading…</option>`;
+  setDropdownOptions('assign-set', [], { placeholder: 'Loading…' });
   const tt = await fetchEventTimetable(eventId);
   if (!tt.length) {
-    setSel.innerHTML = `<option value="">No timetable imported for this event yet</option>`;
+    setDropdownOptions('assign-set', [], { placeholder: 'No timetable imported for this event yet' });
     return;
   }
-  const opts = ['<option value="">— choose a set —</option>'];
+  const options = [];
   tt.forEach(stage => (stage.sets || []).forEach(set => {
     const when = set.start ? new Date(set.start).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-    opts.push(`<option value="${escapeAttr(set.id)}">${escapeHtml(stage.stage)} · ${escapeHtml(when)} · ${escapeHtml(set.name)}</option>`);
+    options.push({ value: set.id, label: `${stage.stage} · ${when} · ${set.name}`, name: set.name });
   }));
-  setSel.innerHTML = opts.join('');
+  setDropdownOptions('assign-set', options, { placeholder: '— choose a set —' });
 }
-
-$('assign-set').addEventListener('change', () => {
-  const opt = $('assign-set').selectedOptions[0];
-  if (!opt || !opt.value) return;
-  const parts = opt.textContent.split(' · ');
-  $('assign-artist').value = parts.slice(2).join(' · ') || opt.textContent;
-});
 
 $('assign-find-btn').onclick = async () => {
   const eventId = $('assign-event').value;
@@ -1387,7 +1492,7 @@ $('assign-find-btn').onclick = async () => {
   }));
   if (!best) { $('assign-find-result').textContent = 'No sets found in this timetable.'; return; }
   $('assign-artist').value = best.name;
-  $('assign-set').value = best.id;
+  setDropdownValue('assign-set', best.id);
   const mins = Math.round(bestDelta / 60000);
   $('assign-find-result').textContent = mins === 0
     ? `Matched: ${bestStage} · ${best.name} (within this set's window)`
@@ -1430,26 +1535,33 @@ $('assign-save').onclick = async () => {
 };
 
 // --- Custom video player (Recordings tab) ---
+//
+// Video.js is the playback engine (autoplay/HLS-capable tech, robust
+// cross-browser fullscreen handling), but its own control bar is disabled
+// (`controls: false`) in favor of this app's own dark/accent-colored
+// control bar, wired directly to the Player API instead of a raw <video>.
 
-let customPlayerBound = false;
 let currentPlaybackUrl = '';
 
+function ensureRecPlayer() {
+  if (recPlayer) return recPlayer;
+  recPlayer = videojs('rec-video', { controls: false, autoplay: false, preload: 'auto', bigPlayButton: false, fluid: false });
+  setupCustomPlayerControls(recPlayer);
+  return recPlayer;
+}
+
 function openRecordingPlayer(path, name) {
-  const video = $('rec-video');
   $('rec-player-title').textContent = name || 'Recording';
   $('recording-player-overlay').classList.remove('hidden');
-  setupCustomPlayerControls(video);
+  const player = ensureRecPlayer();
   currentPlaybackUrl = `/media/${encodeMediaPath(path)}`;
-  video.src = currentPlaybackUrl;
-  video.currentTime = 0;
-  video.play().catch(() => { /* autoplay may be blocked; controls still work */ });
+  player.src({ src: currentPlaybackUrl });
+  player.currentTime(0);
+  player.play().catch(() => { /* autoplay may be blocked; controls still work */ });
 }
 
 function closeRecordingPlayer() {
-  const video = $('rec-video');
-  video.pause();
-  video.removeAttribute('src');
-  video.load();
+  if (recPlayer) recPlayer.pause();
   stopVisualizer();
   $('recording-player-overlay').classList.add('hidden');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
@@ -1473,12 +1585,9 @@ function formatTime(s) {
   return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-// Bound once: the modal reuses a single <video> element, so controls only
-// need to be wired up the first time the player is opened.
-function setupCustomPlayerControls(video) {
-  if (customPlayerBound) return;
-  customPlayerBound = true;
-
+// Bound once: ensureRecPlayer() only creates the Player instance the first
+// time it's needed, so controls only ever get wired up once too.
+function setupCustomPlayerControls(player) {
   const playPauseBtn = $('cp-playpause');
   const centerPlay = $('cp-center-play');
   const back10 = $('cp-back10');
@@ -1495,51 +1604,53 @@ function setupCustomPlayerControls(video) {
   let scrubbing = false;
 
   const setPlayIcon = (playing) => {
-    const icon = playing ? '&#10074;&#10074;' : '&#9658;';
-    playPauseBtn.innerHTML = icon;
+    playPauseBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9658;';
   };
 
-  const togglePlay = () => { if (video.paused || video.ended) video.play().catch(() => {}); else video.pause(); };
+  const togglePlay = () => { if (player.paused() || player.ended()) player.play().catch(() => {}); else player.pause(); };
 
   playPauseBtn.onclick = togglePlay;
   centerPlay.onclick = togglePlay;
-  video.addEventListener('click', togglePlay);
-  video.addEventListener('play', () => { setPlayIcon(true); centerPlay.classList.add('hidden'); });
-  video.addEventListener('pause', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
-  video.addEventListener('ended', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
-  video.addEventListener('waiting', () => $('custom-player').classList.add('cp-buffering'));
-  video.addEventListener('playing', () => $('custom-player').classList.remove('cp-buffering'));
-  video.addEventListener('error', () => toast('Could not play this recording — the file may be missing or unsupported', 'error'));
+  player.el().addEventListener('click', togglePlay);
+  player.on('play', () => { setPlayIcon(true); centerPlay.classList.add('hidden'); });
+  player.on('pause', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  player.on('ended', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  player.on('waiting', () => $('custom-player').classList.add('cp-buffering'));
+  player.on('playing', () => $('custom-player').classList.remove('cp-buffering'));
+  player.on('error', () => toast('Could not play this recording — the file may be missing or unsupported', 'error'));
 
-  back10.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
-  fwd10.onclick = () => { video.currentTime = Math.min(video.duration || video.currentTime + 10, video.currentTime + 10); };
+  back10.onclick = () => player.currentTime(Math.max(0, player.currentTime() - 10));
+  fwd10.onclick = () => player.currentTime(Math.min(player.duration() || player.currentTime() + 10, player.currentTime() + 10));
 
-  video.addEventListener('timeupdate', () => {
-    if (scrubbing || !isFinite(video.duration) || !video.duration) return;
-    const pct = (video.currentTime / video.duration) * 1000;
+  player.on('timeupdate', () => {
+    const duration = player.duration();
+    if (scrubbing || !isFinite(duration) || !duration) return;
+    const pct = (player.currentTime() / duration) * 1000;
     seek.value = pct;
     seekProgress.style.width = `${pct / 10}%`;
-    timeEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+    timeEl.textContent = `${formatTime(player.currentTime())} / ${formatTime(duration)}`;
   });
-  video.addEventListener('progress', () => {
-    if (video.buffered.length && isFinite(video.duration) && video.duration) {
-      const end = video.buffered.end(video.buffered.length - 1);
-      seekBuffer.style.width = `${(end / video.duration) * 100}%`;
+  player.on('progress', () => {
+    const duration = player.duration();
+    const bufferedEnd = player.bufferedEnd();
+    if (isFinite(duration) && duration && bufferedEnd) {
+      seekBuffer.style.width = `${(bufferedEnd / duration) * 100}%`;
     }
   });
-  video.addEventListener('loadedmetadata', () => {
-    timeEl.textContent = `${formatTime(0)} / ${formatTime(video.duration)}`;
+  player.on('loadedmetadata', () => {
+    const duration = player.duration();
+    timeEl.textContent = `${formatTime(0)} / ${formatTime(duration)}`;
     // A file with no video track decodes to 0x0 dimensions regardless of
     // container/extension - checking this (rather than guessing from the
     // file name) is what reliably tells an audio-only recording apart from
     // a video one, so the waveform/visualizer only show up when there's
     // nothing to actually look at otherwise.
-    const isAudioOnly = video.videoWidth === 0 && video.videoHeight === 0;
+    const isAudioOnly = player.videoWidth() === 0 && player.videoHeight() === 0;
     $('custom-player').classList.toggle('audio-mode', isAudioOnly);
     $('cp-audio-stage').classList.toggle('hidden', !isAudioOnly);
     if (isAudioOnly) {
-      setupWaveform(currentPlaybackUrl);
-      startVisualizer();
+      setupWaveform(currentPlaybackUrl, techVideoEl(player));
+      startVisualizer(techVideoEl(player));
     } else {
       stopVisualizer();
     }
@@ -1549,31 +1660,32 @@ function setupCustomPlayerControls(video) {
     scrubbing = true;
     const pct = seek.value / 1000;
     seekProgress.style.width = `${pct * 100}%`;
-    if (isFinite(video.duration) && video.duration) timeEl.textContent = `${formatTime(pct * video.duration)} / ${formatTime(video.duration)}`;
+    const duration = player.duration();
+    if (isFinite(duration) && duration) timeEl.textContent = `${formatTime(pct * duration)} / ${formatTime(duration)}`;
   });
   seek.addEventListener('change', () => {
-    if (isFinite(video.duration) && video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    const duration = player.duration();
+    if (isFinite(duration) && duration) player.currentTime((seek.value / 1000) * duration);
     scrubbing = false;
   });
   seekWrap.addEventListener('mousedown', () => { scrubbing = true; });
 
   volume.addEventListener('input', () => {
-    video.volume = parseFloat(volume.value);
-    video.muted = video.volume === 0;
-    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
+    player.volume(parseFloat(volume.value));
+    player.muted(player.volume() === 0);
+    muteBtn.innerHTML = player.muted() ? '&#128263;' : '&#128266;';
   });
   muteBtn.onclick = () => {
-    video.muted = !video.muted;
-    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
-    if (!video.muted && video.volume === 0) { video.volume = 1; volume.value = 1; }
+    player.muted(!player.muted());
+    muteBtn.innerHTML = player.muted() ? '&#128263;' : '&#128266;';
+    if (!player.muted() && player.volume() === 0) { player.volume(1); volume.value = 1; }
   };
 
-  speed.addEventListener('change', () => { video.playbackRate = parseFloat(speed.value); });
+  speed.addEventListener('change', () => { player.playbackRate(parseFloat(speed.value)); });
 
   fullscreenBtn.onclick = () => {
-    const el = $('custom-player');
-    if (document.fullscreenElement) document.exitFullscreen();
-    else el.requestFullscreen?.().catch(() => {});
+    if (player.isFullscreen()) player.exitFullscreen();
+    else player.requestFullscreen();
   };
 }
 
@@ -1588,10 +1700,9 @@ function setupCustomPlayerControls(video) {
 
 let cpWave = null;
 
-function setupWaveform(url) {
+function setupWaveform(url, videoEl) {
   if (!window.WaveSurfer) return;
   if (cpWave) { cpWave.destroy(); cpWave = null; }
-  const video = $('rec-video');
   // Passing `url` alongside `media` at construction time makes WaveSurfer
   // manage (and briefly reset) the element's own src while it loads, which
   // stomps on the playback we already started - creating first and loading
@@ -1607,7 +1718,7 @@ function setupWaveform(url) {
     cursorColor: '#f4f4f5',
     barWidth: 2,
     barGap: 1,
-    media: video,
+    media: videoEl,
   });
   cpWave.load(url);
 }
@@ -1621,7 +1732,7 @@ let vizAnalyser = null;
 let vizData = null;
 let vizRAF = null;
 
-function ensureVizGraph() {
+function ensureVizGraph(videoEl) {
   if (vizAudioCtx) return true;
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   if (!AudioCtx) return false;
@@ -1630,7 +1741,7 @@ function ensureVizGraph() {
     vizAnalyser = vizAudioCtx.createAnalyser();
     vizAnalyser.fftSize = 128;
     vizData = new Uint8Array(vizAnalyser.frequencyBinCount);
-    const source = vizAudioCtx.createMediaElementSource($('rec-video'));
+    const source = vizAudioCtx.createMediaElementSource(videoEl);
     source.connect(vizAnalyser);
     vizAnalyser.connect(vizAudioCtx.destination);
   } catch {
@@ -1640,8 +1751,8 @@ function ensureVizGraph() {
   return true;
 }
 
-function startVisualizer() {
-  if (!ensureVizGraph()) return;
+function startVisualizer(videoEl) {
+  if (!ensureVizGraph(videoEl)) return;
   if (vizAudioCtx.state === 'suspended') vizAudioCtx.resume().catch(() => {});
   const canvas = $('cp-visualizer');
   const ctx2d = canvas.getContext('2d');
@@ -1802,6 +1913,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 });
+
+// Wires up the handful of custom dropdowns that are static parts of the page
+// (not rebuilt by drawSourceEditor() or setDropdownOptions()) as soon as the
+// script runs - the source editor's per-row dropdowns get the same wiring
+// again after every render, safely, since already-bound elements are skipped.
+setupCustomDropdowns();
 
 refresh();
 setInterval(refresh, 5000);

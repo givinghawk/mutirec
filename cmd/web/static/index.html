@@ -6,7 +6,8 @@
   <title>Defqon Stream Recorder</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <link href="https://unpkg.com/video.js@8/dist/video-js.min.css" rel="stylesheet">
+  <script src="https://unpkg.com/video.js@8/dist/video.min.js"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="min-h-screen bg-zinc-950 text-zinc-100">
@@ -57,8 +58,7 @@
               <label class="flex items-center gap-2 text-sm text-zinc-300"><input id="wave-toggle" type="checkbox" class="accent-red-500"> Waveform</label>
             </div>
             <div id="player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
-            <audio id="audio" controls class="hidden w-full"></audio>
-            <video id="video" controls class="mt-3 hidden w-full rounded border border-white/10 bg-black"></video>
+            <video id="live-video" class="video-js live-video hidden" playsinline></video>
             <div id="wave" class="mt-3 hidden h-20 rounded bg-black/30"></div>
             <p id="player-empty" class="text-sm text-zinc-400">Nothing playing yet — click "Watch Live" on a source above.</p>
           </div>
@@ -153,7 +153,7 @@
             <button type="button" id="rec-player-close" class="btn" aria-label="Close">&times;</button>
           </div>
           <div class="custom-player" id="custom-player">
-            <video id="rec-video" class="custom-player-video" playsinline></video>
+            <video id="rec-video" class="video-js custom-player-video" playsinline></video>
             <div class="custom-player-overlay-btn hidden" id="cp-center-play" aria-label="Play">&#9658;</div>
             <div id="cp-audio-stage" class="custom-player-audio-stage hidden">
               <canvas id="cp-visualizer" class="cp-visualizer"></canvas>
@@ -173,14 +173,18 @@
                 <button type="button" id="cp-mute" class="cp-btn" aria-label="Mute">&#128266;</button>
                 <input type="range" id="cp-volume" class="cp-volume" min="0" max="1" step="0.01" value="1">
               </div>
-              <select id="cp-speed" class="cp-speed" title="Playback speed">
-                <option value="0.5">0.5x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-              </select>
+              <div class="custom-dropdown cp-speed-dropdown" title="Playback speed">
+                <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">1x</span><span class="ml-auto">▼</span></button>
+                <div class="dropdown-menu hidden">
+                  <div class="dropdown-option" data-value="0.5"><div class="font-semibold">0.5x</div></div>
+                  <div class="dropdown-option" data-value="0.75"><div class="font-semibold">0.75x</div></div>
+                  <div class="dropdown-option" data-value="1"><div class="font-semibold">1x</div></div>
+                  <div class="dropdown-option" data-value="1.25"><div class="font-semibold">1.25x</div></div>
+                  <div class="dropdown-option" data-value="1.5"><div class="font-semibold">1.5x</div></div>
+                  <div class="dropdown-option" data-value="2"><div class="font-semibold">2x</div></div>
+                </div>
+                <input type="hidden" id="cp-speed" class="cp-speed" value="1">
+              </div>
               <button type="button" id="cp-fullscreen" class="cp-btn" aria-label="Fullscreen">&#9974;</button>
             </div>
           </div>
@@ -281,7 +285,7 @@
             <h2 id="assign-title" class="truncate">Organize recording</h2>
             <button type="button" id="assign-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Event<select id="assign-event" class="input"></select></label>
+          <label>Event<div class="custom-dropdown" id="assign-event-dropdown"></div></label>
           <label>Channel <span class="text-xs text-zinc-500">(optional display name override)</span><input id="assign-channel" class="input" placeholder="defaults to source folder name"></label>
 
           <div class="mb-2 flex gap-2" id="assign-mode-tabs">
@@ -290,7 +294,7 @@
           </div>
 
           <div id="assign-mode-artist" class="assign-mode-panel">
-            <label>Pick a set from this event's archived timetable<select id="assign-set" class="input"><option value="">No timetable imported for this event yet</option></select></label>
+            <label>Pick a set from this event's archived timetable<div class="custom-dropdown" id="assign-set-dropdown"></div></label>
           </div>
           <div id="assign-mode-time" class="assign-mode-panel hidden">
             <label>Approximate time this was recorded<input id="assign-time" type="datetime-local" class="input"></label>
@@ -320,7 +324,13 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Optional: browse a festival's public timetable and import it, instead of building your own by hand. Timetable data provided by <a href="https://timetable.lol" target="_blank" rel="noopener">timetable.lol</a>.</p>
           <div class="flex flex-wrap items-end gap-2">
-            <label class="min-w-[280px] flex-1">Event<select id="tt-lol-event" class="input"><option value="">Loading events…</option></select></label>
+            <label class="min-w-[280px] flex-1">Event
+              <div class="custom-dropdown" id="tt-lol-event-dropdown">
+                <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">Loading events…</span><span class="ml-auto">▼</span></button>
+                <div class="dropdown-menu hidden"></div>
+                <input type="hidden" id="tt-lol-event" class="tt-lol-event" value="">
+              </div>
+            </label>
             <button type="button" id="tt-lol-refresh" class="btn">Refresh list</button>
             <button type="button" id="tt-lol-import" class="btn primary">Import</button>
             <button type="button" id="tt-lol-resync" class="btn hidden">Re-sync linked event</button>

@@ -95,6 +95,7 @@ a { color: #67e8f9; }
 .dropdown-toggle { position: relative; display: flex; align-items: center; gap: 8px; cursor: pointer; width: 100%; justify-content: space-between; text-align: left; }
 .dropdown-toggle:hover { background: rgb(255 255 255 / .08) !important; }
 .dropdown-toggle span:last-child { flex-shrink: 0; font-size: 11px; }
+.dropdown-toggle-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dropdown-menu { position: absolute; top: 100%; left: 0; right: 0; z-index: 10; margin-top: 4px; background: rgb(24 24 27 / .95); border: 1px solid rgb(255 255 255 / .12); border-radius: 8px; box-shadow: 0 10px 30px rgb(0 0 0 / .35); overflow-y: auto; max-height: 250px; }
 .dropdown-menu.hidden { display: none; }
 .dropdown-option { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid rgb(255 255 255 / .06); transition: background .1s ease; }
@@ -102,6 +103,7 @@ a { color: #67e8f9; }
 .dropdown-option:hover { background: rgb(255 255 255 / .08); }
 .dropdown-option > div:first-child { font-size: 13px; margin-bottom: 2px; }
 .dropdown-option > div:last-child { font-size: 12px; }
+.dropdown-option-empty { padding: 10px 12px; font-size: 13px; color: #71717a; cursor: default; }
 
 /* Custom video player (Recordings tab) */
 .player-modal-panel { width: 100%; max-width: 900px; }
@@ -127,9 +129,24 @@ a { color: #67e8f9; }
 .cp-seek::-moz-range-thumb { width: 13px; height: 13px; border: none; border-radius: 999px; background: var(--accent, #ef4444); box-shadow: 0 0 0 2px rgb(0 0 0 / .3); cursor: pointer; }
 .cp-volume-wrap { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .cp-volume { width: 72px; accent-color: var(--accent, #ef4444); }
-.cp-speed { flex-shrink: 0; border: 1px solid rgb(255 255 255 / .12); border-radius: 6px; background: rgb(0 0 0 / .3); color: #f4f4f5; padding: 5px 6px; font-size: 12px; }
+.cp-speed-dropdown { flex-shrink: 0; width: 76px; }
+.cp-speed-dropdown .dropdown-toggle { padding: 5px 8px; font-size: 12px; background: rgb(0 0 0 / .3); }
 .custom-player:fullscreen { display: flex; flex-direction: column; justify-content: center; background: #000; }
 .custom-player:fullscreen .custom-player-video { max-height: calc(100vh - 52px); flex: 1; }
+
+/* Video.js integration: engine only in the Recordings player (own control
+   bar stays disabled/hidden in favor of the custom one above); default skin
+   kept for the Dashboard's live player. */
+.custom-player .video-js { width: 100%; max-height: 65vh; background: #000; }
+.custom-player .vjs-big-play-button,
+.custom-player .vjs-loading-spinner,
+.custom-player .vjs-control-bar,
+.custom-player .vjs-poster,
+.custom-player .vjs-text-track-display { display: none !important; }
+.custom-player.audio-mode .video-js { display: none; }
+.live-video.video-js { width: 100%; margin-top: 12px; border-radius: 8px; overflow: hidden; }
+.live-video.video-js.audio-mode { max-height: 90px; }
+.live-video.hidden { display: none; }
 
 /* Recordings Library (Events -> Channels -> Sets) */
 .lib-event-card { position: relative; height: 140px; border-radius: 10px; overflow: hidden; cursor: pointer; border: 1px solid rgb(255 255 255 / .1); transition: transform .15s ease, box-shadow .15s ease; }
