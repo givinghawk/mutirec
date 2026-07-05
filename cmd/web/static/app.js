@@ -2587,7 +2587,7 @@ function renderEventsHome() {
     if (org) {
       gridHtml += `<div class="col-span-full flex items-center gap-2 mt-2 mb-1">
         <span class="font-semibold text-sm">${escapeHtml(org.name)}</span>
-        <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(org).replace(/"/g, '&quot;')})">Edit</button>
+        <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(org).replace(/&/g, '&amp;').replace(/"/g, '&quot;')})">Edit</button>
         <button class="btn danger text-xs" onclick="deleteOrg('${escapeAttr(org.id)}')">Delete</button>
       </div>`;
     }
