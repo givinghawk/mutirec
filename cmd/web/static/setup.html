@@ -7,18 +7,70 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body class="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center px-4">
-  <form id="setup-form" class="panel w-full max-w-sm">
-    <div class="panel-head"><h2>Welcome</h2></div>
-    <p class="mb-3 text-sm text-zinc-400">This is a first run — choose a username and password for this instance. No environment variables required; you can change these later from Settings.</p>
-    <label>Username<input id="username" class="input" autocomplete="username" autofocus placeholder="admin"></label>
-    <label>Password<input id="password" type="password" class="input" autocomplete="new-password"></label>
-    <label>Confirm password<input id="confirm" type="password" class="input" autocomplete="new-password"></label>
-    <p class="-mt-2 mb-3 text-xs text-zinc-500">At least 8 characters.</p>
-    <p id="setup-error" class="mb-3 hidden text-sm text-rose-300"></p>
-    <button type="submit" class="btn primary w-full">Create account</button>
-  </form>
+<body class="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center px-4 py-10">
+  <div class="w-full max-w-lg space-y-4">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>System Check</h2>
+        <button type="button" id="syscheck-rerun" class="btn">Re-run check</button>
+      </div>
+      <p class="mb-3 text-sm text-zinc-400">A quick look at whether this machine has everything the recorder needs - ffmpeg/streamlink/internet/storage, plus a Steam-style minimum/recommended comparison for CPU, memory, and disk space. Nothing here blocks account creation below; fix anything that's failing whenever you get to it and re-run the check.</p>
+      <div id="syscheck-body"><p class="text-sm text-zinc-400">Checking…</p></div>
+    </div>
+
+    <form id="setup-form" class="panel">
+      <div class="panel-head"><h2>Welcome</h2></div>
+      <p class="mb-3 text-sm text-zinc-400">Choose a username and password for this instance. No environment variables required; you can change these later from Settings.</p>
+      <label>Username<input id="username" class="input" autocomplete="username" autofocus placeholder="admin"></label>
+      <label>Password<input id="password" type="password" class="input" autocomplete="new-password"></label>
+      <label>Confirm password<input id="confirm" type="password" class="input" autocomplete="new-password"></label>
+      <p class="-mt-2 mb-3 text-xs text-zinc-500">At least 8 characters.</p>
+      <p id="setup-error" class="mb-3 hidden text-sm text-rose-300"></p>
+      <button type="submit" class="btn primary w-full">Create account</button>
+    </form>
+  </div>
   <script>
+    function escSC(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    function renderSystemCheck(report) {
+      const icon = s => s === 'pass' ? '✓' : s === 'warn' ? '!' : '✕';
+      const banner = report.overallOk
+        ? '<div class="syscheck-banner ok">Everything required is in place.</div>'
+        : '<div class="syscheck-banner issues">Some required checks are failing - recording may not work correctly until these are fixed.</div>';
+      const items = report.checks.map(c => `
+        <div class="syscheck-item syscheck-${escSC(c.status)}">
+          <span class="syscheck-icon">${icon(c.status)}</span>
+          <div class="min-w-0">
+            <div class="font-medium">${escSC(c.label)}</div>
+            <div class="text-xs text-zinc-400">${escSC(c.detail)}</div>
+          </div>
+        </div>`).join('');
+      const rows = report.requirements.map(req => `
+        <tr class="req-${escSC(req.status)}">
+          <td>${escSC(req.label)}</td><td>${escSC(req.min)}</td><td>${escSC(req.recommended)}</td><td>${escSC(req.value)}</td>
+        </tr>`).join('');
+      document.getElementById('syscheck-body').innerHTML = `
+        ${banner}
+        <div class="syscheck-list">${items}</div>
+        <table class="syscheck-req-table">
+          <thead><tr><th>Hardware</th><th>Minimum</th><th>Recommended</th><th>Your system</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    async function runSystemCheck() {
+      document.getElementById('syscheck-body').innerHTML = '<p class="text-sm text-zinc-400">Checking…</p>';
+      try {
+        const res = await fetch('/api/system-check');
+        if (!res.ok) throw new Error(`request failed (${res.status})`);
+        renderSystemCheck(await res.json());
+      } catch (err) {
+        document.getElementById('syscheck-body').innerHTML = `<p class="text-sm text-rose-300">Could not run the system check: ${escSC(err.message)}</p>`;
+      }
+    }
+    document.getElementById('syscheck-rerun').addEventListener('click', runSystemCheck);
+    runSystemCheck();
+
     const form = document.getElementById('setup-form');
     const errorEl = document.getElementById('setup-error');
     form.addEventListener('submit', async (e) => {

@@ -570,7 +570,48 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   $('source-editor').dataset.loaded = '';
   await refresh();
   if (b.dataset.view === 'recordings') initLibrary();
+  if (b.dataset.view === 'diagnostics') runDiagnostics();
 });
+
+// --- Diagnostics (system check) ---
+
+function renderDiagnostics(container, report) {
+  const icon = s => s === 'pass' ? '&#10003;' : s === 'warn' ? '!' : '&#10007;';
+  const banner = report.overallOk
+    ? '<div class="syscheck-banner ok">Everything required is in place.</div>'
+    : '<div class="syscheck-banner issues">Some required checks are failing — recording may not work correctly until these are fixed.</div>';
+  const items = report.checks.map(c => `
+    <div class="syscheck-item syscheck-${escapeAttr(c.status)}">
+      <span class="syscheck-icon">${icon(c.status)}</span>
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(c.label)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(c.detail)}</div>
+      </div>
+    </div>`).join('');
+  const rows = report.requirements.map(req => `
+    <tr class="req-${escapeAttr(req.status)}">
+      <td>${escapeHtml(req.label)}</td><td>${escapeHtml(req.min)}</td><td>${escapeHtml(req.recommended)}</td><td>${escapeHtml(req.value)}</td>
+    </tr>`).join('');
+  container.innerHTML = `
+    ${banner}
+    <div class="syscheck-list">${items}</div>
+    <table class="syscheck-req-table">
+      <thead><tr><th>Hardware</th><th>Minimum</th><th>Recommended</th><th>Your system</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function runDiagnostics() {
+  const body = $('diag-body');
+  body.innerHTML = '<p class="text-sm text-zinc-400">Checking…</p>';
+  try {
+    const report = await api('/api/system-check');
+    renderDiagnostics(body, report);
+  } catch {
+    body.innerHTML = '<p class="text-sm text-rose-300">Could not run the system check — see the notification for details.</p>';
+  }
+}
+$('diag-rerun').onclick = runDiagnostics;
 
 $('logout-btn').onclick = async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }

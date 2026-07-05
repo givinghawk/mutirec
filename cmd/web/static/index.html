@@ -26,6 +26,7 @@
         <button data-view="recordings" class="nav">Recordings</button>
         <button data-view="timetable" class="nav">Timetable</button>
         <button data-view="settings" class="nav">Settings</button>
+        <button data-view="diagnostics" class="nav">Diagnostics</button>
         <button data-view="help" class="nav">Help</button>
       </nav>
       <div class="mt-auto flex flex-col gap-2 pt-2">
@@ -428,6 +429,17 @@
           </div>
         </div>
         <button id="save-settings" class="btn primary mt-4">Save Settings</button>
+      </section>
+
+      <section id="diagnostics" class="view hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>System Check</h2>
+            <button type="button" id="diag-rerun" class="btn">Re-run check</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Confirms ffmpeg/ffprobe/streamlink are installed and working, the internet is reachable, storage directories are writable, and how this machine's CPU/memory/disk compare to what the recorder needs.</p>
+          <div id="diag-body"><p class="text-sm text-zinc-400">Checking…</p></div>
+        </div>
       </section>
 
       <section id="help" class="view hidden">

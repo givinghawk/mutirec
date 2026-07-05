@@ -457,6 +457,13 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 			return
 		}
 		if a.isSetupNeeded() {
+			// The setup wizard's system check needs to run - and be
+			// re-run - before any credentials exist, so it can't wait
+			// behind a session the user has no way to create yet.
+			if r.URL.Path == "/api/system-check" {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if strings.HasPrefix(r.URL.Path, "/api/") {
 				http.Error(w, "setup required", http.StatusUnauthorized)
 				return
@@ -707,6 +714,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/setup", a.handleSetup)
 	mux.HandleFunc("/api/account", a.handleAccount)
 	mux.HandleFunc("/api/state", a.handleState)
+	mux.HandleFunc("/api/system-check", a.handleSystemCheck)
 	mux.HandleFunc("/api/config", a.handleConfig)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
