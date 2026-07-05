@@ -2027,8 +2027,37 @@ func (a *App) handleLiveHLS(w http.ResponseWriter, r *http.Request, id string, p
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
+	full := filepath.Join(rec.hlsDir, file)
+	// ffmpeg doesn't write the manifest (or its first segment) until its
+	// first hls_time interval elapses, so a player that requests
+	// index.m3u8 the instant live rewind is clicked - before ffmpeg has
+	// caught up - would otherwise hit a hard 404 and give up instead of
+	// simply waiting the few seconds recording actually needs to start.
+	if file == "index.m3u8" {
+		waitForFile(r.Context(), full, 10*time.Second)
+	}
+	if _, err := os.Stat(full); err != nil {
+		http.Error(w, "live rewind buffer is still starting - try again in a few seconds", http.StatusNotFound)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, filepath.Join(rec.hlsDir, file))
+	http.ServeFile(w, r, full)
+}
+
+// waitForFile polls for path to exist, up to timeout, so a request that
+// narrowly beats a background writer doesn't have to fail outright.
+func waitForFile(ctx context.Context, path string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 func (a *App) handleMedia(w http.ResponseWriter, r *http.Request) {

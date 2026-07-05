@@ -1432,13 +1432,15 @@ $('assign-save').onclick = async () => {
 // --- Custom video player (Recordings tab) ---
 
 let customPlayerBound = false;
+let currentPlaybackUrl = '';
 
 function openRecordingPlayer(path, name) {
   const video = $('rec-video');
   $('rec-player-title').textContent = name || 'Recording';
   $('recording-player-overlay').classList.remove('hidden');
   setupCustomPlayerControls(video);
-  video.src = `/media/${encodeMediaPath(path)}`;
+  currentPlaybackUrl = `/media/${encodeMediaPath(path)}`;
+  video.src = currentPlaybackUrl;
   video.currentTime = 0;
   video.play().catch(() => { /* autoplay may be blocked; controls still work */ });
 }
@@ -1448,6 +1450,7 @@ function closeRecordingPlayer() {
   video.pause();
   video.removeAttribute('src');
   video.load();
+  stopVisualizer();
   $('recording-player-overlay').classList.add('hidden');
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
@@ -1526,6 +1529,20 @@ function setupCustomPlayerControls(video) {
   });
   video.addEventListener('loadedmetadata', () => {
     timeEl.textContent = `${formatTime(0)} / ${formatTime(video.duration)}`;
+    // A file with no video track decodes to 0x0 dimensions regardless of
+    // container/extension - checking this (rather than guessing from the
+    // file name) is what reliably tells an audio-only recording apart from
+    // a video one, so the waveform/visualizer only show up when there's
+    // nothing to actually look at otherwise.
+    const isAudioOnly = video.videoWidth === 0 && video.videoHeight === 0;
+    $('custom-player').classList.toggle('audio-mode', isAudioOnly);
+    $('cp-audio-stage').classList.toggle('hidden', !isAudioOnly);
+    if (isAudioOnly) {
+      setupWaveform(currentPlaybackUrl);
+      startVisualizer();
+    } else {
+      stopVisualizer();
+    }
   });
 
   seek.addEventListener('input', () => {
@@ -1558,6 +1575,108 @@ function setupCustomPlayerControls(video) {
     if (document.fullscreenElement) document.exitFullscreen();
     else el.requestFullscreen?.().catch(() => {});
   };
+}
+
+// --- Audio-only playback: interactive waveform + music visualizer ---
+//
+// The waveform is WaveSurfer bound directly to the same <video> element via
+// its `media` option, so it's a real position/seek control (drag to scrub)
+// rather than a decorative copy - clicking it seeks the actual element,
+// no separate/duplicate audio path involved. The visualizer is a plain
+// Web Audio API AnalyserNode reading the same element's output through a
+// MediaElementSourceNode, drawn as a bar spectrum on a canvas.
+
+let cpWave = null;
+
+function setupWaveform(url) {
+  if (!window.WaveSurfer) return;
+  if (cpWave) { cpWave.destroy(); cpWave = null; }
+  const video = $('rec-video');
+  // Passing `url` alongside `media` at construction time makes WaveSurfer
+  // manage (and briefly reset) the element's own src while it loads, which
+  // stomps on the playback we already started - creating first and loading
+  // separately, exactly like the existing Dashboard waveform does, avoids
+  // that without giving up the `media` binding (still the same element, so
+  // no second/duplicate audio path and the waveform stays a real seek
+  // control instead of a decorative copy).
+  cpWave = WaveSurfer.create({
+    container: '#cp-wave',
+    height: 56,
+    waveColor: '#52525b',
+    progressColor: accents[config.ui.accent] || accents.red,
+    cursorColor: '#f4f4f5',
+    barWidth: 2,
+    barGap: 1,
+    media: video,
+  });
+  cpWave.load(url);
+}
+
+// The audio graph (AudioContext + AnalyserNode + MediaElementSourceNode) can
+// only ever be built once per <video> element - a second
+// createMediaElementSource call on the same element throws - so it's built
+// lazily on first use and then reused for every recording played afterward.
+let vizAudioCtx = null;
+let vizAnalyser = null;
+let vizData = null;
+let vizRAF = null;
+
+function ensureVizGraph() {
+  if (vizAudioCtx) return true;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return false;
+  try {
+    vizAudioCtx = new AudioCtx();
+    vizAnalyser = vizAudioCtx.createAnalyser();
+    vizAnalyser.fftSize = 128;
+    vizData = new Uint8Array(vizAnalyser.frequencyBinCount);
+    const source = vizAudioCtx.createMediaElementSource($('rec-video'));
+    source.connect(vizAnalyser);
+    vizAnalyser.connect(vizAudioCtx.destination);
+  } catch {
+    vizAudioCtx = null;
+    return false;
+  }
+  return true;
+}
+
+function startVisualizer() {
+  if (!ensureVizGraph()) return;
+  if (vizAudioCtx.state === 'suspended') vizAudioCtx.resume().catch(() => {});
+  const canvas = $('cp-visualizer');
+  const ctx2d = canvas.getContext('2d');
+  cancelAnimationFrame(vizRAF);
+
+  const draw = () => {
+    vizRAF = requestAnimationFrame(draw);
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    vizAnalyser.getByteFrequencyData(vizData);
+    ctx2d.clearRect(0, 0, w, h);
+    const accent = accents[config.ui.accent] || accents.red;
+    const barCount = vizData.length;
+    const barWidth = w / barCount;
+    for (let i = 0; i < barCount; i++) {
+      const v = vizData[i] / 255;
+      const barHeight = Math.max(2, v * h);
+      ctx2d.globalAlpha = 0.5 + v * 0.5;
+      ctx2d.fillStyle = accent;
+      ctx2d.fillRect(i * barWidth, h - barHeight, Math.max(1, barWidth - 1), barHeight);
+    }
+    ctx2d.globalAlpha = 1;
+  };
+  draw();
+}
+
+function stopVisualizer() {
+  if (vizRAF) cancelAnimationFrame(vizRAF);
+  vizRAF = null;
+  const canvas = $('cp-visualizer');
+  if (canvas) {
+    const ctx2d = canvas.getContext('2d');
+    if (ctx2d) ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+  }
 }
 
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
