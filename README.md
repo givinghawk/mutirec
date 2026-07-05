@@ -33,6 +33,7 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Delete and duplicate buttons for sources, plus validation on required fields.
 - Toast notifications surface API/server errors directly in the WebUI.
 - Session-based login page in front of the whole app (WebUI and API), with a one-time setup wizard on first run - no environment variables required unless you want them.
+- Multi-user accounts with admin/viewer roles, managed from Settings → Users; optional Discord OAuth as an alternate login for an existing account (never auto-creates one).
 
 ## Quick Start
 
@@ -328,30 +329,61 @@ the `/data` and `/app` defaults above are automatically swapped for paths
 relative to the working directory, so the app has somewhere to write without
 any of these variables being set.
 
-## Authentication
+## Authentication and Users
 
 The entire WebUI and API sit behind a login page (`/login`) backed by a
-session cookie. There are two ways to manage credentials, and neither
-requires editing files or environment variables unless you want to:
+session cookie. On first run, with no `AUTH_USERNAME`/`AUTH_PASSWORD` set,
+the app redirects to a one-time `/setup` page where you choose a username and
+password for the first account, which is always an admin. From there, admins
+manage further accounts from **Settings → Users**.
 
-- **Setup wizard (default).** On first run, with no `AUTH_USERNAME`/
-  `AUTH_PASSWORD` set, the app redirects to a one-time `/setup` page where you
-  choose a username and password directly in the browser. They're hashed
-  with bcrypt and saved to `auth.json` next to your config file. Change them
-  any time from **Settings → Account** — no restart or redeploy needed.
-- **Environment variables (for automated/Docker deployments).** Set
-  `AUTH_USERNAME` and `AUTH_PASSWORD` explicitly (for example in
-  `docker-compose.yml`) if you'd rather pin credentials externally:
+### Roles
 
-  ```yaml
-  environment:
-    AUTH_USERNAME: yourname
-    AUTH_PASSWORD: a-long-random-password
-  ```
+- **Admin** — full access: sources, timetable, settings, backups, and other
+  users.
+- **Viewer** — can watch live sources, browse and organize recordings, and
+  manage their own account (including linking Discord), but can't change
+  sources, settings, or users. Secrets (SMTP password, Discord webhook/OAuth
+  client secret, rclone args) are never sent to a viewer's browser at all.
 
-  When these are set, they always take priority over any saved credentials,
-  and the Account settings form becomes read-only (change the environment
-  variables and restart instead).
+There's always at least one admin — the last remaining admin account can't be
+demoted or deleted (from either the Users tab or the API), so you can't
+accidentally lock yourself out of managing the instance.
+
+### Environment variables (for automated/Docker deployments)
+
+Set `AUTH_USERNAME` and `AUTH_PASSWORD` (for example in `docker-compose.yml`)
+to pin one extra admin login externally, on top of whatever's in the Users
+tab:
+
+```yaml
+environment:
+  AUTH_USERNAME: yourname
+  AUTH_PASSWORD: a-long-random-password
+```
+
+This account is always an admin and is read-only in Settings → Account
+(change the environment variables and restart instead) - it doesn't replace
+or block the Users tab, it's just an extra fixed login.
+
+### Discord login
+
+Users can also sign in with Discord, but only as a faster login for an
+*existing* account - authorizing with Discord can never create a new account
+by itself. To set it up:
+
+1. Create an application at
+   [discord.com/developers/applications](https://discord.com/developers/applications),
+   add an OAuth2 redirect matching `https://your-domain/api/auth/discord/callback`
+   exactly (same path for both the login button and account linking), and
+   copy its Client ID/Secret.
+2. Paste those into **Settings → Discord Login (Admin)** along with the same
+   redirect URL, and enable it.
+3. Each user links their own Discord account from **Settings → Account** →
+   "Link Discord" while signed in normally. After that, the login page shows
+   a "Log in with Discord" button that works for their account too.
+
+### General
 
 Either way, don't expose the port beyond localhost until credentials are in
 place — the setup wizard is only reachable until you complete it once, so
@@ -359,7 +391,8 @@ there's no window where the app runs with a default or guessable password.
 
 Source `streamlinkArgs`/`ffmpegArgs` are passed straight to those tools, so
 treat WebUI access as equivalent to shell access to `streamlink`/`ffmpeg` on
-the host — only share credentials with people you'd trust with that.
+the host — only share admin accounts with people you'd trust with that
+(viewers never reach source configuration at all).
 
 ## Disclaimer
 

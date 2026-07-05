@@ -17,9 +17,11 @@ services:
       LOG_DIR: /data/logs
       # Credentials are optional here: leave AUTH_USERNAME/AUTH_PASSWORD unset
       # and the app walks you through a one-time setup wizard in the browser
-      # on first start instead (saved to /data/config/auth.json). Uncomment
-      # these only if you'd rather pin credentials externally - when set,
-      # they always take priority and can't be changed from the UI.
+      # on first start instead, creating the first admin user (saved to
+      # /data/config/users.json - further users are managed from Settings ->
+      # Users). Uncomment these only if you'd also like one admin login
+      # pinned externally on top of that - when set, it's always available
+      # and can't be changed from the UI.
       # AUTH_USERNAME: yourname
       # AUTH_PASSWORD: a-long-random-password
     volumes:

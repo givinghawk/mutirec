@@ -66,15 +66,46 @@ async function refresh() {
   // UI silently - log it and keep whatever else already rendered visible.
   try {
     applyTheme();
+    applyRoleVisibility();
     renderVersion();
     renderDashboard();
     renderEditors();
     updateWatchIfActive();
     maybeStartOnboarding();
+    maybeShowDiscordLinkResult();
   } catch (err) {
     console.error('Render failed:', err);
     toast(`UI failed to render: ${err.message}`, 'error');
   }
+}
+
+// Hides admin-only controls (source/settings management, the Users list,
+// entire nav tabs that are all-mutation) for a viewer role. This is UX only
+// - the real boundary is server-side (rbacAllowed in auth.go); a viewer who
+// forced one of these open would just get a 403 from the API.
+function applyRoleVisibility() {
+  const isAdmin = state.role === 'admin';
+  document.querySelectorAll('[data-admin-only]').forEach(el => el.classList.toggle('hidden', !isAdmin));
+  ['sources', 'diagnostics', 'events-tab'].forEach(id => {
+    const btn = document.querySelector(`.nav[data-view="${id}"]`);
+    if (btn) btn.classList.toggle('hidden', !isAdmin);
+  });
+}
+
+// The Discord OAuth callback redirects back here with ?discordLinked=1 or
+// ?discordError=... (see handleDiscordCallback) - surface it once as a toast
+// and strip the query param so a later manual refresh doesn't repeat it.
+let discordLinkResultHandled = false;
+function maybeShowDiscordLinkResult() {
+  if (discordLinkResultHandled) return;
+  discordLinkResultHandled = true;
+  const params = new URLSearchParams(location.search);
+  const linked = params.get('discordLinked');
+  const err = params.get('discordError');
+  if (!linked && !err) return;
+  history.replaceState(null, '', location.pathname);
+  if (linked) toast('Discord account linked', 'info');
+  else toast(`Discord link failed (${err})`, 'error');
 }
 
 // The first-run setup wizard (setup.html) redirects here with ?onboarding=1
@@ -418,6 +449,7 @@ function renderEditors() {
     $('timetable-json').value = JSON.stringify(config.timetable, null, 2);
     fillSettings();
     loadAccount();
+    loadUsers();
     renderVisualTimetable();
     renderLinkedBadge();
     loadLolEvents();
@@ -738,6 +770,11 @@ function fillSettings() {
   $('backupAfterComplete').checked = !!s.backup.afterComplete;
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
+  const d = s.discordOAuth || {};
+  $('discordOAuthEnabled').checked = !!d.enabled;
+  $('discordOAuthClientId').value = d.clientId || '';
+  $('discordOAuthClientSecret').value = d.clientSecret || '';
+  $('discordOAuthRedirectUrl').value = d.redirectUrl || '';
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -754,6 +791,7 @@ function readSettings() {
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
   s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
+  s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
 }
 
 async function saveConfig() {
@@ -772,11 +810,26 @@ async function loadAccount() {
   }
   $('acct-username').value = acct.username || '';
   if (acct.managedByEnv) {
-    $('account-note').textContent = `Signed in as "${acct.username}". Credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD environment variables and can't be changed here.`;
+    $('account-note').textContent = `Signed in as "${acct.username}" (${acct.role}). Credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD environment variables and can't be changed here.`;
     $('account-form').classList.add('hidden');
   } else {
-    $('account-note').textContent = `Signed in as "${acct.username}".`;
+    $('account-note').textContent = `Signed in as "${acct.username}" (${acct.role}).`;
     $('account-form').classList.remove('hidden');
+  }
+
+  let discordEnabled = false;
+  try {
+    discordEnabled = (await api('/api/auth/discord/status')).enabled;
+  } catch { /* leave hidden */ }
+
+  if (acct.discordLinked) {
+    $('acct-discord-status').textContent = `Linked to Discord as "${acct.discordName}".`;
+    $('acct-discord-link').classList.add('hidden');
+    $('acct-discord-unlink').classList.toggle('hidden', acct.managedByEnv);
+  } else {
+    $('acct-discord-status').textContent = discordEnabled ? 'Not linked.' : 'Discord login is not configured on this instance.';
+    $('acct-discord-unlink').classList.add('hidden');
+    $('acct-discord-link').classList.toggle('hidden', acct.managedByEnv || !discordEnabled);
   }
 }
 
@@ -790,6 +843,79 @@ $('acct-save').onclick = async () => {
     toast('Credentials updated — use them next time you sign in', 'info');
     $('acct-current').value = '';
     $('acct-password').value = '';
+  } catch { /* toast already shown */ }
+};
+
+$('acct-discord-link').onclick = () => { window.location.href = '/api/auth/discord/link/start'; };
+$('acct-discord-unlink').onclick = async () => {
+  try {
+    await api('/api/auth/discord/unlink', { method: 'POST' });
+    toast('Discord unlinked', 'info');
+    await loadAccount();
+  } catch { /* toast already shown */ }
+};
+
+// --- Users tab (admin only - loadUsers is a no-op for other roles) ---
+
+let usersList = [];
+
+async function loadUsers() {
+  if (state.role !== 'admin') return;
+  try {
+    usersList = await api('/api/users');
+  } catch {
+    return;
+  }
+  renderUsersList();
+}
+
+function renderUsersList() {
+  if (!usersList.length) {
+    $('users-list').innerHTML = '<p class="text-sm text-zinc-400">No users yet.</p>';
+    return;
+  }
+  $('users-list').innerHTML = usersList.map(u => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(u.username)} <span class="pill">${escapeHtml(u.role)}</span></div>
+        ${u.discordName ? `<div class="text-xs text-zinc-500">Discord: ${escapeHtml(u.discordName)}</div>` : ''}
+      </div>
+      <div class="flex flex-shrink-0 items-center gap-2">
+        <button type="button" class="btn" onclick="toggleUserRole('${escapeAttr(u.id)}', '${u.role === 'admin' ? 'viewer' : 'admin'}')">${u.role === 'admin' ? 'Make viewer' : 'Make admin'}</button>
+        <button type="button" class="btn" style="color:#fda4af" onclick="deleteUserAccount('${escapeAttr(u.id)}', '${escapeAttr(u.username)}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+async function toggleUserRole(id, role) {
+  try {
+    await api(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
+    toast('Role updated', 'info');
+    await loadUsers();
+  } catch { /* toast already shown */ }
+}
+
+async function deleteUserAccount(id, username) {
+  if (!confirm(`Delete user "${username}"? This can't be undone.`)) return;
+  try {
+    await api(`/api/users/${id}`, { method: 'DELETE' });
+    toast(`Deleted "${username}"`, 'info');
+    await loadUsers();
+  } catch { /* toast already shown */ }
+}
+
+$('user-add').onclick = async () => {
+  const username = $('user-new-username').value.trim();
+  const password = $('user-new-password').value;
+  const role = $('user-new-admin').checked ? 'admin' : 'viewer';
+  if (!username || password.length < 8) { toast('A username and a password of at least 8 characters are required', 'error'); return; }
+  try {
+    await api('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, role }) });
+    toast(`Added user "${username}"`, 'info');
+    $('user-new-username').value = '';
+    $('user-new-password').value = '';
+    $('user-new-admin').checked = false;
+    await loadUsers();
   } catch { /* toast already shown */ }
 };
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"embed"
 	"encoding/hex"
@@ -31,8 +30,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"defqon-stream-recorder/internal/disk"
 )
@@ -118,23 +115,37 @@ type RecordingMeta struct {
 }
 
 type Settings struct {
-	FinishedDir             string        `json:"finishedDir"`
-	TempDir                 string        `json:"tempDir"`
-	LogDir                  string        `json:"logDir"`
-	CheckIntervalSeconds    int           `json:"checkIntervalSeconds"`
-	MinFreeBytes            uint64        `json:"minFreeBytes"`
-	DefaultQuality          string        `json:"defaultQuality"`
-	DefaultContainer        string        `json:"defaultContainer"`
-	EnableNFO               bool          `json:"enableNfo"`
-	EnableWaveform          bool          `json:"enableWaveform"`
-	Backup                  BackupConfig  `json:"backup"`
-	Notifications           Notifications `json:"notifications"`
-	AllowLiveProxy          bool          `json:"allowLiveProxy"`
-	WarnFreeBytes           uint64        `json:"warnFreeBytes"`
-	LiveRewindWindowSeconds int           `json:"liveRewindWindowSeconds"`
-	FavoriteSetIDs          []string      `json:"favoriteSetIds"`
-	ReminderLeadMinutes     int           `json:"reminderLeadMinutes"`
-	RecordingSetLookahead   time.Duration `json:"-"`
+	FinishedDir             string             `json:"finishedDir"`
+	TempDir                 string             `json:"tempDir"`
+	LogDir                  string             `json:"logDir"`
+	CheckIntervalSeconds    int                `json:"checkIntervalSeconds"`
+	MinFreeBytes            uint64             `json:"minFreeBytes"`
+	DefaultQuality          string             `json:"defaultQuality"`
+	DefaultContainer        string             `json:"defaultContainer"`
+	EnableNFO               bool               `json:"enableNfo"`
+	EnableWaveform          bool               `json:"enableWaveform"`
+	Backup                  BackupConfig       `json:"backup"`
+	Notifications           Notifications      `json:"notifications"`
+	AllowLiveProxy          bool               `json:"allowLiveProxy"`
+	WarnFreeBytes           uint64             `json:"warnFreeBytes"`
+	LiveRewindWindowSeconds int                `json:"liveRewindWindowSeconds"`
+	FavoriteSetIDs          []string           `json:"favoriteSetIds"`
+	ReminderLeadMinutes     int                `json:"reminderLeadMinutes"`
+	RecordingSetLookahead   time.Duration      `json:"-"`
+	DiscordOAuth            DiscordOAuthConfig `json:"discordOAuth"`
+}
+
+// DiscordOAuthConfig holds this instance's Discord OAuth2 application
+// credentials (from https://discord.com/developers/applications), used only
+// to let an *existing* user (created by an admin) link their Discord account
+// for a faster login - there's no self-service signup via Discord, so a
+// stranger who happens to have a Discord account still can't get in without
+// an admin-created account first.
+type DiscordOAuthConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret,omitempty"`
+	RedirectURL  string `json:"redirectUrl"`
 }
 
 type UISettings struct {
@@ -240,6 +251,7 @@ type State struct {
 	ActiveCount int                 `json:"activeCount"`
 	Warnings    []string            `json:"warnings"`
 	NowPlaying  map[string]*NowItem `json:"nowPlaying"`
+	Role        Role                `json:"role,omitempty"`
 }
 
 type SourceStatus struct {
@@ -315,19 +327,21 @@ type App struct {
 	lastFinished  map[string]string
 	authUser      string
 	authPass      string
-	authFile      string
+	usersFile     string
 	remindersSent map[string]time.Time
 
 	retryMu sync.Mutex
 	retry   map[string]*retryState
 
 	sessMu   sync.Mutex
-	sessions map[string]time.Time
+	sessions map[string]sessionInfo
 
-	credMu     sync.RWMutex
-	credUser   string
-	credHash   []byte
+	usersMu    sync.RWMutex
+	users      []User
 	needsSetup bool
+
+	oauthMu    sync.Mutex
+	oauthState map[string]pendingOAuth
 
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
@@ -344,9 +358,6 @@ type hashCacheEntry struct {
 	Size    int64
 	Hash    string
 }
-
-const sessionCookieName = "dqr_session"
-const sessionTTL = 30 * 24 * time.Hour
 
 func main() {
 	configPath := localizePath(env("CONFIG_PATH", "/app/config/config.json"))
@@ -399,7 +410,8 @@ func NewApp(configPath string) (*App, error) {
 		lastFinished:  map[string]string{},
 		remindersSent: map[string]time.Time{},
 		retry:         map[string]*retryState{},
-		sessions:      map[string]time.Time{},
+		sessions:      map[string]sessionInfo{},
+		oauthState:    map[string]pendingOAuth{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -409,366 +421,6 @@ func NewApp(configPath string) (*App, error) {
 	}
 	app.event("info", "Recorder started")
 	return app, nil
-}
-
-// storedCredentials is the on-disk shape of auth.json: a username and a
-// bcrypt hash, written by the in-browser setup wizard or the account
-// settings form so nobody has to touch environment variables by hand.
-type storedCredentials struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"passwordHash"`
-}
-
-// setupAuth decides how this instance authenticates, in priority order:
-//  1. AUTH_USERNAME/AUTH_PASSWORD from the environment, for Docker-style
-//     deployments that prefer to manage credentials externally.
-//  2. Credentials previously saved to auth.json by the setup wizard or the
-//     account settings form.
-//  3. Neither: needsSetup is set, and the web UI serves a one-time setup
-//     wizard instead of ever generating or printing a throwaway password.
-func (a *App) setupAuth() {
-	a.authFile = filepath.Join(filepath.Dir(a.config), "auth.json")
-	a.authUser = os.Getenv("AUTH_USERNAME")
-	a.authPass = os.Getenv("AUTH_PASSWORD")
-	if a.authPass != "" {
-		if a.authUser == "" {
-			a.authUser = "admin"
-		}
-		log.Printf("Using AUTH_USERNAME/AUTH_PASSWORD from the environment.")
-		return
-	}
-	a.authUser = ""
-
-	if creds, err := loadStoredCredentials(a.authFile); err == nil {
-		a.credUser = creds.Username
-		a.credHash = []byte(creds.PasswordHash)
-		log.Printf("Using saved credentials from %s (change them any time from Settings).", a.authFile)
-		return
-	}
-
-	a.credMu.Lock()
-	a.needsSetup = true
-	a.credMu.Unlock()
-	log.Printf("No credentials configured yet - open the web UI to finish setup and choose a username/password.")
-}
-
-func loadStoredCredentials(path string) (storedCredentials, error) {
-	var creds storedCredentials
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return creds, err
-	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return creds, err
-	}
-	if creds.Username == "" || creds.PasswordHash == "" {
-		return creds, errors.New("incomplete credentials file")
-	}
-	return creds, nil
-}
-
-// setCredentials hashes and persists a new username/password to auth.json,
-// used by both the first-run setup wizard and the account settings form.
-func (a *App) setCredentials(username, password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(storedCredentials{Username: username, PasswordHash: string(hash)}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(a.authFile), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(a.authFile, data, 0o600); err != nil {
-		return err
-	}
-	a.credMu.Lock()
-	a.credUser = username
-	a.credHash = hash
-	a.needsSetup = false
-	a.credMu.Unlock()
-	return nil
-}
-
-func (a *App) isSetupNeeded() bool {
-	a.credMu.RLock()
-	defer a.credMu.RUnlock()
-	return a.needsSetup
-}
-
-// checkCredentials verifies a login attempt against whichever credential
-// source setupAuth selected: env vars (plain constant-time compare) or a
-// saved bcrypt hash.
-func (a *App) checkCredentials(username, password string) bool {
-	if a.authPass != "" {
-		userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.authUser)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.authPass)) == 1
-		return userMatch && passMatch
-	}
-	a.credMu.RLock()
-	credUser, credHash := a.credUser, a.credHash
-	a.credMu.RUnlock()
-	if len(credHash) == 0 {
-		return false
-	}
-	if subtle.ConstantTimeCompare([]byte(username), []byte(credUser)) != 1 {
-		return false
-	}
-	return bcrypt.CompareHashAndPassword(credHash, []byte(password)) == nil
-}
-
-// isPublicPath lists the handful of routes reachable without a session, so
-// the login/setup pages (and the requests that submit them) don't get
-// redirected back to themselves.
-func isPublicPath(p string) bool {
-	switch p {
-	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js":
-		return true
-	}
-	// Icons are pure branding assets (no user data) and need to load
-	// unauthenticated for the browser's install/add-to-home-screen prompt
-	// and for the login/setup pages themselves.
-	return strings.HasPrefix(p, "/icons/")
-}
-
-// requireAuth gates every request (UI and API) behind a session cookie set by
-// a real login page (see handleLogin), redirecting page loads to /setup or
-// /login as appropriate and returning error JSON for API calls when the
-// session is missing, expired, or credentials haven't been chosen yet.
-func (a *App) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if a.isSetupNeeded() {
-			// The setup wizard's system check needs to run - and be
-			// re-run - before any credentials exist, so it can't wait
-			// behind a session the user has no way to create yet.
-			if r.URL.Path == "/api/system-check" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				http.Error(w, "setup required", http.StatusUnauthorized)
-				return
-			}
-			http.Redirect(w, r, "/setup", http.StatusFound)
-			return
-		}
-		if a.validSession(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.Error(w, "authentication required", http.StatusUnauthorized)
-			return
-		}
-		http.Redirect(w, r, "/login", http.StatusFound)
-	})
-}
-
-// createSession mints a new random session token, records its expiry, and
-// sets it as an HttpOnly cookie on the response.
-func (a *App) createSession(w http.ResponseWriter) {
-	var b [32]byte
-	_, _ = rand.Read(b[:])
-	token := hex.EncodeToString(b[:])
-	expiry := time.Now().Add(sessionTTL)
-	a.sessMu.Lock()
-	a.sessions[token] = expiry
-	a.sessMu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expiry,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func (a *App) validSession(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil || c.Value == "" {
-		return false
-	}
-	a.sessMu.Lock()
-	defer a.sessMu.Unlock()
-	expiry, ok := a.sessions[c.Value]
-	if !ok {
-		return false
-	}
-	if time.Now().After(expiry) {
-		delete(a.sessions, c.Value)
-		return false
-	}
-	return true
-}
-
-func (a *App) destroySession(r *http.Request) {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		return
-	}
-	a.sessMu.Lock()
-	delete(a.sessions, c.Value)
-	a.sessMu.Unlock()
-}
-
-// handleLoginPage serves the standalone login page, unauthenticated. Visitors
-// who haven't chosen credentials yet are sent to the setup wizard instead.
-func (a *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.isSetupNeeded() {
-		http.Redirect(w, r, "/setup", http.StatusFound)
-		return
-	}
-	serveStaticPage(w, r, "static/login.html")
-}
-
-// handleLogin verifies the configured credentials (env vars or a saved
-// bcrypt hash) and, on success, starts a session so the rest of the app is
-// reachable without re-authenticating on every request.
-func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.isSetupNeeded() {
-		http.Error(w, "setup required", http.StatusConflict)
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-	if !a.checkCredentials(req.Username, req.Password) {
-		http.Error(w, "invalid username or password", http.StatusUnauthorized)
-		return
-	}
-	a.createSession(w)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	a.destroySession(r)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-// handleSetupPage serves the first-run setup wizard. Once credentials exist
-// it redirects to /login instead, so the wizard can't be replayed to hijack
-// an already-configured instance.
-func (a *App) handleSetupPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.isSetupNeeded() {
-		http.Redirect(w, r, "/login", http.StatusFound)
-		return
-	}
-	serveStaticPage(w, r, "static/setup.html")
-}
-
-// handleSetup completes first-run setup by saving the chosen username and
-// password, then immediately starts a session. Only reachable once, before
-// any credentials exist - afterwards use handleAccount to change them.
-func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.isSetupNeeded() {
-		http.Error(w, "setup has already been completed", http.StatusConflict)
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-	req.Username = strings.TrimSpace(req.Username)
-	if req.Username == "" || len(req.Password) < 8 {
-		http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
-		return
-	}
-	if err := a.setCredentials(req.Username, req.Password); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.event("info", fmt.Sprintf("Initial setup completed for user %q", req.Username))
-	a.createSession(w)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-// handleAccount lets a signed-in user view or change their credentials from
-// the Settings tab, so nothing ever has to be edited by hand on disk or in
-// the environment - unless this deployment pins credentials via
-// AUTH_USERNAME/AUTH_PASSWORD, in which case they're read-only here.
-func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
-	managedByEnv := a.authPass != ""
-	switch r.Method {
-	case http.MethodGet:
-		username := a.authUser
-		if !managedByEnv {
-			a.credMu.RLock()
-			username = a.credUser
-			a.credMu.RUnlock()
-		}
-		writeJSON(w, map[string]any{"username": username, "managedByEnv": managedByEnv})
-	case http.MethodPost:
-		if managedByEnv {
-			http.Error(w, "credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD and can't be changed here", http.StatusConflict)
-			return
-		}
-		var req struct {
-			CurrentPassword string `json:"currentPassword"`
-			Username        string `json:"username"`
-			Password        string `json:"password"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		req.Username = strings.TrimSpace(req.Username)
-		if req.Username == "" || len(req.Password) < 8 {
-			http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
-			return
-		}
-		a.credMu.RLock()
-		currentUser := a.credUser
-		a.credMu.RUnlock()
-		if !a.checkCredentials(currentUser, req.CurrentPassword) {
-			http.Error(w, "current password is incorrect", http.StatusUnauthorized)
-			return
-		}
-		if err := a.setCredentials(req.Username, req.Password); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		a.event("info", fmt.Sprintf("Credentials updated for user %q", req.Username))
-		writeJSON(w, map[string]string{"status": "ok"})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
 }
 
 func serveStaticPage(w http.ResponseWriter, r *http.Request, path string) {
@@ -800,6 +452,13 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup", a.handleSetupPage)
 	mux.HandleFunc("/api/setup", a.handleSetup)
 	mux.HandleFunc("/api/account", a.handleAccount)
+	mux.HandleFunc("/api/users", a.handleUsers)
+	mux.HandleFunc("/api/users/", a.handleUserItem)
+	mux.HandleFunc("/api/auth/discord/status", a.handleDiscordStatus)
+	mux.HandleFunc("/api/auth/discord/login/start", a.handleDiscordLoginStart)
+	mux.HandleFunc("/api/auth/discord/link/start", a.handleDiscordLinkStart)
+	mux.HandleFunc("/api/auth/discord/callback", a.handleDiscordCallback)
+	mux.HandleFunc("/api/auth/discord/unlink", a.handleDiscordUnlink)
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/system-check", a.handleSystemCheck)
 	mux.HandleFunc("/api/config", a.handleConfig)
@@ -1394,12 +1053,22 @@ func (a *App) stopAll() {
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, a.state())
+	s := a.state()
+	role := roleFromRequest(r)
+	s.Role = role
+	if role != RoleAdmin {
+		redactSecrets(&s.Config)
+	}
+	writeJSON(w, s)
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, a.snapshotConfig())
+		cfg := a.snapshotConfig()
+		if roleFromRequest(r) != RoleAdmin {
+			redactSecrets(&cfg)
+		}
+		writeJSON(w, cfg)
 		return
 	}
 	if r.Method != http.MethodPut {

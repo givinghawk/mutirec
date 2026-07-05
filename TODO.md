@@ -136,6 +136,58 @@
   not whether the scheduler keeps trying. Covered by four new tests in `reconnect_test.go`:
   silent-without-a-window, visible-within-a-window, gives-up-after-the-window-lapses (and
   stays quiet after, doesn't repeat the notice), and manual clearRetry resetting everything.
+- **Multi-user accounts (admin/viewer roles) + Discord OAuth login**: replaced the single
+  shared username/password with a `User` list (`cmd/web/auth.go`, new file) persisted to
+  `users.json` (alongside `config.json`/the old `auth.json`) - an existing single-user install
+  migrates automatically into the first admin user the first time it starts under the new
+  code (`setupAuth`), no manual action needed. `AUTH_USERNAME`/`AUTH_PASSWORD` still work
+  exactly as before, but now as one *extra* pinned admin login (`envUserID` virtual user, read
+  -only in Account settings) layered on top of `users.json`, not a replacement for it.
+  - **Sessions** now map to a specific user (`sessionInfo{UserID, Expiry}` instead of a bare
+    expiry), so `requireAuth` can resolve *who* is asking, not just *whether* they're
+    authenticated - stashed on the request context (`userContextKey`) for handlers and the
+    new `rbacAllowed(method, path, role)` check to read.
+  - **RBAC** is centralized in `rbacAllowed`, not scattered per-handler: any authenticated role
+    can read (GET/HEAD) almost everything (except `/api/users`, admin-only even to view);
+    mutating requests need an admin role, except a short self-service allow-list (own
+    password, own Discord link/unlink, logout). Chose this over wrapping every individual
+    handler since the codebase already funnels every request through one `requireAuth`
+    middleware - one centralized check is far easier to audit than ~25 call sites.
+  - **Secret redaction**: `redactSecrets` blanks SMTP password, the Discord notification
+    webhook, the Discord OAuth client secret, and rclone args before `/api/state` or
+    `/api/config` (GET) ever reach a viewer's browser - these were previously sent to anyone
+    with a valid session since there was only one role.
+  - **Discord OAuth is link-only by design** (explicit product decision, not a shortcut): it
+    can never create an account by itself, only let an *existing* user (created by an admin)
+    log in faster. A single shared callback (`/api/auth/discord/callback`) handles both the
+    login and link flows, dispatching on a server-side pending-state token's `intent` field
+    (`pendingOAuth`) rather than two separate callback URLs - Discord only allows redirecting
+    to one exact, pre-registered URL per flow-initiation call, and using the same one for both
+    flows means only one redirect URI ever needs registering in the Discord dev portal. State
+    tokens are single-use and expire after 5 minutes (`consumePendingOAuth`).
+  - **Last-admin protection**: `handleUserItem` refuses to demote or delete the last remaining
+    admin (checked via `countAdmins`), so an admin can't accidentally lock everyone out of
+    managing the instance.
+  - Frontend: Settings tab gained **Users** (list/add/change-role/delete) and **Discord Login
+    (Admin)** (Client ID/Secret/Redirect URL) panels, both wrapped in `[data-admin-only]` and
+    hidden client-side for viewers via `applyRoleVisibility()` (real enforcement is still
+    server-side `rbacAllowed` - this is UX, not the boundary); Account section gained
+    Link/Unlink Discord buttons; login page gained a "Log in with Discord" button (shown only
+    when `/api/auth/discord/status` reports it configured) and human-readable
+    `?discordError=...` messages.
+  - Covered by `auth_test.go`: the full `rbacAllowed` matrix, user CRUD (including
+    case-insensitive duplicate-username rejection and persistence across a fresh load),
+    env-pinned-admin-first credential checking with real users still reachable by a different
+    username, session lifecycle (including invalidation when the underlying user is deleted),
+    secret redaction, Discord config validation, the authorize URL builder, and pending-OAuth
+    single-use/expiry semantics.
+  - Verified end-to-end against a running instance (not just unit tests): setup → admin
+    creates a viewer → viewer can read `/api/state` (with secrets redacted) but gets 403 from
+    `/api/users` and `POST /api/sources`, while `POST /api/account` (self-service) still
+    succeeds; last-admin demote/delete both correctly rejected with 409; a legacy
+    single-credential `auth.json` install migrates into `users.json` on first boot and logs in
+    successfully; Discord settings save/reload correctly and the login-start redirect produces
+    a well-formed `https://discord.com/api/oauth2/authorize` URL.
 
 ## Remaining (in suggested order)
 
@@ -166,7 +218,6 @@
   implementation unless real-world testing shows it's needed.
 
 ## Other backlog
-- Add per-user accounts and role-based access (current auth is a single shared login).
 - Consider server-side HLS restreaming for sources whose CDN blocks cross-origin playback.
 - Add backup queue history with retry controls.
 - Add Prometheus metrics and healthcheck endpoint.
@@ -177,6 +228,16 @@
   built-in default sources" without duplicating `dq-timetable.json`'s stage list by hand -
   not done yet since it'd just be a second copy of data that already ships by default.
   Consider more preset packs (other festivals/events) as they come up.
+- Per-user favorites/reminders: `Settings.FavoriteSetIDs` is still one global list shared by
+  every account, not per-user - a viewer starring a set would (if ever allowed to) affect
+  everyone. Fine for now since only admins can reach Settings/the favorite toggle currently,
+  but worth revisiting if viewers should get their own reminders later.
+- Sessions are in-memory only (same as before multi-user support) - restarting the process
+  logs everyone out. Not a problem for how this app is deployed (a single long-running
+  container), but would need a persisted session store if that ever changes.
+- No "sign out of all other sessions" control yet, and no visibility into which
+  sessions/devices are currently logged in as a given user - fine for a small trusted group,
+  worth adding if this ever opens up to a larger or less-trusted set of accounts.
 
 ## Patterns established - reuse these rather than reinventing
 - Custom dropdowns: `setupCustomDropdowns()` / `setDropdownOptions(id, options, opts)` /

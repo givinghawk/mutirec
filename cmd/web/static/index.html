@@ -590,7 +590,7 @@
 
       <section id="settings" class="view hidden">
         <div class="grid gap-4 lg:grid-cols-2">
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Recorder</h2></div>
             <label>Finished directory<input id="finishedDir" class="input"></label>
             <label>Temporary directory<input id="tempDir" class="input"></label>
@@ -606,13 +606,13 @@
               <label class="inline-flex items-center gap-2"><input id="allowLiveProxy" type="checkbox" class="accent-red-500"> Live links</label>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Branding</h2></div>
             <label>App name<input id="uiAppName" class="input"></label>
             <label>Logo URL<input id="uiLogoUrl" class="input"></label>
             <label>Custom CSS<textarea id="uiCustomCss" class="codebox h-40"></textarea></label>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Theme</h2></div>
             <div class="mb-4">
               <p class="text-sm text-zinc-400 mb-3">Festival Presets:</p>
@@ -631,7 +631,7 @@
               <button type="button" id="applyCustomTheme" class="btn primary mt-3">Apply Custom Theme</button>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Notifications</h2></div>
             <label>Reminder lead time (minutes)<input id="reminderLeadMinutes" type="number" class="input"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">How long before a starred timetable set to send a reminder via Discord/SMTP below. Star sets from the Timetable tab.</p>
@@ -644,7 +644,7 @@
             <label>From<input id="smtpFrom" class="input"></label>
             <label>To<input id="smtpTo" class="input"></label>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Backups</h2></div>
             <label class="inline-flex items-center gap-2 text-sm"><input id="backupEnabled" type="checkbox" class="accent-red-500"> Enable rclone backup</label>
             <label class="mt-3 inline-flex items-center gap-2 text-sm"><input id="backupAfterComplete" type="checkbox" class="accent-red-500"> Run after each recording</label>
@@ -660,9 +660,36 @@
               <label>New password<input id="acct-password" type="password" class="input" autocomplete="new-password" placeholder="at least 8 characters"></label>
               <button type="button" id="acct-save" class="btn primary mt-2">Update credentials</button>
             </div>
+            <div class="mt-4 border-t border-white/10 pt-3">
+              <p class="mb-2 text-sm text-zinc-400">Discord login</p>
+              <p id="acct-discord-status" class="mb-2 text-sm text-zinc-400"></p>
+              <button type="button" id="acct-discord-link" class="btn hidden">Link Discord</button>
+              <button type="button" id="acct-discord-unlink" class="btn hidden">Unlink Discord</button>
+            </div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Users</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Everyone with a login here can watch live and browse recordings. Admins can also manage sources, settings, and other users.</p>
+            <div id="users-list" class="space-y-2 mb-4"></div>
+            <div class="border-t border-white/10 pt-3">
+              <p class="mb-2 text-sm text-zinc-400">Add a user</p>
+              <label>Username<input id="user-new-username" class="input" autocomplete="off"></label>
+              <label>Password<input id="user-new-password" type="password" class="input" autocomplete="new-password" placeholder="at least 8 characters"></label>
+              <label class="inline-flex items-center gap-2 text-sm mt-2"><input id="user-new-admin" type="checkbox"> Admin</label>
+              <button type="button" id="user-add" class="btn primary mt-2">Add User</button>
+            </div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Discord Login (Admin)</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Lets existing users link their Discord account for a faster login (Account section above). Create an application at <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers/applications</a>, add an OAuth2 redirect matching the URL below exactly, and paste its Client ID/Secret here. This never creates new accounts by itself - a user must already exist.</p>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="discordOAuthEnabled" type="checkbox" class="accent-red-500"> Enabled</label>
+            <label>Client ID<input id="discordOAuthClientId" class="input"></label>
+            <label>Client Secret<input id="discordOAuthClientSecret" type="password" class="input"></label>
+            <label>Redirect URL<input id="discordOAuthRedirectUrl" class="input" placeholder="https://your-domain/api/auth/discord/callback"></label>
+            <p class="-mt-2 text-xs text-zinc-500">Register this exact URL in the Discord application's OAuth2 redirect settings - both the login page's button and linking from Account use this same callback.</p>
           </div>
         </div>
-        <button id="save-settings" class="btn primary mt-4">Save Settings</button>
+        <button id="save-settings" class="btn primary mt-4" data-admin-only>Save Settings</button>
       </section>
 
       <section id="diagnostics" class="view hidden">
