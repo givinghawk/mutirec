@@ -22,10 +22,10 @@
   - `guessTimeFromName` now also parses `DD_MM_YYYY`/`DD-MM-YYYY`/`DD.MM.YYYY`, disambiguating day/month order (when both are ≤12) using an embedded weekday name if present (e.g. "Thursday" + "25_06_2026" → confirms day-first). Returns a new `hasTimeOfDay` bool so date-only filenames (midnight default) don't get treated as if they had a real clock time.
   - `guessArtistFromName` extracts the artist name from the filename prefix (before the date), stripping a trailing weekday word and/or the recording's own channel name.
   - `artistSimilarity` does tolerant word-overlap scoring between the guessed artist and each archived set's name (ignores "dj"/"b2b"/"vs", handles combos like "DJ Isaac" matching inside "DJ Isaac B2B Adaro").
-  - `filenameContainsStage` checks whether an archived stage's *real* name (e.g. "Sacred Oath") appears anywhere in the filename - this catches the case where the folder/channel name is just a video-feed label ("BLUE") that doesn't match the actual stage name at all, which the old channel-only matching had no way to recover from.
-  - All signals feed into `candidateScore`, a single weighted score (replacing the old hand-rolled `betterCandidate` comparator) so the best candidate can be picked in one pass; confidence labels/reasons shown to the user were updated to explain *which* signal drove the match (exact time window, filename-matched artist/stage, or same-day-only).
+  - All signals feed into `candidateScore`, a single weighted score (replacing the old hand-rolled `betterCandidate` comparator) so the best candidate can be picked in one pass; "high" confidence requires the artist-name match to be corroborated by either exact time containment or a real channel/stage match (`stageMatch`, from the recording's folder name), not an artist-name coincidence alone.
   - `MatchSuggestion.GuessedArtist` is now returned so the Smart Match UI shows "Filename suggests: ..." even when no confident match was found, so the user has a starting point for manual assignment.
-  - Added `cmd/web/match_test.go` with unit tests covering date parsing (including the weekday-disambiguation case), artist extraction, similarity scoring, and a full end-to-end scenario using the exact filename reported by the user - confirms "high" confidence with correct artist/stage even though the channel folder doesn't match the real stage name.
+  - Added `cmd/web/match_test.go` with unit tests covering date parsing (including the weekday-disambiguation case), artist extraction, similarity scoring, and a full end-to-end scenario using the exact filename reported by the user - confirms "high" confidence with the correct artist/stage/day.
+  - **Correction**: an earlier draft of this change added a `filenameContainsStage` heuristic based on misreading "Sacred Oath" in the example filename as a real stage name — it's actually that year's festival edition/theme name ("Defqon.1 - Sacred Oath"), and "BLUE" (already handled correctly by the existing folder-based channel match) is the real stage. Removed the heuristic entirely rather than leave a signal built on a wrong premise; the channel/date/artist signals already fully disambiguate without it.
 - **Dev server portability fix**: the app previously only listened on `HTTP_ADDR` (default `:8080`) with no way to run on an arbitrary port; added `PORT` env var support (`main.go`) and switched `.claude/launch.json` to `autoPort: true` so the preview tooling can run alongside other things already bound to 8080.
 
 ## Remaining (in suggested order)
@@ -45,11 +45,13 @@
   hash) but worth a defensive check if this becomes user-facing/shared widely.
 
 ### 3. Smart Match follow-ups (optional, not blocking)
-- The festival/stage-name/genre tail of filenames like "..._Defqon_1_Sacred_Oath_HardDance"
-  is not fully parsed (only the stage-name substring is checked, via
-  `filenameContainsStage`). Could extract genre as informational metadata, or use the
-  festival-name substring to narrow which `LibraryEvent` to search first when multiple
-  events share stage names.
+- The festival/edition-name/genre tail of filenames like "..._Defqon_1_Sacred_Oath_HardDance"
+  (festival name + that edition's theme name + genre) is intentionally not parsed at all -
+  the channel, date, and artist-name signals already fully disambiguate which set a
+  recording belongs to, so there was no need to also parse this tail. If multiple
+  `LibraryEvent`s ever share both a stage name and overlapping dates (e.g. two editions
+  using placeholder dates), the edition-name text could help disambiguate then - but don't
+  add it speculatively before that's an actual problem.
 - `artistSimilarity` is a simple word-overlap score - good enough for exact/near-exact
   names but won't catch typos or transliteration differences. Not worth a full edit-distance
   implementation unless real-world testing shows it's needed.
@@ -91,6 +93,15 @@
   signal a weight and sum them, then pick the max - much easier to extend/tune than a
   hand-written cascade of comparator conditions, and the confidence-label logic can still
   inspect the winning candidate's individual flags afterward for a human-readable reason.
+- **Defqon.1 recording filename convention** (from a real user example):
+  `{Artist}_{Stage}_{Weekday}_{DD}_{MM}_{YYYY}_{Festival}_{EditionTheme}_{Genre}.ext`, e.g.
+  `DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3`. Stage names are
+  short channel-style labels ("BLUE", "RED", "BLACK", etc.) that match the recording's own
+  folder/channel - they are *not* the flowery per-edition theme name that follows the date
+  (e.g. "Sacred Oath" is 2026's edition subtitle, not a stage). Don't guess meaning from a
+  single example filename without checking - ask, or verify against how the surrounding
+  fields (channel folder names, existing LibraryEvent names) are actually used elsewhere in
+  the app before building matching logic around an assumption.
 - **ID collisions**: the activity log already uses `id="events"` — new sections must use
   distinct IDs (e.g. `id="events-tab"`).
 - **`preview_click` is unreliable on this app** across sessions - this app's `refresh()`
