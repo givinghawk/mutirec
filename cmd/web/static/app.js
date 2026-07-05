@@ -2052,10 +2052,12 @@ function ensureRecPlayer() {
 }
 
 function openRecordingPlayer(path, name) {
-  // Track where we came from so the back button returns there.
+  // Track where we came from so the back button returns there. Don't overwrite it
+  // when navigating between recommendations while already on the player view.
   const activeNav = document.querySelector('.nav.active');
-  playerPreviousView = activeNav ? activeNav.dataset.view : 'recordings';
-
+  const playerEl = $('player');
+  if (activeNav) playerPreviousView = activeNav.dataset.view;
+  else if (playerEl && playerEl.classList.contains('hidden')) playerPreviousView = 'recordings';
   $('rec-player-title').textContent = name || 'Recording';
   switchToView('player');
 
