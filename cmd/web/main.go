@@ -1469,6 +1469,10 @@ type MatchFileEntry struct {
 // files can import it and skip organizing manually - the exact-match sibling
 // of the fuzzy Smart Match wizard.
 func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	cfg := a.snapshotConfig()
 	root := filepath.Clean(cfg.Settings.FinishedDir)
 	eventByID := make(map[string]LibraryEvent, len(cfg.LibraryEvents))
