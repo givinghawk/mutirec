@@ -16,6 +16,9 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Per-source "timetable stage" linking, for when a recording source's name doesn't match its stage name in the timetable.
 - Star any timetable set to get a Discord/SMTP reminder a configurable number of minutes before it starts.
 - Optional FFmpeg transcoding with hardware acceleration presets for CUDA/NVENC, Quick Sync, and VAAPI.
+- Optional single-pass loudness normalization (EBU R128) per source, so recordings from different artists/sources land at a consistent volume.
+- Auto-reconnect: a source that drops mid-stream is retried automatically with exponential backoff, instead of being hammered every scheduler tick or left stopped.
+- Installable as a PWA (add to home screen on mobile/desktop) for quick access to the dashboard and Watch tab.
 - Optional `.nfo` files beside completed recordings.
 - Disk free-space guard that pauses recording below 1 GB free and warns earlier.
 - SMTP and Discord webhook notifications.
@@ -101,6 +104,7 @@ Each source can be configured with:
 - Output container such as `mkv`, `mp4`, `m4a`, or `ts`.
 - Audio-only recording.
 - Stream copy or transcode.
+- Optional loudness normalization (forces audio to be re-encoded even if video is stream-copied).
 - Extra Streamlink and FFmpeg arguments.
 - Optional hardware acceleration.
 - Optional NFO note.
@@ -187,6 +191,28 @@ permanent copy, and normal playback resumes from `/media/`.
 This costs extra CPU per rewind-enabled source (it runs a second transcode
 alongside the archival copy) and a bounded amount of temp disk space for the
 rolling window, so it's opt-in per source rather than global.
+
+## Auto-Reconnect
+
+If a source's stream drops mid-recording (a network blip, a brief outage, a
+stage going temporarily offline), the recorder retries it automatically
+instead of requiring a manual restart. A recording that ran for at least a
+minute before ending is treated as "the stream was working" and clears any
+backoff; one that fails faster than that (or produces no output at all)
+schedules a retry with exponential backoff - 5s, 10s, 20s, ... up to a 5
+minute cap - so a stream that's genuinely down for a while isn't hammered
+with a reconnect attempt on every scheduler tick. The dashboard shows a
+"reconnecting" status with a countdown and attempt count while this is
+happening; clicking Record on a source clears its backoff and retries
+immediately.
+
+## Progressive Web App
+
+The WebUI can be installed to a phone or desktop home screen (look for
+"Add to Home Screen" / the browser's install icon). Only the static app
+shell is cached for offline installability - live state, recordings, and API
+calls always go straight to the network, so the installed app never shows
+stale data.
 
 ## Storage
 

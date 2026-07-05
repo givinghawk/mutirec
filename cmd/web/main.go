@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -134,12 +135,12 @@ type Settings struct {
 }
 
 type UISettings struct {
-	AppName    string            `json:"appName"`
-	LogoURL    string            `json:"logoUrl"`
-	Theme      string            `json:"theme"`
-	Accent     string            `json:"accent"`
-	CustomCSS  string            `json:"customCss"`
-	CustomTheme string           `json:"customTheme"`
+	AppName     string            `json:"appName"`
+	LogoURL     string            `json:"logoUrl"`
+	Theme       string            `json:"theme"`
+	Accent      string            `json:"accent"`
+	CustomCSS   string            `json:"customCss"`
+	CustomTheme string            `json:"customTheme"`
 	ThemeColors map[string]string `json:"themeColors"`
 }
 
@@ -166,24 +167,25 @@ type SMTPConfig struct {
 }
 
 type Source struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Type           string   `json:"type"`
-	URL            string   `json:"url"`
-	Enabled        bool     `json:"enabled"`
-	Record         bool     `json:"record"`
-	Quality        string   `json:"quality"`
-	Container      string   `json:"container"`
-	AudioOnly      bool     `json:"audioOnly"`
-	Transcode      bool     `json:"transcode"`
-	HardwareAccel  string   `json:"hardwareAccel"`
-	StreamlinkArgs []string `json:"streamlinkArgs"`
-	FFmpegArgs     []string `json:"ffmpegArgs"`
-	ExtraNFO       string   `json:"extraNfo"`
-	Color          string   `json:"color"`
-	LiveRewind     bool     `json:"liveRewind"`
-	TimetableStage string   `json:"timetableStage,omitempty"`
-	FestivalID     string   `json:"festivalId,omitempty"`
+	ID                string   `json:"id"`
+	Name              string   `json:"name"`
+	Type              string   `json:"type"`
+	URL               string   `json:"url"`
+	Enabled           bool     `json:"enabled"`
+	Record            bool     `json:"record"`
+	Quality           string   `json:"quality"`
+	Container         string   `json:"container"`
+	AudioOnly         bool     `json:"audioOnly"`
+	Transcode         bool     `json:"transcode"`
+	HardwareAccel     string   `json:"hardwareAccel"`
+	StreamlinkArgs    []string `json:"streamlinkArgs"`
+	FFmpegArgs        []string `json:"ffmpegArgs"`
+	ExtraNFO          string   `json:"extraNfo"`
+	Color             string   `json:"color"`
+	LiveRewind        bool     `json:"liveRewind"`
+	TimetableStage    string   `json:"timetableStage,omitempty"`
+	FestivalID        string   `json:"festivalId,omitempty"`
+	LoudnessNormalize bool     `json:"loudnessNormalize,omitempty"`
 }
 
 type StageSchedule struct {
@@ -225,18 +227,20 @@ type State struct {
 
 type SourceStatus struct {
 	Source
-	Status           string    `json:"status"`
-	OutputPath       string    `json:"outputPath"`
-	MediaPath        string    `json:"mediaPath,omitempty"`
-	Size             int64     `json:"size"`
-	StartedAt        time.Time `json:"startedAt,omitempty"`
-	LastError        string    `json:"lastError,omitempty"`
-	CurrentSet       string    `json:"currentSet,omitempty"`
-	NextSet          string    `json:"nextSet,omitempty"`
-	LogPath          string    `json:"logPath,omitempty"`
-	LastHeartbeat    time.Time `json:"lastHeartbeat,omitempty"`
-	LiveRewindActive bool      `json:"liveRewindActive"`
-	Orphaned         bool      `json:"orphaned,omitempty"`
+	Status            string    `json:"status"`
+	OutputPath        string    `json:"outputPath"`
+	MediaPath         string    `json:"mediaPath,omitempty"`
+	Size              int64     `json:"size"`
+	StartedAt         time.Time `json:"startedAt,omitempty"`
+	LastError         string    `json:"lastError,omitempty"`
+	CurrentSet        string    `json:"currentSet,omitempty"`
+	NextSet           string    `json:"nextSet,omitempty"`
+	LogPath           string    `json:"logPath,omitempty"`
+	LastHeartbeat     time.Time `json:"lastHeartbeat,omitempty"`
+	LiveRewindActive  bool      `json:"liveRewindActive"`
+	Orphaned          bool      `json:"orphaned,omitempty"`
+	ReconnectAttempts int       `json:"reconnectAttempts,omitempty"`
+	NextRetryAt       time.Time `json:"nextRetryAt,omitempty"`
 }
 
 // RecordingFile describes a single finished recording on disk, enriched with
@@ -270,17 +274,18 @@ type Event struct {
 }
 
 type recording struct {
-	source    Source
-	ctx       context.Context
-	cancel    context.CancelFunc
-	startedAt time.Time
-	tempPath  string
-	finalPath string
-	logPath   string
-	logFile   *os.File
-	lastErr   string
-	done      chan struct{}
-	hlsDir    string
+	source     Source
+	ctx        context.Context
+	cancel     context.CancelFunc
+	startedAt  time.Time
+	tempPath   string
+	finalPath  string
+	logPath    string
+	logFile    *os.File
+	lastErr    string
+	done       chan struct{}
+	hlsDir     string
+	manualStop atomic.Bool
 }
 
 type App struct {
@@ -295,6 +300,9 @@ type App struct {
 	authPass      string
 	authFile      string
 	remindersSent map[string]time.Time
+
+	retryMu sync.Mutex
+	retry   map[string]*retryState
 
 	sessMu   sync.Mutex
 	sessions map[string]time.Time
@@ -371,6 +379,7 @@ func NewApp(configPath string) (*App, error) {
 		active:        map[string]*recording{},
 		lastFinished:  map[string]string{},
 		remindersSent: map[string]time.Time{},
+		retry:         map[string]*retryState{},
 		sessions:      map[string]time.Time{},
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -495,10 +504,13 @@ func (a *App) checkCredentials(username, password string) bool {
 // redirected back to themselves.
 func isPublicPath(p string) bool {
 	switch p {
-	case "/login", "/api/login", "/setup", "/api/setup", "/app.css":
+	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js":
 		return true
 	}
-	return false
+	// Icons are pure branding assets (no user data) and need to load
+	// unauthenticated for the browser's install/add-to-home-screen prompt
+	// and for the login/setup pages themselves.
+	return strings.HasPrefix(p, "/icons/")
 }
 
 // requireAuth gates every request (UI and API) behind a session cookie set by
@@ -828,6 +840,9 @@ func (a *App) evaluate() {
 		if a.isActive(src.ID) {
 			continue
 		}
+		if _, blocked := a.retryBlocked(src.ID); blocked {
+			continue
+		}
 		a.start(src)
 	}
 }
@@ -889,6 +904,91 @@ func (a *App) start(src Source) {
 // unplayable files.
 const minViableRecordingBytes = 64 * 1024
 
+// retryState tracks the auto-reconnect backoff for a single source: how many
+// consecutive short-lived failures it has had in a row, and when it's next
+// allowed to try again. Kept in memory only - a restart just starts clean.
+type retryState struct {
+	attempts    int
+	nextAttempt time.Time
+}
+
+// minStableRecordingDuration is how long a recording has to run before it's
+// considered "the stream was actually working" rather than an immediate
+// connection failure. A recording that produced output but died before this
+// elapsed (bad URL, offline channel, network blip right at start) counts
+// toward the reconnect backoff instead of being retried every scheduler tick.
+const minStableRecordingDuration = 60 * time.Second
+
+const (
+	reconnectBaseDelay = 5 * time.Second
+	reconnectMaxDelay  = 5 * time.Minute
+)
+
+// reconnectDelay computes an exponential backoff (5s, 10s, 20s, ... capped at
+// reconnectMaxDelay) from the number of consecutive failures so far, so a
+// stream that's genuinely down doesn't get hammered with a restart every
+// scheduler tick.
+func reconnectDelay(attempts int) time.Duration {
+	shift := attempts - 1
+	if shift < 0 {
+		shift = 0
+	}
+	if shift > 6 {
+		shift = 6
+	}
+	d := reconnectBaseDelay * time.Duration(1<<uint(shift))
+	if d > reconnectMaxDelay {
+		d = reconnectMaxDelay
+	}
+	return d
+}
+
+// retryBlocked reports whether a source is still within its reconnect
+// backoff window and, if so, when it'll next be eligible.
+func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil || !time.Now().Before(st.nextAttempt) {
+		return time.Time{}, false
+	}
+	return st.nextAttempt, true
+}
+
+// clearRetry resets a source's reconnect backoff, used both on a manual stop
+// (the user is in control, not a dropped connection) and after a stable run.
+func (a *App) clearRetry(sourceID string) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	delete(a.retry, sourceID)
+}
+
+// recordFailure bumps a source's reconnect attempt counter and schedules the
+// next allowed retry, returning the new attempt count and delay for logging.
+func (a *App) recordFailure(sourceID string) (int, time.Duration) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil {
+		st = &retryState{}
+		a.retry[sourceID] = st
+	}
+	st.attempts++
+	delay := reconnectDelay(st.attempts)
+	st.nextAttempt = time.Now().Add(delay)
+	return st.attempts, delay
+}
+
+func (a *App) reconnectStatus(sourceID string) (attempts int, nextAttempt time.Time, ok bool) {
+	a.retryMu.Lock()
+	defer a.retryMu.Unlock()
+	st := a.retry[sourceID]
+	if st == nil {
+		return 0, time.Time{}, false
+	}
+	return st.attempts, st.nextAttempt, true
+}
+
 func (a *App) runRecording(rec *recording) {
 	defer close(rec.done)
 	defer rec.logFile.Close()
@@ -937,6 +1037,22 @@ func (a *App) runRecording(rec *recording) {
 
 	if rec.hlsDir != "" {
 		_ = os.RemoveAll(rec.hlsDir)
+	}
+
+	// Auto-reconnect bookkeeping: a manual stop (or app shutdown, which also
+	// goes through stop()) is the user/operator in control, not a dropped
+	// connection, so it's exempt from backoff. Otherwise, a recording that
+	// ran long enough to be considered stable clears any prior backoff;
+	// anything shorter (or with no output at all) counts as a failed
+	// connection attempt and schedules the next retry with backoff instead
+	// of letting the scheduler hammer a dead stream every tick.
+	if !rec.manualStop.Load() {
+		if hasOutput && time.Since(rec.startedAt) >= minStableRecordingDuration {
+			a.clearRetry(rec.source.ID)
+		} else {
+			attempts, delay := a.recordFailure(rec.source.ID)
+			a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", rec.source.Name, delay.Round(time.Second), attempts))
+		}
 	}
 
 	a.mu.Lock()
@@ -1037,6 +1153,13 @@ func (a *App) execute(rec *recording) error {
 	return ffErr
 }
 
+// loudnormFilter applies EBU R128 loudness normalization in a single pass
+// (as opposed to ffmpeg's two-pass loudnorm, which needs to measure the
+// whole file before encoding it and so can't run on a live recording).
+// Single-pass is less precise but keeps levels in a sane, consistent range
+// across sources/artists that otherwise vary wildly in recorded volume.
+const loudnormFilter = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
 // ffmpegArgs builds the archival output plus, when hlsDir is set, a second
 // bounded HLS output used for live-rewind DVR playback of the in-progress
 // recording. The HLS branch always transcodes to H.264/AAC since it must be
@@ -1057,16 +1180,25 @@ func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) 
 	// file and failing the recording before a single frame is written. The
 	// "?" suffix means ffmpeg won't error if a source has no subtitle track.
 	args = append(args, "-map", "0:v?", "-map", "0:a?", "-map", "0:s?")
+	// Loudness normalization needs to re-encode audio (a filter can't run on
+	// a stream-copied track), even when the source otherwise stream-copies
+	// video - so audio and video codecs are chosen independently here rather
+	// than the single "-c copy"/"-c:a aac" shortcuts used before.
+	encodeAudio := src.Transcode || src.LoudnessNormalize
 	if src.AudioOnly {
-		if src.Transcode {
-			args = append(args, "-vn", "-c:a", "aac", "-b:a", "192k")
-		} else {
-			args = append(args, "-vn", "-c:a", "copy")
-		}
+		args = append(args, "-vn")
 	} else if src.Transcode {
-		args = append(args, "-c:v", videoEncoder(src.HardwareAccel), "-c:a", "aac", "-b:a", "192k")
+		args = append(args, "-c:v", videoEncoder(src.HardwareAccel))
 	} else {
-		args = append(args, "-c", "copy")
+		args = append(args, "-c:v", "copy", "-c:s", "copy")
+	}
+	if encodeAudio {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+		if src.LoudnessNormalize {
+			args = append(args, "-af", loudnormFilter)
+		}
+	} else {
+		args = append(args, "-c:a", "copy")
 	}
 	// The output path ends in ".part" for atomic renaming, so ffmpeg cannot
 	// infer the container from the extension - it must be told explicitly.
@@ -1159,6 +1291,8 @@ func (a *App) stop(id string) {
 	if rec == nil {
 		return
 	}
+	rec.manualStop.Store(true)
+	a.clearRetry(id)
 	rec.cancel()
 }
 
@@ -2807,6 +2941,7 @@ func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
 		cfg := a.snapshotConfig()
 		for _, src := range cfg.Sources {
 			if src.ID == id {
+				a.clearRetry(src.ID)
 				a.start(src)
 				writeJSON(w, map[string]string{"status": "started"})
 				return
@@ -2953,6 +3088,13 @@ func (a *App) state() State {
 			st.OutputPath = last
 			if info, err := os.Stat(last); err == nil {
 				st.Size = info.Size()
+			}
+		}
+		if st.Status == "idle" {
+			if attempts, next, ok := a.reconnectStatus(src.ID); ok && time.Now().Before(next) {
+				st.Status = "reconnecting"
+				st.ReconnectAttempts = attempts
+				st.NextRetryAt = next
 			}
 		}
 		if st.OutputPath != "" {

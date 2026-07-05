@@ -4,6 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Set up — Defqon Stream Recorder</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#09090b">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
@@ -107,7 +111,10 @@
         errorEl.classList.remove('hidden');
         return;
       }
-      window.location.href = '/';
+      // ?onboarding=1 tells app.js to jump straight into the Sources tab and
+      // open the Quick Add wizard, so first run ends with a tested, working
+      // source instead of an empty dashboard.
+      window.location.href = '/?onboarding=1';
     });
   </script>
 </body>

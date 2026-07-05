@@ -14,6 +14,15 @@ let evEditingOrgId = null;
 let evEditingFestId = null;
 const accents = { red: '#ef4444', cyan: '#06b6d4', lime: '#84cc16', amber: '#f59e0b', pink: '#ec4899' };
 
+// Registers the PWA service worker so the app can be installed to a phone's
+// home screen. The worker only caches the static app shell (see sw.js) -
+// live state, recordings, and API calls always go straight to the network.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
 async function api(path, opts) {
   let res;
   try {
@@ -61,10 +70,26 @@ async function refresh() {
     renderDashboard();
     renderEditors();
     updateWatchIfActive();
+    maybeStartOnboarding();
   } catch (err) {
     console.error('Render failed:', err);
     toast(`UI failed to render: ${err.message}`, 'error');
   }
+}
+
+// The first-run setup wizard (setup.html) redirects here with ?onboarding=1
+// right after account creation, so a brand new install lands straight in
+// the Quick Add Source wizard instead of an empty dashboard. Runs at most
+// once per page load, and strips the query param so a later manual refresh
+// doesn't reopen it.
+let onboardingHandled = false;
+function maybeStartOnboarding() {
+  if (onboardingHandled) return;
+  onboardingHandled = true;
+  if (new URLSearchParams(location.search).get('onboarding') !== '1') return;
+  history.replaceState(null, '', location.pathname);
+  switchToView('sources');
+  openWizard();
 }
 
 function renderVersion() {
@@ -91,6 +116,12 @@ function applyTheme() {
   } else {
     document.documentElement.style.setProperty('--accent', accents[config.ui.accent] || accents.red);
   }
+}
+
+function retryCountdown(nextRetryAt) {
+  const ms = new Date(nextRetryAt).getTime() - Date.now();
+  const secs = Math.max(0, Math.ceil(ms / 1000));
+  return secs >= 60 ? `${Math.ceil(secs / 60)}m` : `${secs}s`;
 }
 
 function elapsed(startedAt) {
@@ -121,6 +152,7 @@ function sourceCardHtml(src) {
         ${src.id === nowPlayingId ? '<div class="now-playing-tag">&#9654; Now watching</div>' : ''}
         ${!src.orphaned ? `<div>Now: ${escapeHtml(src.currentSet || 'No current set')}</div><div>Next: ${escapeHtml(src.nextSet || 'No upcoming set')}</div>` : ''}
         <div>Size: ${formatBytes(src.size || 0)}${src.status === 'recording' ? ` · Recording for ${elapsed(src.startedAt)}` : ''}</div>
+        ${src.status === 'reconnecting' ? `<div class="text-amber-300">Stream appears down - retrying in ${retryCountdown(src.nextRetryAt)} (attempt ${src.reconnectAttempts})</div>` : ''}
         ${src.lastError ? `<div class="text-rose-300">Error: ${escapeHtml(src.lastError)}</div>` : ''}
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
@@ -525,6 +557,7 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
+          <label class="inline-flex items-center gap-2" title="Normalizes recorded volume to a consistent loudness (EBU R128). Forces audio to be re-encoded even if video is stream-copied."><input class="src-loudnorm" type="checkbox" ${s.loudnessNormalize ? 'checked' : ''}> Loudness normalize</label>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
@@ -572,6 +605,7 @@ function readSourceCard(el) {
     enabled: el.querySelector('.src-enabled').checked,
     record: el.querySelector('.src-record').checked,
     audioOnly: el.querySelector('.src-audio').checked,
+    loudnessNormalize: el.querySelector('.src-loudnorm').checked,
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value,
