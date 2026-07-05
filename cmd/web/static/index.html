@@ -321,6 +321,9 @@
           <div class="flex flex-wrap items-center gap-2">
             <input id="lib-search" class="input max-w-xs" placeholder="Search artist, channel, or filename" style="margin:0">
             <button type="button" id="lib-match-open" class="btn">Smart Match</button>
+            <button type="button" id="lib-matchfile-export" class="btn" title="Download a shareable match file for everything you've organized">Export Match File</button>
+            <button type="button" id="lib-matchfile-import" class="btn" title="Apply an exact-match file someone else exported">Import Match File</button>
+            <input type="file" id="lib-matchfile-input" accept="application/json" class="hidden">
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -500,6 +503,7 @@
           <div class="grid gap-2 md:grid-cols-1">
             <label>Artist / set name<input id="assign-artist" class="input"></label>
           </div>
+          <label>Tracklist <span class="text-xs text-zinc-500">(optional, one track per line)</span><textarea id="assign-tracklist" class="input" rows="4" placeholder="00:00 Artist - Track name"></textarea></label>
           <p id="assign-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-between gap-2">
             <button type="button" id="assign-clear" class="btn" style="color:#fda4af">Unassign</button>

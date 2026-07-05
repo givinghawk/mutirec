@@ -1466,6 +1466,57 @@ async function closeMatchView() {
   await reloadLibraryData();
 }
 
+// --- Hash-based match file: exact-match sibling to Smart Match, for sharing
+// organized-recording metadata between different people's copies of the
+// same files (matched by content hash, not path). ---
+
+$('lib-matchfile-export').onclick = async () => {
+  let entries;
+  try {
+    entries = await api('/api/recordings/matchfile/export');
+  } catch {
+    return;
+  }
+  if (!entries.length) {
+    toast('Nothing organized yet to export', 'info');
+    return;
+  }
+  const blob = new Blob([JSON.stringify(entries, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'recordings-matchfile.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Exported ${entries.length} recording${entries.length === 1 ? '' : 's'}`, 'info');
+};
+
+$('lib-matchfile-import').onclick = () => $('lib-matchfile-input').click();
+$('lib-matchfile-input').addEventListener('change', async () => {
+  const file = $('lib-matchfile-input').files[0];
+  $('lib-matchfile-input').value = '';
+  if (!file) return;
+  let entries;
+  try {
+    entries = JSON.parse(await file.text());
+  } catch {
+    toast('That file is not valid JSON', 'error');
+    return;
+  }
+  if (!Array.isArray(entries)) {
+    toast('Expected a match file (JSON array)', 'error');
+    return;
+  }
+  let result;
+  try {
+    result = await api('/api/recordings/matchfile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
+  } catch {
+    return;
+  }
+  toast(result.matched ? `Matched and organized ${result.matched} recording${result.matched === 1 ? '' : 's'}` : 'No local recordings matched this file', result.matched ? 'info' : 'warn');
+  await reloadLibraryData();
+});
+
 function renderMatchList() {
   $('lib-match-count').textContent = `${matchSuggestions.length} unsorted`;
   if (!matchSuggestions.length) {
@@ -1872,6 +1923,7 @@ function openAssignModal(r) {
   $('assign-channel').value = (r.channel && r.channel !== r.source) ? r.channel : '';
   $('assign-artist').value = r.artist || '';
   $('assign-time').value = r.start ? toDatetimeLocal(r.start) : '';
+  $('assign-tracklist').value = r.tracklist || '';
   $('assign-find-result').textContent = '';
   $('assign-error').classList.add('hidden');
 
@@ -1968,6 +2020,7 @@ $('assign-save').onclick = async () => {
     channel: $('assign-channel').value.trim(),
     setId,
     artist: $('assign-artist').value.trim(),
+    tracklist: $('assign-tracklist').value.trim(),
   };
   if (!setId && $('assign-time').value) {
     payload.start = new Date($('assign-time').value).toISOString();
