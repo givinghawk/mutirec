@@ -941,16 +941,157 @@ function renderRecordings() {
     $('recordings-list').innerHTML = `<p class="text-zinc-400">No recordings found${filter ? ' matching that filter' : ''}.</p>`;
     return;
   }
-  $('recordings-list').innerHTML = rows.map(r => `
+  $('recordings-list').innerHTML = rows.map((r, i) => `
     <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
       <div class="min-w-0">
         <div class="truncate font-medium">${escapeHtml(r.name)}</div>
         <div class="text-xs text-zinc-400">${escapeHtml(r.source || '')} · ${formatBytes(r.size)} · ${new Date(r.modTime).toLocaleString()}</div>
       </div>
-      <a class="btn" href="/media/${encodeMediaPath(r.path)}" target="_blank" rel="noopener">Open</a>
+      <div class="flex flex-shrink-0 items-center gap-2">
+        <button type="button" class="btn primary rec-play-btn" data-index="${i}">&#9658; Play</button>
+        <a class="btn" href="/media/${encodeMediaPath(r.path)}" download title="Download">&#8681;</a>
+      </div>
     </div>`).join('');
+
+  document.querySelectorAll('.rec-play-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const r = rows[parseInt(btn.dataset.index, 10)];
+      openRecordingPlayer(r.path, r.name);
+    });
+  });
 }
 $('recordings-filter').addEventListener('input', renderRecordings);
+
+// --- Custom video player (Recordings tab) ---
+
+let customPlayerBound = false;
+
+function openRecordingPlayer(path, name) {
+  const video = $('rec-video');
+  $('rec-player-title').textContent = name || 'Recording';
+  $('recording-player-overlay').classList.remove('hidden');
+  setupCustomPlayerControls(video);
+  video.src = `/media/${encodeMediaPath(path)}`;
+  video.currentTime = 0;
+  video.play().catch(() => { /* autoplay may be blocked; controls still work */ });
+}
+
+function closeRecordingPlayer() {
+  const video = $('rec-video');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  $('recording-player-overlay').classList.add('hidden');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+$('rec-player-close').onclick = closeRecordingPlayer;
+$('recording-player-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'recording-player-overlay') closeRecordingPlayer();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('recording-player-overlay').classList.contains('hidden')) closeRecordingPlayer();
+});
+
+function formatTime(s) {
+  if (!isFinite(s) || s < 0) return '0:00';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  const ss = String(sec).padStart(2, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+// Bound once: the modal reuses a single <video> element, so controls only
+// need to be wired up the first time the player is opened.
+function setupCustomPlayerControls(video) {
+  if (customPlayerBound) return;
+  customPlayerBound = true;
+
+  const playPauseBtn = $('cp-playpause');
+  const centerPlay = $('cp-center-play');
+  const back10 = $('cp-back10');
+  const fwd10 = $('cp-fwd10');
+  const timeEl = $('cp-time');
+  const seek = $('cp-seek');
+  const seekWrap = $('cp-seek-wrap');
+  const seekProgress = $('cp-seek-progress');
+  const seekBuffer = $('cp-seek-buffer');
+  const muteBtn = $('cp-mute');
+  const volume = $('cp-volume');
+  const speed = $('cp-speed');
+  const fullscreenBtn = $('cp-fullscreen');
+  let scrubbing = false;
+
+  const setPlayIcon = (playing) => {
+    const icon = playing ? '&#10074;&#10074;' : '&#9658;';
+    playPauseBtn.innerHTML = icon;
+  };
+
+  const togglePlay = () => { if (video.paused || video.ended) video.play().catch(() => {}); else video.pause(); };
+
+  playPauseBtn.onclick = togglePlay;
+  centerPlay.onclick = togglePlay;
+  video.addEventListener('click', togglePlay);
+  video.addEventListener('play', () => { setPlayIcon(true); centerPlay.classList.add('hidden'); });
+  video.addEventListener('pause', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  video.addEventListener('ended', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  video.addEventListener('waiting', () => $('custom-player').classList.add('cp-buffering'));
+  video.addEventListener('playing', () => $('custom-player').classList.remove('cp-buffering'));
+  video.addEventListener('error', () => toast('Could not play this recording — the file may be missing or unsupported', 'error'));
+
+  back10.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
+  fwd10.onclick = () => { video.currentTime = Math.min(video.duration || video.currentTime + 10, video.currentTime + 10); };
+
+  video.addEventListener('timeupdate', () => {
+    if (scrubbing || !isFinite(video.duration) || !video.duration) return;
+    const pct = (video.currentTime / video.duration) * 1000;
+    seek.value = pct;
+    seekProgress.style.width = `${pct / 10}%`;
+    timeEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+  });
+  video.addEventListener('progress', () => {
+    if (video.buffered.length && isFinite(video.duration) && video.duration) {
+      const end = video.buffered.end(video.buffered.length - 1);
+      seekBuffer.style.width = `${(end / video.duration) * 100}%`;
+    }
+  });
+  video.addEventListener('loadedmetadata', () => {
+    timeEl.textContent = `${formatTime(0)} / ${formatTime(video.duration)}`;
+  });
+
+  seek.addEventListener('input', () => {
+    scrubbing = true;
+    const pct = seek.value / 1000;
+    seekProgress.style.width = `${pct * 100}%`;
+    if (isFinite(video.duration) && video.duration) timeEl.textContent = `${formatTime(pct * video.duration)} / ${formatTime(video.duration)}`;
+  });
+  seek.addEventListener('change', () => {
+    if (isFinite(video.duration) && video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    scrubbing = false;
+  });
+  seekWrap.addEventListener('mousedown', () => { scrubbing = true; });
+
+  volume.addEventListener('input', () => {
+    video.volume = parseFloat(volume.value);
+    video.muted = video.volume === 0;
+    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
+  });
+  muteBtn.onclick = () => {
+    video.muted = !video.muted;
+    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
+    if (!video.muted && video.volume === 0) { video.volume = 1; volume.value = 1; }
+  };
+
+  speed.addEventListener('change', () => { video.playbackRate = parseFloat(speed.value); });
+
+  fullscreenBtn.onclick = () => {
+    const el = $('custom-player');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else el.requestFullscreen?.().catch(() => {});
+  };
+}
 
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
