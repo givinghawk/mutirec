@@ -745,6 +745,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/live/", a.handleLive)
 	mux.HandleFunc("/api/recordings", a.handleRecordings)
 	mux.HandleFunc("/api/recordings/meta", a.handleRecordingMeta)
+	mux.HandleFunc("/api/recordings/match-suggestions", a.handleRecordingMatchSuggestions)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
@@ -1376,6 +1377,186 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.After(files[j].ModTime) })
 	writeJSON(w, files)
+}
+
+// filenameTimestampRe matches this app's own recording naming convention
+// (name.YYYYMMDD-HHMMSS.ext) as well as loose YYYY-MM-DD / YYYYMMDD dates
+// that commonly show up in filenames from other sources.
+var filenameTimestampRe = regexp.MustCompile(`(\d{4})-?(\d{2})-?(\d{2})[ _.T-]?(\d{2})?:?(\d{2})?:?(\d{2})?`)
+
+// guessTimeFromName tries to parse a date/time out of a filename, falling
+// back to the file's mtime if nothing looks like a date. Best-effort only -
+// it's a starting point for the match wizard's suggestions, not a guarantee.
+func guessTimeFromName(name string, modTime time.Time) (time.Time, bool) {
+	m := filenameTimestampRe.FindStringSubmatch(name)
+	if m == nil {
+		return modTime, false
+	}
+	year, _ := strconv.Atoi(m[1])
+	month, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	if year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31 {
+		return modTime, false
+	}
+	hour, min, sec := 0, 0, 0
+	if m[4] != "" {
+		hour, _ = strconv.Atoi(m[4])
+	}
+	if m[5] != "" {
+		min, _ = strconv.Atoi(m[5])
+	}
+	if m[6] != "" {
+		sec, _ = strconv.Atoi(m[6])
+	}
+	return time.Date(year, time.Month(month), day, hour, min, sec, 0, modTime.Location()), true
+}
+
+// MatchSuggestion is one recording's best-guess event/set match, offered to
+// the user for approval or correction rather than applied automatically.
+type MatchSuggestion struct {
+	Path            string `json:"path"`
+	Name            string `json:"name"`
+	Channel         string `json:"channel"`
+	GuessedTime     string `json:"guessedTime,omitempty"`
+	GuessedFromName bool   `json:"guessedFromName"`
+	EventID         string `json:"eventId,omitempty"`
+	EventName       string `json:"eventName,omitempty"`
+	SetID           string `json:"setId,omitempty"`
+	Stage           string `json:"stage,omitempty"`
+	Artist          string `json:"artist,omitempty"`
+	Confidence      string `json:"confidence"` // "high" | "medium" | "low" | "none"
+	Reason          string `json:"reason"`
+}
+
+// handleRecordingMatchSuggestions scans every recording that isn't already
+// assigned to an event and tries to guess which archived timetable set it
+// belongs to, from the timestamp embedded in its filename (or, failing
+// that, its mtime) and its channel/stage name. Nothing is written - the
+// caller reviews and approves/corrects each suggestion via the existing
+// PUT /api/recordings/meta.
+func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Request) {
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	var suggestions []MatchSuggestion
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if meta, ok := cfg.RecordingMeta[rel]; ok && meta.EventID != "" {
+			return nil // already organized - nothing to suggest
+		}
+		parts := strings.SplitN(rel, "/", 2)
+		channel := ""
+		if len(parts) > 1 {
+			channel = parts[0]
+		}
+		name := filepath.Base(p)
+		guessed, fromName := guessTimeFromName(name, info.ModTime())
+		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName))
+		return nil
+	})
+	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].Path < suggestions[j].Path })
+	writeJSON(w, suggestions)
+}
+
+// matchCandidate is one archived timetable set considered as a possible
+// match for a recording, scored by bestMatchSuggestion/betterCandidate.
+type matchCandidate struct {
+	eventID, eventName, setID, stage, artist string
+	delta                                    time.Duration
+	contained, stageMatch                    bool
+}
+
+// bestMatchSuggestion checks every LibraryEvent's archived timetable for the
+// set whose stage name best matches this recording's channel and whose
+// [start,end) window best contains (or is closest to) the guessed time.
+func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time.Time, fromName bool) MatchSuggestion {
+	base := MatchSuggestion{Path: path, Name: name, Channel: channel, GuessedFromName: fromName, Confidence: "none", Reason: "Could not find a matching set - assign manually."}
+	if fromName {
+		base.GuessedTime = guessed.Format(time.RFC3339)
+	}
+
+	var best *matchCandidate
+
+	for _, ev := range cfg.LibraryEvents {
+		for _, stage := range ev.Timetable {
+			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
+			for _, set := range stage.Sets {
+				start, errS := time.Parse(time.RFC3339, set.Start)
+				end, errE := time.Parse(time.RFC3339, set.End)
+				if errS != nil {
+					continue
+				}
+				if errE != nil {
+					end = start.Add(time.Hour)
+				}
+				contained := !guessed.Before(start) && guessed.Before(end)
+				var delta time.Duration
+				if contained {
+					delta = 0
+				} else {
+					delta = start.Sub(guessed)
+					if delta < 0 {
+						delta = -delta
+					}
+					if end.Sub(guessed) < delta && end.Sub(guessed) > 0 {
+						delta = end.Sub(guessed)
+					}
+				}
+				cand := matchCandidate{eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name, delta: delta, contained: contained, stageMatch: stageMatch}
+				if best == nil || betterCandidate(cand, *best) {
+					c := cand
+					best = &c
+				}
+			}
+		}
+	}
+
+	if best == nil {
+		return base
+	}
+	base.EventID = best.eventID
+	base.EventName = best.eventName
+	base.SetID = best.setID
+	base.Stage = best.stage
+	base.Artist = best.artist
+	switch {
+	case best.contained && best.stageMatch:
+		base.Confidence = "high"
+		base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+	case best.contained:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("Guessed time falls within %s's window, but the stage name doesn't match \"%s\" - double check.", best.artist, channel)
+	case best.stageMatch && best.delta <= 30*time.Minute:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("Channel matches %s; closest set by time (%s away).", best.stage, best.delta.Round(time.Minute))
+	default:
+		base.Confidence = "low"
+		base.Reason = fmt.Sprintf("Closest guess: %s on %s, %s away - verify before approving.", best.artist, best.stage, best.delta.Round(time.Minute))
+	}
+	return base
+}
+
+// betterCandidate prefers a contained+stage-matching set over anything
+// else, then contained over not, then stage match over not, then smaller
+// time delta.
+func betterCandidate(a, b matchCandidate) bool {
+	if a.contained != b.contained {
+		return a.contained
+	}
+	if a.stageMatch != b.stageMatch {
+		return a.stageMatch
+	}
+	return a.delta < b.delta
 }
 
 // handleLibraryEvents lists or creates LibraryEvents - the "album" grouping

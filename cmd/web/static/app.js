@@ -98,13 +98,12 @@ function elapsed(startedAt) {
   return `${h ? h + 'h ' : ''}${m}m ${secs}s`;
 }
 
-function renderDashboard() {
-  const warnings = state.warnings || [];
-  const sources = state.sources || [];
-  const events = state.events || [];
-  $('active-count').textContent = `${state.activeCount} active`;
-  $('warnings').innerHTML = warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
-  $('source-grid').innerHTML = sources.length ? sources.map(src => `
+// openGroupIds tracks which source-group accordions are expanded, keyed by
+// festival id ("" for Ungrouped), so the layout survives periodic re-renders.
+let openGroupIds = new Set(['']);
+
+function sourceCardHtml(src) {
+  return `
     <article class="source-card ${src.id === nowPlayingId ? 'now-playing' : ''} ${src.orphaned ? 'orphaned' : ''}" style="border-left-color:${src.color || 'var(--accent)'}">
       <div class="flex items-start justify-between gap-3">
         <div>
@@ -126,12 +125,93 @@ function renderDashboard() {
         ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
         ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
       </div>
-    </article>`).join('') : '<p class="text-sm text-zinc-400 md:col-span-2">No sources yet — add one from the Sources tab.</p>';
+    </article>`;
+}
+
+function toggleSourceGroup(id) {
+  if (openGroupIds.has(id)) openGroupIds.delete(id); else openGroupIds.add(id);
+  renderDashboard();
+}
+
+function renderDashboard() {
+  const warnings = state.warnings || [];
+  const sources = state.sources || [];
+  const events = state.events || [];
+  $('active-count').textContent = `${state.activeCount} active`;
+  $('warnings').innerHTML = warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
+
+  if (!sources.length) {
+    $('source-grid').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one from the Sources tab.</p>';
+  } else {
+    const festivals = config.festivals || [];
+    const groups = new Map(); // festivalId ("" = ungrouped) -> { name, color, sources }
+    sources.forEach(src => {
+      const fid = src.festivalId || '';
+      if (!groups.has(fid)) {
+        const f = festivals.find(f => f.id === fid);
+        groups.set(fid, { name: f ? f.name : 'Ungrouped', color: f ? f.color : null, sources: [] });
+      }
+      groups.get(fid).sources.push(src);
+    });
+    const ordered = [...groups.entries()].sort((a, b) => {
+      if (a[0] === '') return 1;
+      if (b[0] === '') return -1;
+      return a[1].name.localeCompare(b[1].name);
+    });
+    $('source-grid').innerHTML = ordered.map(([gid, group]) => {
+      const open = openGroupIds.has(gid);
+      const recording = group.sources.filter(s => s.status === 'recording').length;
+      return `
+      <div class="source-group md:col-span-2 ${open ? 'open' : ''}">
+        <div class="source-group-head" style="border-left-color:${group.color || 'var(--accent)'}" onclick="toggleSourceGroup('${escapeAttr(gid)}')">
+          <span class="source-group-chevron">&#9656;</span>
+          <span class="font-semibold">${escapeHtml(group.name)}</span>
+          <span class="pill">${group.sources.length} source${group.sources.length === 1 ? '' : 's'}</span>
+          ${recording ? `<span class="pill status-recording">${recording} recording</span>` : ''}
+        </div>
+        <div class="source-group-body ${open ? '' : 'hidden'} grid gap-3 md:grid-cols-2">
+          ${group.sources.map(sourceCardHtml).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
   const free = state.disk.volumeFree || 0;
   const total = state.disk.volumeTotal || 0;
   $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
   $('events').innerHTML = [...events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
   renderFavoritesPanel();
+  renderDashboardCharts(sources);
+}
+
+function renderDashboardCharts(sources) {
+  // Status breakdown: a simple proportional stacked bar, no chart library needed.
+  const counts = { recording: 0, idle: 0, disabled: 0 };
+  sources.forEach(s => { counts[s.status] = (counts[s.status] || 0) + 1; });
+  const total = sources.length || 1;
+  const segments = [
+    { key: 'recording', label: 'Recording', color: '#ef4444' },
+    { key: 'idle', label: 'Idle', color: '#52525b' },
+    { key: 'disabled', label: 'Disabled', color: '#3f3f46' },
+  ].filter(s => counts[s.key] > 0);
+  $('status-chart').innerHTML = `
+    <div class="status-bar">${segments.map(s => `<div style="width:${(counts[s.key] / total) * 100}%;background:${s.color}" title="${s.label}: ${counts[s.key]}"></div>`).join('')}</div>
+    <div class="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
+      ${segments.map(s => `<span class="flex items-center gap-1"><span class="inline-block h-2 w-2 rounded-full" style="background:${s.color}"></span>${escapeHtml(s.label)} (${counts[s.key]})</span>`).join('')}
+    </div>`;
+
+  // Storage by source: horizontal bars from the per-stage disk usage breakdown.
+  const perStage = (state.disk && state.disk.perStage) || {};
+  const entries = Object.entries(perStage).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const maxSize = entries.length ? entries[0][1] : 1;
+  $('storage-chart').innerHTML = entries.length
+    ? entries.map(([name, size]) => `
+      <div class="storage-bar-row">
+        <span class="storage-bar-label" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+        <div class="storage-bar-track"><div class="storage-bar-fill" style="width:${maxSize ? (size / maxSize) * 100 : 0}%"></div></div>
+        <span class="storage-bar-value">${formatBytes(size)}</span>
+      </div>`).join('')
+    : '<p class="text-sm text-zinc-400">No recordings yet.</p>';
 }
 
 function renderFavoritesPanel() {
@@ -1348,6 +1428,90 @@ async function initLibrary() {
     return;
   }
   renderLibrary();
+}
+
+// --- Smart Match: filename/channel -> timetable set suggestions ---
+
+let matchSuggestions = [];
+
+$('lib-match-open').onclick = openMatchView;
+$('lib-match-close').onclick = closeMatchView;
+
+async function openMatchView() {
+  $('lib-home').classList.add('hidden');
+  $('lib-event-view').classList.add('hidden');
+  $('lib-search-results').classList.add('hidden');
+  $('lib-back').classList.add('hidden');
+  $('lib-match-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  $('lib-match-list').innerHTML = '<p class="text-zinc-400">Scanning…</p>';
+  try {
+    matchSuggestions = await api('/api/recordings/match-suggestions');
+  } catch {
+    matchSuggestions = [];
+  }
+  renderMatchList();
+}
+
+async function closeMatchView() {
+  $('lib-match-view').classList.add('hidden');
+  await reloadLibraryData();
+}
+
+function renderMatchList() {
+  $('lib-match-count').textContent = `${matchSuggestions.length} unsorted`;
+  if (!matchSuggestions.length) {
+    $('lib-match-list').innerHTML = '<p class="text-zinc-400">Nothing to match — every recording is already organized (or there are none yet).</p>';
+    return;
+  }
+  const badge = { high: 'text-emerald-300', medium: 'text-amber-300', low: 'text-rose-300', none: 'text-zinc-500' };
+  $('lib-match-list').innerHTML = matchSuggestions.map((s, i) => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="truncate font-medium">${escapeHtml(s.name)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(s.channel)}${s.eventName ? ' · ' + escapeHtml(s.eventName) : ''}${s.artist ? ' · ' + escapeHtml(s.artist) : ''}</div>
+        <div class="text-xs ${badge[s.confidence] || 'text-zinc-500'}">${escapeHtml(s.reason)}</div>
+      </div>
+      <div class="flex flex-shrink-0 items-center gap-2">
+        ${s.eventId ? `<button type="button" class="btn primary lib-match-approve" data-index="${i}">Approve</button>` : ''}
+        <button type="button" class="btn lib-match-edit" data-index="${i}">${s.eventId ? 'Edit' : 'Assign manually'}</button>
+        <button type="button" class="btn lib-match-skip" data-index="${i}" style="color:#fda4af">Skip</button>
+      </div>
+    </div>`).join('');
+
+  document.querySelectorAll('.lib-match-approve').forEach(btn => btn.addEventListener('click', () => approveSuggestion(parseInt(btn.dataset.index, 10))));
+  document.querySelectorAll('.lib-match-edit').forEach(btn => btn.addEventListener('click', () => editSuggestion(parseInt(btn.dataset.index, 10))));
+  document.querySelectorAll('.lib-match-skip').forEach(btn => btn.addEventListener('click', () => skipSuggestion(parseInt(btn.dataset.index, 10))));
+}
+
+async function approveSuggestion(i) {
+  const s = matchSuggestions[i];
+  try {
+    await api('/api/recordings/meta', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: s.path, eventId: s.eventId, setId: s.setId, artist: s.artist }) });
+    toast(`Organized "${s.name}"`, 'info');
+  } catch {
+    return;
+  }
+  matchSuggestions.splice(i, 1);
+  renderMatchList();
+}
+
+function skipSuggestion(i) {
+  matchSuggestions.splice(i, 1);
+  renderMatchList();
+}
+
+async function editSuggestion(i) {
+  const s = matchSuggestions[i];
+  await refresh(); // make sure config.libraryEvents/festivals are current first
+  openAssignModal({ path: s.path, name: s.name, channel: s.channel, source: s.channel, artist: s.artist, start: s.guessedTime, eventId: s.eventId });
+  if (s.eventId && s.setId) {
+    await populateAssignSetOptions();
+    setDropdownValue('assign-set', s.setId);
+  }
+  // Taken off the pending list once the modal opens - assign-save persists
+  // it from there, and re-running Smart Match picks it back up if canceled.
+  matchSuggestions.splice(i, 1);
 }
 
 async function reloadLibraryData() {

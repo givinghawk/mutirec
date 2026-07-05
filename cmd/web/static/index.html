@@ -60,6 +60,14 @@
             <div id="storage" class="space-y-2 text-sm text-zinc-300"></div>
           </div>
           <div class="panel">
+            <div class="panel-head"><h2>Recording status</h2></div>
+            <div id="status-chart"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Storage by source</h2></div>
+            <div id="storage-chart" class="space-y-2"></div>
+          </div>
+          <div class="panel">
             <div class="panel-head"><h2>Starred Sets</h2></div>
             <div id="favorites-panel" class="space-y-2 text-sm text-zinc-300"></div>
           </div>
@@ -228,6 +236,7 @@
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <input id="lib-search" class="input max-w-xs" placeholder="Search artist, channel, or filename" style="margin:0">
+            <button type="button" id="lib-match-open" class="btn">Smart Match</button>
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -235,6 +244,18 @@
         <div id="lib-search-results" class="panel hidden">
           <div class="panel-head"><h2>Search results</h2></div>
           <div id="lib-search-list" class="space-y-2 text-sm"></div>
+        </div>
+
+        <div id="lib-match-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Smart Match</h2>
+            <div class="flex items-center gap-2">
+              <span id="lib-match-count" class="pill"></span>
+              <button type="button" id="lib-match-close" class="btn">Back to Library</button>
+            </div>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Best-guess matches for unsorted recordings, from the timestamp in each filename (or its file date) and its channel name against every event's archived timetable. Nothing is applied until you approve it - correct anything wrong first.</p>
+          <div id="lib-match-list" class="space-y-2 text-sm"></div>
         </div>
 
         <div id="lib-home">
