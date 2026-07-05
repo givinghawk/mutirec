@@ -6,7 +6,8 @@
   <title>Defqon Stream Recorder</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <link href="https://unpkg.com/video.js@8/dist/video-js.min.css" rel="stylesheet">
+  <script src="https://unpkg.com/video.js@8/dist/video.min.js"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="min-h-screen bg-zinc-950 text-zinc-100">
@@ -22,6 +23,7 @@
       </div>
       <nav class="nav-vertical flex flex-1 flex-row flex-wrap gap-2 md:flex-col md:flex-nowrap">
         <button data-view="dashboard" class="nav active">Dashboard</button>
+        <button data-view="watch" class="nav">Watch</button>
         <button data-view="sources" class="nav">Sources</button>
         <button data-view="recordings" class="nav">Recordings</button>
         <button data-view="timetable" class="nav">Timetable</button>
@@ -50,24 +52,20 @@
             </div>
             <div id="source-grid" class="grid gap-3 md:grid-cols-2"></div>
           </div>
-
-          <div class="panel" id="player-panel">
-            <div class="panel-head">
-              <h2>Player <span id="player-now" class="text-sm font-normal text-zinc-400"></span></h2>
-              <label class="flex items-center gap-2 text-sm text-zinc-300"><input id="wave-toggle" type="checkbox" class="accent-red-500"> Waveform</label>
-            </div>
-            <div id="player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
-            <audio id="audio" controls class="hidden w-full"></audio>
-            <video id="video" controls class="mt-3 hidden w-full rounded border border-white/10 bg-black"></video>
-            <div id="wave" class="mt-3 hidden h-20 rounded bg-black/30"></div>
-            <p id="player-empty" class="text-sm text-zinc-400">Nothing playing yet — click "Watch Live" on a source above.</p>
-          </div>
         </div>
 
         <aside class="space-y-4">
           <div class="panel">
             <div class="panel-head"><h2>Storage</h2></div>
             <div id="storage" class="space-y-2 text-sm text-zinc-300"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Recording status</h2></div>
+            <div id="status-chart"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Storage by source</h2></div>
+            <div id="storage-chart" class="space-y-2"></div>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Starred Sets</h2></div>
@@ -78,6 +76,44 @@
             <div id="events" class="max-h-[420px] space-y-2 overflow-auto text-sm"></div>
           </div>
         </aside>
+      </section>
+
+      <section id="watch" class="view hidden space-y-4">
+        <div class="panel">
+          <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div class="custom-dropdown" id="watch-source-dropdown" style="min-width:260px;max-width:360px"></div>
+            <label class="flex items-center gap-2 text-sm text-zinc-300">
+              <input id="watch-visualizer-toggle" type="checkbox" class="accent-red-500" checked> Visualizer
+            </label>
+          </div>
+          <div id="watch-player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
+          <div class="custom-player" id="watch-player">
+            <video id="watch-video" class="video-js custom-player-video" playsinline></video>
+            <div class="custom-player-overlay-btn hidden" id="watch-center-play" aria-label="Play">&#9658;</div>
+            <div id="watch-audio-stage" class="custom-player-audio-stage hidden">
+              <canvas id="watch-visualizer" class="cp-visualizer"></canvas>
+            </div>
+            <div class="custom-player-controls">
+              <button type="button" id="watch-playpause" class="cp-btn cp-playpause" aria-label="Play/Pause">&#9658;</button>
+              <button type="button" id="watch-back10" class="cp-btn" aria-label="Back 10 seconds" title="Back 10s">&#8630;10</button>
+              <button type="button" id="watch-fwd10" class="cp-btn" aria-label="Forward 10 seconds" title="Forward 10s">10&#8631;</button>
+              <span id="watch-time" class="cp-time">LIVE</span>
+              <div class="cp-seek-wrap" id="watch-seek-wrap">
+                <div id="watch-seek-buffer" class="cp-seek-buffer"></div>
+                <div id="watch-seek-progress" class="cp-seek-progress"></div>
+                <input type="range" id="watch-seek" class="cp-seek" min="0" max="1000" step="1" value="1000">
+              </div>
+              <div class="cp-volume-wrap">
+                <button type="button" id="watch-mute" class="cp-btn" aria-label="Mute">&#128266;</button>
+                <input type="range" id="watch-volume" class="cp-volume" min="0" max="1" step="0.01" value="1">
+              </div>
+              <button type="button" id="watch-pip" class="cp-btn" aria-label="Picture in picture" title="Picture in picture">&#8862;</button>
+              <button type="button" id="watch-fullscreen" class="cp-btn" aria-label="Fullscreen">&#9974;</button>
+            </div>
+          </div>
+          <p id="watch-empty" class="mt-3 text-sm text-zinc-400">Nothing selected — pick a source above.</p>
+          <div id="watch-stats" class="mt-4 hidden grid gap-3 sm:grid-cols-2 md:grid-cols-4 text-sm"></div>
+        </div>
       </section>
 
       <section id="sources" class="view hidden space-y-4">
@@ -153,7 +189,7 @@
             <button type="button" id="rec-player-close" class="btn" aria-label="Close">&times;</button>
           </div>
           <div class="custom-player" id="custom-player">
-            <video id="rec-video" class="custom-player-video" playsinline></video>
+            <video id="rec-video" class="video-js custom-player-video" playsinline></video>
             <div class="custom-player-overlay-btn hidden" id="cp-center-play" aria-label="Play">&#9658;</div>
             <div id="cp-audio-stage" class="custom-player-audio-stage hidden">
               <canvas id="cp-visualizer" class="cp-visualizer"></canvas>
@@ -173,14 +209,19 @@
                 <button type="button" id="cp-mute" class="cp-btn" aria-label="Mute">&#128266;</button>
                 <input type="range" id="cp-volume" class="cp-volume" min="0" max="1" step="0.01" value="1">
               </div>
-              <select id="cp-speed" class="cp-speed" title="Playback speed">
-                <option value="0.5">0.5x</option>
-                <option value="0.75">0.75x</option>
-                <option value="1" selected>1x</option>
-                <option value="1.25">1.25x</option>
-                <option value="1.5">1.5x</option>
-                <option value="2">2x</option>
-              </select>
+              <div class="custom-dropdown cp-speed-dropdown" title="Playback speed">
+                <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">1x</span><span class="ml-auto">▼</span></button>
+                <div class="dropdown-menu hidden">
+                  <div class="dropdown-option" data-value="0.5"><div class="font-semibold">0.5x</div></div>
+                  <div class="dropdown-option" data-value="0.75"><div class="font-semibold">0.75x</div></div>
+                  <div class="dropdown-option" data-value="1"><div class="font-semibold">1x</div></div>
+                  <div class="dropdown-option" data-value="1.25"><div class="font-semibold">1.25x</div></div>
+                  <div class="dropdown-option" data-value="1.5"><div class="font-semibold">1.5x</div></div>
+                  <div class="dropdown-option" data-value="2"><div class="font-semibold">2x</div></div>
+                </div>
+                <input type="hidden" id="cp-speed" class="cp-speed" value="1">
+              </div>
+              <button type="button" id="cp-pip" class="cp-btn" aria-label="Picture in picture" title="Picture in picture">&#8862;</button>
               <button type="button" id="cp-fullscreen" class="cp-btn" aria-label="Fullscreen">&#9974;</button>
             </div>
           </div>
@@ -195,6 +236,7 @@
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <input id="lib-search" class="input max-w-xs" placeholder="Search artist, channel, or filename" style="margin:0">
+            <button type="button" id="lib-match-open" class="btn">Smart Match</button>
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -202,6 +244,18 @@
         <div id="lib-search-results" class="panel hidden">
           <div class="panel-head"><h2>Search results</h2></div>
           <div id="lib-search-list" class="space-y-2 text-sm"></div>
+        </div>
+
+        <div id="lib-match-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Smart Match</h2>
+            <div class="flex items-center gap-2">
+              <span id="lib-match-count" class="pill"></span>
+              <button type="button" id="lib-match-close" class="btn">Back to Library</button>
+            </div>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Best-guess matches for unsorted recordings, from the timestamp in each filename (or its file date) and its channel name against every event's archived timetable. Nothing is applied until you approve it - correct anything wrong first.</p>
+          <div id="lib-match-list" class="space-y-2 text-sm"></div>
         </div>
 
         <div id="lib-home">
@@ -274,6 +328,23 @@
         </div>
       </div>
 
+      <!-- Quick-create modal for a Festival ("Event" grouping for live sources) -->
+      <div id="festival-editor-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>New Event</h2>
+            <button type="button" id="festival-editor-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <label>Name<input id="festival-name" class="input" placeholder="e.g. Defqon.1"></label>
+          <label>Color<input id="festival-color" type="color" class="input color-input" value="#ef4444"></label>
+          <p id="festival-editor-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" onclick="closeFestivalEditor()">Cancel</button>
+            <button type="button" id="festival-editor-save" class="btn primary">Create</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Assign/organize a recording modal -->
       <div id="assign-overlay" class="modal-overlay hidden">
         <div class="modal-panel panel">
@@ -281,7 +352,7 @@
             <h2 id="assign-title" class="truncate">Organize recording</h2>
             <button type="button" id="assign-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Event<select id="assign-event" class="input"></select></label>
+          <label>Event<div class="custom-dropdown" id="assign-event-dropdown"></div></label>
           <label>Channel <span class="text-xs text-zinc-500">(optional display name override)</span><input id="assign-channel" class="input" placeholder="defaults to source folder name"></label>
 
           <div class="mb-2 flex gap-2" id="assign-mode-tabs">
@@ -290,7 +361,7 @@
           </div>
 
           <div id="assign-mode-artist" class="assign-mode-panel">
-            <label>Pick a set from this event's archived timetable<select id="assign-set" class="input"><option value="">No timetable imported for this event yet</option></select></label>
+            <label>Pick a set from this event's archived timetable<div class="custom-dropdown" id="assign-set-dropdown"></div></label>
           </div>
           <div id="assign-mode-time" class="assign-mode-panel hidden">
             <label>Approximate time this was recorded<input id="assign-time" type="datetime-local" class="input"></label>
@@ -320,7 +391,13 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Optional: browse a festival's public timetable and import it, instead of building your own by hand. Timetable data provided by <a href="https://timetable.lol" target="_blank" rel="noopener">timetable.lol</a>.</p>
           <div class="flex flex-wrap items-end gap-2">
-            <label class="min-w-[280px] flex-1">Event<select id="tt-lol-event" class="input"><option value="">Loading events…</option></select></label>
+            <label class="min-w-[280px] flex-1">Event
+              <div class="custom-dropdown" id="tt-lol-event-dropdown">
+                <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">Loading events…</span><span class="ml-auto">▼</span></button>
+                <div class="dropdown-menu hidden"></div>
+                <input type="hidden" id="tt-lol-event" class="tt-lol-event" value="">
+              </div>
+            </label>
             <button type="button" id="tt-lol-refresh" class="btn">Refresh list</button>
             <button type="button" id="tt-lol-import" class="btn primary">Import</button>
             <button type="button" id="tt-lol-resync" class="btn hidden">Re-sync linked event</button>
