@@ -70,6 +70,32 @@
   `refresh()`) detects that flag, strips it from the URL, switches to the Sources tab, and
   calls the existing `openWizard()` - no new wizard UI needed, just wiring the existing one
   into first run.
+- **Smart Match: Festival-scoped disambiguation**: `bestMatchSuggestion` previously scored
+  every `LibraryEvent`'s timetable globally, with no notion of which Festival a recording
+  actually belongs to - a real risk once a library spans multiple editions/years that reuse
+  the same stage-name convention (e.g. "RED") or share touring artists, since the
+  channel/date/artist signals alone can't tell those apart. Sources already carry an explicit
+  `FestivalID` (set by hand in the Sources tab's Event picker) and `LibraryEvent` already
+  carries the matching field - just not wired into matching. Added `festivalIDForChannel`
+  (maps a recording's folder/channel back to its source's `FestivalID` via `safeName`) and
+  two new `matchCandidate` signals: `festivalMatch` (+50 score) when a candidate's event
+  belongs to the source's linked Festival, `festivalConflict` (-60 score) when it belongs to
+  a *different* one. A conflict on an otherwise-strong match is called out explicitly rather
+  than silently downgraded ("looks like a strong match, but this recording's source is linked
+  to a different Event... double check"), since that usually means either the source's Event
+  link is wrong or the candidate genuinely is a different show. Covered by
+  `TestBestMatchSuggestion_FestivalScoping` in `match_test.go` (two editions sharing a stage
+  name and artist on the same day; the source's own Festival link breaks the tie either way,
+  and an unlinked source still gets a match rather than being penalized).
+- **Smart Match: split-recording detection**: auto-reconnect (this session's other change)
+  means a single dropped/restarted stream now produces two separate recording files for what
+  was originally one continuous set - and Smart Match would previously suggest both onto the
+  same set with no indication there's a second file to reconcile. Added
+  `flagSharedSetCandidates`, a post-process pass over one batch of suggestions that appends a
+  note to every suggestion whose matched (event, set) pair is also the top pick for another
+  recording in the same batch ("N other recording(s) in this batch also match this same set -
+  likely duplicate files or parts split by a dropped/reconnected stream"). Covered by
+  `TestFlagSharedSetCandidates`.
 
 ## Remaining (in suggested order)
 

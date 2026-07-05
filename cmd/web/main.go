@@ -2008,8 +2008,36 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName, hasTimeOfDay))
 		return nil
 	})
+	flagSharedSetCandidates(suggestions)
 	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].Path < suggestions[j].Path })
 	writeJSON(w, suggestions)
+}
+
+// flagSharedSetCandidates appends a warning to every suggestion whose
+// matched set is also the top pick for another recording in this same
+// batch. A set normally has exactly one recording; two files landing on the
+// same one is almost always either a genuine duplicate, or - since a
+// dropped stream now auto-reconnects mid-recording (see the auto-reconnect
+// backoff in runRecording) - two parts of what was originally one
+// continuous set, split across separate files by the reconnect. Either way
+// the user needs to notice before approving more than one of them onto the
+// same set silently.
+func flagSharedSetCandidates(suggestions []MatchSuggestion) {
+	groups := map[string][]int{}
+	for i, s := range suggestions {
+		if s.SetID == "" {
+			continue
+		}
+		groups[s.EventID+"\x00"+s.SetID] = append(groups[s.EventID+"\x00"+s.SetID], i)
+	}
+	for _, idxs := range groups {
+		if len(idxs) < 2 {
+			continue
+		}
+		for _, i := range idxs {
+			suggestions[i].Reason += fmt.Sprintf(" Note: %d other recording(s) in this batch also match this same set - likely duplicate files or parts split by a dropped/reconnected stream; verify before approving more than one.", len(idxs)-1)
+		}
+	}
 }
 
 // matchCandidate is one archived timetable set considered as a possible
@@ -2019,15 +2047,22 @@ type matchCandidate struct {
 	delta                                    time.Duration
 	contained, stageMatch, sameDay           bool
 	artistScore                              float64
+	festivalMatch, festivalConflict          bool
 }
 
 // candidateScore combines every signal available for one candidate set into
 // a single comparable number, so bestMatchSuggestion can just pick the max
 // rather than hand-rolling a comparator. Roughly, in descending weight: an
 // exact time-window match, the guessed artist name matching the set's name,
-// the folder/channel name matching the archived stage, being on the right
-// calendar day, and - only as a tiebreaker when an actual clock time was
-// parsed - closeness in time.
+// the folder/channel name matching the archived stage, the candidate's event
+// belonging to the same Festival the recording's source is explicitly
+// linked to (an authoritative signal set by the user, not a guess - see
+// festivalIDForChannel), being on the right calendar day, and - only as a
+// tiebreaker when an actual clock time was parsed - closeness in time. A
+// festival conflict (the source is linked to a *different* Festival than
+// this candidate's event) is a strong negative signal, since it usually
+// means this candidate is from an unrelated edition that merely happens to
+// share a stage name or artist.
 func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 	score := 0.0
 	if c.contained {
@@ -2035,6 +2070,12 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 	}
 	if c.stageMatch {
 		score += 40
+	}
+	if c.festivalMatch {
+		score += 50
+	}
+	if c.festivalConflict {
+		score -= 60
 	}
 	if c.sameDay {
 		score += 30
@@ -2048,6 +2089,25 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 		score += 10 / (1 + hours)
 	}
 	return score
+}
+
+// festivalIDForChannel looks up which Festival (if any) the recording's
+// source is explicitly linked to, by matching the recording's folder name
+// (channel) back to a configured source's safeName. This is an authoritative
+// signal - set by hand on the source, in the Sources tab's "Event" picker -
+// rather than a guess, so it's a much stronger disambiguator than stage-name
+// or artist-name similarity when multiple festival editions reuse the same
+// stage names (e.g. "RED", "MAIN STAGE") or share touring artists.
+func festivalIDForChannel(cfg AppConfig, channel string) string {
+	if channel == "" {
+		return ""
+	}
+	for _, src := range cfg.Sources {
+		if src.FestivalID != "" && safeName(src.Name) == channel {
+			return src.FestivalID
+		}
+	}
+	return ""
 }
 
 // bestMatchSuggestion checks every LibraryEvent's archived timetable for the
@@ -2066,10 +2126,14 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	guessedArtist := guessArtistFromName(name, channel)
 	base.GuessedArtist = guessedArtist
 
+	sourceFestivalID := festivalIDForChannel(cfg, channel)
+
 	var best *matchCandidate
 	var bestScore float64
 
 	for _, ev := range cfg.LibraryEvents {
+		festivalMatch := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID == sourceFestivalID
+		festivalConflict := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID != sourceFestivalID
 		for _, stage := range ev.Timetable {
 			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
 			for _, set := range stage.Sets {
@@ -2100,6 +2164,7 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 				cand := matchCandidate{
 					eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name,
 					delta: delta, contained: contained, stageMatch: stageMatch, sameDay: sameDay, artistScore: artistScore,
+					festivalMatch: festivalMatch, festivalConflict: festivalConflict,
 				}
 				if score := candidateScore(cand, hasTimeOfDay); best == nil || score > bestScore {
 					c := cand
@@ -2118,10 +2183,18 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	base.SetID = best.setID
 	base.Stage = best.stage
 	base.Artist = best.artist
+	strongUnderlyingMatch := (best.contained && best.stageMatch) || (best.artistScore >= 0.99 && best.stageMatch && (best.contained || best.sameDay))
 	switch {
+	case best.festivalConflict && strongUnderlyingMatch:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("%s on %s looks like a strong match, but this recording's source is linked to a different Event than \"%s\" - double check the source's Event setting (Sources tab) or approve if this is intentional.", best.artist, best.stage, best.eventName)
 	case best.contained && best.stageMatch:
 		base.Confidence = "high"
-		base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+		if best.festivalMatch {
+			base.Reason = fmt.Sprintf("%s on %s matches the channel, this source's linked Event, and the guessed time falls within this set's window.", best.artist, best.stage)
+		} else {
+			base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+		}
 	case best.artistScore >= 0.99 && best.stageMatch && (best.contained || best.sameDay):
 		base.Confidence = "high"
 		base.Reason = fmt.Sprintf("Filename matches \"%s\" on %s, on the right day.", best.artist, best.stage)

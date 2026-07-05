@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,5 +124,86 @@ func TestBestMatchSuggestion_UserExample(t *testing.T) {
 	}
 	if got.GuessedArtist != "DJ Isaac" {
 		t.Errorf("expected GuessedArtist = %q, got %q", "DJ Isaac", got.GuessedArtist)
+	}
+}
+
+// TestBestMatchSuggestion_FestivalScoping covers two festival editions that
+// happen to reuse the same stage name ("RED") and, in this case, the exact
+// same artist name on the same calendar day - the kind of collision that can
+// happen across a touring artist's appearances at similarly-run festivals.
+// A source explicitly linked to one Festival (via Source.FestivalID) should
+// prefer the matching edition's set over the other, and flag it if the best
+// available candidate belongs to the *wrong* linked Festival.
+func TestBestMatchSuggestion_FestivalScoping(t *testing.T) {
+	cfg := AppConfig{
+		Sources: []Source{
+			{Name: "RED", FestivalID: "fest-a"},
+		},
+		LibraryEvents: []LibraryEvent{
+			{
+				ID: "ev-a", Name: "Festival A 2026", FestivalID: "fest-a",
+				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
+					{ID: "a1", Name: "Wildstylez", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+				}}},
+			},
+			{
+				ID: "ev-b", Name: "Festival B 2026", FestivalID: "fest-b",
+				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
+					{ID: "b1", Name: "Wildstylez", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+				}}},
+			},
+		},
+	}
+
+	name := "Wildstylez_RED_Thursday_25_06_2026.mp3"
+	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
+	got := bestMatchSuggestion(cfg, "RED/"+name, name, "RED", guessed, fromName, hasTOD)
+	if got.EventID != "ev-a" {
+		t.Fatalf("expected the source's linked Festival (ev-a) to win an otherwise-tied match, got EventID=%q Reason=%q", got.EventID, got.Reason)
+	}
+
+	// Now the source is linked to fest-b instead - the *other* candidate
+	// should win, since it's the only one honoring the source's own link.
+	cfg.Sources[0].FestivalID = "fest-b"
+	got = bestMatchSuggestion(cfg, "RED/"+name, name, "RED", guessed, fromName, hasTOD)
+	if got.EventID != "ev-b" {
+		t.Fatalf("expected the source's linked Festival (ev-b) to win, got EventID=%q Reason=%q", got.EventID, got.Reason)
+	}
+
+	// A source with no Festival link at all shouldn't be penalized either
+	// way - it just falls back to whichever candidate scores highest on the
+	// other signals (a tie here, so either is acceptable, but it must not
+	// come back empty).
+	cfg.Sources[0].FestivalID = ""
+	got = bestMatchSuggestion(cfg, "RED/"+name, name, "RED", guessed, fromName, hasTOD)
+	if got.EventID == "" {
+		t.Fatalf("expected a match even without a Festival link, got none (reason: %s)", got.Reason)
+	}
+}
+
+// TestFlagSharedSetCandidates covers the scenario introduced by
+// auto-reconnect: a dropped stream produces two separate recording files for
+// what was originally one continuous set, and both independently match the
+// same set. Both should be flagged so the user notices before organizing
+// both onto the same set unknowingly.
+func TestFlagSharedSetCandidates(t *testing.T) {
+	suggestions := []MatchSuggestion{
+		{Path: "a", EventID: "ev1", SetID: "s1", Reason: "first"},
+		{Path: "b", EventID: "ev1", SetID: "s1", Reason: "second"},
+		{Path: "c", EventID: "ev1", SetID: "s2", Reason: "unrelated"},
+		{Path: "d", EventID: "", SetID: "", Reason: "no match"},
+	}
+	flagSharedSetCandidates(suggestions)
+	if !strings.Contains(suggestions[0].Reason, "other recording") {
+		t.Errorf("expected suggestion 0 to be flagged, got reason: %q", suggestions[0].Reason)
+	}
+	if !strings.Contains(suggestions[1].Reason, "other recording") {
+		t.Errorf("expected suggestion 1 to be flagged, got reason: %q", suggestions[1].Reason)
+	}
+	if strings.Contains(suggestions[2].Reason, "other recording") {
+		t.Errorf("suggestion 2 matches a different set and should not be flagged, got reason: %q", suggestions[2].Reason)
+	}
+	if strings.Contains(suggestions[3].Reason, "other recording") {
+		t.Errorf("suggestion 3 has no set match and should not be flagged, got reason: %q", suggestions[3].Reason)
 	}
 }
