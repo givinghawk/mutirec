@@ -2605,7 +2605,7 @@ function renderEventsHome() {
       if (!grouped.has(o.id)) {
         gridHtml += `<div class="col-span-full flex items-center gap-2 mt-2 mb-1">
           <span class="font-semibold text-sm">${escapeHtml(o.name)}</span>
-          <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(o).replace(/"/g, '&quot;')})">Edit</button>
+          <button class="btn text-xs" onclick="openOrgEditor(${JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;')})">Edit</button>
           <button class="btn danger text-xs" onclick="deleteOrg('${escapeAttr(o.id)}')">Delete</button>
         </div>`;
       }
