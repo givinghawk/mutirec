@@ -336,7 +336,14 @@ func main() {
 	mux := http.NewServeMux()
 	app.routes(mux)
 
-	addr := env("HTTP_ADDR", ":8080")
+	addr := env("HTTP_ADDR", "")
+	if addr == "" {
+		if p := os.Getenv("PORT"); p != "" {
+			addr = ":" + p
+		} else {
+			addr = ":8080"
+		}
+	}
 	server := &http.Server{Addr: addr, Handler: securityHeaders(app.requireAuth(mux))}
 	go func() {
 		<-ctx.Done()
@@ -1633,31 +1640,202 @@ func (a *App) resolveOrCreateLibraryEventLocked(eventName, festivalName string) 
 // that commonly show up in filenames from other sources.
 var filenameTimestampRe = regexp.MustCompile(`(\d{4})-?(\d{2})-?(\d{2})[ _.T-]?(\d{2})?:?(\d{2})?:?(\d{2})?`)
 
-// guessTimeFromName tries to parse a date/time out of a filename, falling
-// back to the file's mtime if nothing looks like a date. Best-effort only -
-// it's a starting point for the match wizard's suggestions, not a guarantee.
-func guessTimeFromName(name string, modTime time.Time) (time.Time, bool) {
-	m := filenameTimestampRe.FindStringSubmatch(name)
+// dateDMYRe matches a day-month-year date separated by underscores, dashes,
+// or dots (e.g. "25_06_2026") - the convention many non-US recording tools
+// (and this app's own suggested Defqon.1-style filenames) use, as opposed to
+// the YYYY-first convention filenameTimestampRe expects.
+var dateDMYRe = regexp.MustCompile(`(?:^|[_\-. ])(\d{1,2})[_\-.](\d{1,2})[_\-.](\d{4})(?:$|[_\-. ])`)
+
+// weekdayAbbrevs maps the first three letters of a weekday name (case
+// folded) to its time.Weekday - used both to disambiguate day/month order
+// in dateDMYRe matches when both values are <=12, and to strip a trailing
+// weekday word (e.g. "..._Thursday_25_06_2026...") when guessing an artist
+// name from the remaining prefix.
+var weekdayAbbrevs = map[string]time.Weekday{
+	"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday, "wed": time.Wednesday,
+	"thu": time.Thursday, "fri": time.Friday, "sat": time.Saturday,
+}
+
+var weekdayRe = regexp.MustCompile(`(?i)\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b`)
+
+// nonWordCharRe splits a filename into rough "words" for artist-name
+// guessing - underscore/dash/dot/space are all treated as separators.
+var nonWordCharRe = regexp.MustCompile(`[_\-. ]+`)
+
+// nonAlnumRe strips everything but letters/digits, used to compare two
+// strings (a guessed stage/artist name and an archived timetable's) in a
+// way that's tolerant of case and punctuation/spacing differences.
+var nonAlnumRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+func validDate(year, month, day int) bool {
+	return year >= 2000 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31
+}
+
+func weekdayFromName(name string) (time.Weekday, bool) {
+	m := weekdayRe.FindStringSubmatch(name)
 	if m == nil {
-		return modTime, false
+		return 0, false
 	}
-	year, _ := strconv.Atoi(m[1])
-	month, _ := strconv.Atoi(m[2])
-	day, _ := strconv.Atoi(m[3])
-	if year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31 {
-		return modTime, false
+	wd, ok := weekdayAbbrevs[strings.ToLower(m[1])]
+	return wd, ok
+}
+
+func isWeekdayWord(word string) bool {
+	w := strings.ToLower(word)
+	if len(w) < 3 {
+		return false
 	}
-	hour, min, sec := 0, 0, 0
-	if m[4] != "" {
-		hour, _ = strconv.Atoi(m[4])
+	_, ok := weekdayAbbrevs[w[:3]]
+	return ok
+}
+
+// guessTimeFromName tries to parse a date (and, where present, a time) out
+// of a filename, falling back to the file's mtime if nothing looks like a
+// date. hasTimeOfDay reports whether an actual clock time was found (as
+// opposed to defaulting to midnight for a date-only filename) - callers use
+// that to decide whether time-of-day should factor into matching at all.
+// Best-effort only - it's a starting point for the match wizard's
+// suggestions, not a guarantee.
+func guessTimeFromName(name string, modTime time.Time) (guessed time.Time, fromName, hasTimeOfDay bool) {
+	if m := filenameTimestampRe.FindStringSubmatch(name); m != nil {
+		year, _ := strconv.Atoi(m[1])
+		month, _ := strconv.Atoi(m[2])
+		day, _ := strconv.Atoi(m[3])
+		if validDate(year, month, day) {
+			hour, min, sec := 0, 0, 0
+			if m[4] != "" {
+				hour, _ = strconv.Atoi(m[4])
+				hasTimeOfDay = true
+			}
+			if m[5] != "" {
+				min, _ = strconv.Atoi(m[5])
+			}
+			if m[6] != "" {
+				sec, _ = strconv.Atoi(m[6])
+			}
+			return time.Date(year, time.Month(month), day, hour, min, sec, 0, modTime.Location()), true, hasTimeOfDay
+		}
 	}
-	if m[5] != "" {
-		min, _ = strconv.Atoi(m[5])
+
+	// Fall back to a day-first date (DD_MM_YYYY / DD-MM-YYYY / DD.MM.YYYY).
+	// When both candidate values are <=12 (so the order is genuinely
+	// ambiguous, e.g. "03_04_2026"), use an embedded weekday name - if
+	// present - to pick whichever ordering actually falls on that weekday;
+	// otherwise default to day-first.
+	if m := dateDMYRe.FindStringSubmatch(name); m != nil {
+		a, _ := strconv.Atoi(m[1])
+		b, _ := strconv.Atoi(m[2])
+		year, _ := strconv.Atoi(m[3])
+		day, month := a, b
+		switch {
+		case a > 12 && b <= 12:
+			day, month = a, b
+		case b > 12 && a <= 12:
+			day, month = b, a
+		default:
+			if wd, ok := weekdayFromName(name); ok {
+				if validDate(year, a, b) && time.Date(year, time.Month(a), b, 0, 0, 0, 0, time.UTC).Weekday() == wd {
+					day, month = b, a
+				} else if validDate(year, b, a) && time.Date(year, time.Month(b), a, 0, 0, 0, 0, time.UTC).Weekday() == wd {
+					day, month = a, b
+				}
+			}
+		}
+		if validDate(year, month, day) {
+			return time.Date(year, time.Month(month), day, 0, 0, 0, 0, modTime.Location()), true, false
+		}
 	}
-	if m[6] != "" {
-		sec, _ = strconv.Atoi(m[6])
+
+	return modTime, false, false
+}
+
+// guessArtistFromName extracts the likely artist name from a filename -
+// everything before the first recognized date token, with a trailing
+// weekday word and/or the recording's own channel name peeled off (both
+// commonly sit between the artist and the date, e.g.
+// "DJ_Isaac_BLUE_Thursday_25_06_2026_..."). Best-effort: only used to
+// boost/break ties in match scoring, never applied without a human
+// approving the suggestion.
+func guessArtistFromName(name, channel string) string {
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	cut := len(base)
+	if loc := filenameTimestampRe.FindStringIndex(base); loc != nil && loc[0] < cut {
+		cut = loc[0]
 	}
-	return time.Date(year, time.Month(month), day, hour, min, sec, 0, modTime.Location()), true
+	if loc := dateDMYRe.FindStringIndex(base); loc != nil && loc[0] < cut {
+		cut = loc[0]
+	}
+	words := nonWordCharRe.Split(strings.Trim(base[:cut], "_-. "), -1)
+	for len(words) > 0 {
+		last := words[len(words)-1]
+		if last == "" || isWeekdayWord(last) || (channel != "" && strings.EqualFold(last, channel)) {
+			words = words[:len(words)-1]
+			continue
+		}
+		break
+	}
+	return strings.Join(words, " ")
+}
+
+// normalizeArtistWords lowercases and tokenizes a name for comparison,
+// dropping generic filler words ("dj", "b2b", "vs") that shouldn't count
+// toward or against a match.
+func normalizeArtistWords(s string) []string {
+	s = nonAlnumRe.ReplaceAllString(strings.ToLower(s), " ")
+	var out []string
+	for _, w := range strings.Fields(s) {
+		if w == "dj" || w == "b2b" || w == "vs" {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// artistSimilarity gives a rough 0..1 score for how closely a guessed
+// artist name (parsed from a filename) matches an archived timetable set's
+// name, tolerant of case, punctuation, and extra words on either side (e.g.
+// "DJ Isaac" vs "DJ Isaac B2B Adaro" still scores 1.0, not diluted by the
+// combo's extra name).
+func artistSimilarity(guessed, setName string) float64 {
+	g := normalizeArtistWords(guessed)
+	s := normalizeArtistWords(setName)
+	if len(g) == 0 || len(s) == 0 {
+		return 0
+	}
+	gWords := make(map[string]bool, len(g))
+	for _, w := range g {
+		gWords[w] = true
+	}
+	matches := 0
+	for _, w := range s {
+		if gWords[w] {
+			matches++
+		}
+	}
+	shorter := len(g)
+	if len(s) < shorter {
+		shorter = len(s)
+	}
+	return float64(matches) / float64(shorter)
+}
+
+// compactNormalize strips everything but letters/digits and lowercases, so
+// two names can be compared regardless of separator style (underscore,
+// dash, space) - e.g. "Sacred_Oath" and "Sacred Oath" both become
+// "sacredoath".
+func compactNormalize(s string) string {
+	return nonAlnumRe.ReplaceAllString(strings.ToLower(s), "")
+}
+
+// filenameContainsStage reports whether an archived timetable stage's own
+// name appears in the filename - useful when a recording's folder/channel
+// name is just a video-feed label (e.g. "BLUE") that doesn't match the
+// festival's real stage name, but the real stage name was still baked into
+// the filename by whatever tool produced it (e.g. "..._Sacred_Oath_...").
+func filenameContainsStage(filename, stageName string) bool {
+	stage := compactNormalize(stageName)
+	return stage != "" && strings.Contains(compactNormalize(filename), stage)
 }
 
 // MatchSuggestion is one recording's best-guess event/set match, offered to
@@ -1668,6 +1846,7 @@ type MatchSuggestion struct {
 	Channel         string `json:"channel"`
 	GuessedTime     string `json:"guessedTime,omitempty"`
 	GuessedFromName bool   `json:"guessedFromName"`
+	GuessedArtist   string `json:"guessedArtist,omitempty"`
 	EventID         string `json:"eventId,omitempty"`
 	EventName       string `json:"eventName,omitempty"`
 	SetID           string `json:"setId,omitempty"`
@@ -1709,8 +1888,8 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 			channel = parts[0]
 		}
 		name := filepath.Base(p)
-		guessed, fromName := guessTimeFromName(name, info.ModTime())
-		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName))
+		guessed, fromName, hasTimeOfDay := guessTimeFromName(name, info.ModTime())
+		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName, hasTimeOfDay))
 		return nil
 	})
 	sort.Slice(suggestions, func(i, j int) bool { return suggestions[i].Path < suggestions[j].Path })
@@ -1718,27 +1897,69 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 }
 
 // matchCandidate is one archived timetable set considered as a possible
-// match for a recording, scored by bestMatchSuggestion/betterCandidate.
+// match for a recording, scored by candidateScore.
 type matchCandidate struct {
-	eventID, eventName, setID, stage, artist string
-	delta                                    time.Duration
-	contained, stageMatch                    bool
+	eventID, eventName, setID, stage, artist           string
+	delta                                              time.Duration
+	contained, stageMatch, filenameStageMatch, sameDay bool
+	artistScore                                        float64
+}
+
+// candidateScore combines every signal available for one candidate set into
+// a single comparable number, so bestMatchSuggestion can just pick the max
+// rather than hand-rolling a comparator. Roughly, in descending weight: an
+// exact time-window match, a filename-embedded stage name matching the
+// archived stage's own name (stronger than a folder/channel-name guess,
+// since it's the festival's real stage name rather than a video-feed
+// label), the guessed artist name matching the set's name, a folder/channel
+// name match, being on the right calendar day, and - only as a tiebreaker
+// when an actual clock time was parsed - closeness in time.
+func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
+	score := 0.0
+	if c.contained {
+		score += 100
+	}
+	if c.filenameStageMatch {
+		score += 60
+	}
+	if c.stageMatch {
+		score += 40
+	}
+	if c.sameDay {
+		score += 30
+	}
+	score += c.artistScore * 70
+	if hasTimeOfDay && !c.contained {
+		hours := c.delta.Hours()
+		if hours < 0 {
+			hours = 0
+		}
+		score += 10 / (1 + hours)
+	}
+	return score
 }
 
 // bestMatchSuggestion checks every LibraryEvent's archived timetable for the
-// set whose stage name best matches this recording's channel and whose
-// [start,end) window best contains (or is closest to) the guessed time.
-func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time.Time, fromName bool) MatchSuggestion {
+// set that best matches this recording, using whichever signals are
+// available: the channel/stage name (from its folder, and/or found baked
+// into the filename itself), the guessed artist name parsed from the
+// filename, and the guessed date/time (exact window containment if the
+// filename included a clock time, otherwise same-calendar-day only).
+func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time.Time, fromName, hasTimeOfDay bool) MatchSuggestion {
 	base := MatchSuggestion{Path: path, Name: name, Channel: channel, GuessedFromName: fromName, Confidence: "none", Reason: "Could not find a matching set - assign manually."}
 	if fromName {
 		base.GuessedTime = guessed.Format(time.RFC3339)
 	}
+	guessedArtist := guessArtistFromName(name, channel)
+	base.GuessedArtist = guessedArtist
 
 	var best *matchCandidate
+	var bestScore float64
 
 	for _, ev := range cfg.LibraryEvents {
 		for _, stage := range ev.Timetable {
 			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
+			filenameStageMatch := filenameContainsStage(name, stage.Stage)
 			for _, set := range stage.Sets {
 				start, errS := time.Parse(time.RFC3339, set.Start)
 				end, errE := time.Parse(time.RFC3339, set.End)
@@ -1748,23 +1969,31 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 				if errE != nil {
 					end = start.Add(time.Hour)
 				}
-				contained := !guessed.Before(start) && guessed.Before(end)
+				sameDay := fromName && guessed.Year() == start.Year() && guessed.Month() == start.Month() && guessed.Day() == start.Day()
+				contained := hasTimeOfDay && !guessed.Before(start) && guessed.Before(end)
 				var delta time.Duration
-				if contained {
-					delta = 0
-				} else {
+				if hasTimeOfDay && !contained {
 					delta = start.Sub(guessed)
 					if delta < 0 {
 						delta = -delta
 					}
-					if end.Sub(guessed) < delta && end.Sub(guessed) > 0 {
-						delta = end.Sub(guessed)
+					if d := end.Sub(guessed); d < delta && d > 0 {
+						delta = d
 					}
 				}
-				cand := matchCandidate{eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name, delta: delta, contained: contained, stageMatch: stageMatch}
-				if best == nil || betterCandidate(cand, *best) {
+				artistScore := 0.0
+				if guessedArtist != "" {
+					artistScore = artistSimilarity(guessedArtist, set.Name)
+				}
+				cand := matchCandidate{
+					eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name,
+					delta: delta, contained: contained, stageMatch: stageMatch, filenameStageMatch: filenameStageMatch,
+					sameDay: sameDay, artistScore: artistScore,
+				}
+				if score := candidateScore(cand, hasTimeOfDay); best == nil || score > bestScore {
 					c := cand
 					best = &c
+					bestScore = score
 				}
 			}
 		}
@@ -1778,34 +2007,39 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	base.SetID = best.setID
 	base.Stage = best.stage
 	base.Artist = best.artist
+	matchedStage := best.stageMatch || best.filenameStageMatch
 	switch {
-	case best.contained && best.stageMatch:
+	case best.contained && matchedStage:
 		base.Confidence = "high"
-		base.Reason = fmt.Sprintf("%s on %s matches the channel and the guessed time falls within this set's window.", best.artist, best.stage)
+		base.Reason = fmt.Sprintf("%s on %s matches the channel/stage and the guessed time falls within this set's window.", best.artist, best.stage)
+	case best.artistScore >= 0.99 && (best.contained || best.sameDay):
+		base.Confidence = "high"
+		if matchedStage {
+			base.Reason = fmt.Sprintf("Filename matches \"%s\" on %s, on the right day.", best.artist, best.stage)
+		} else {
+			base.Reason = fmt.Sprintf("Filename matches \"%s\" on the right day.", best.artist)
+		}
 	case best.contained:
 		base.Confidence = "medium"
-		base.Reason = fmt.Sprintf("Guessed time falls within %s's window, but the stage name doesn't match \"%s\" - double check.", best.artist, channel)
-	case best.stageMatch && best.delta <= 30*time.Minute:
+		base.Reason = fmt.Sprintf("Guessed time falls within %s's window, but the channel doesn't match \"%s\" - double check.", best.artist, channel)
+	case best.artistScore >= 0.5 && best.sameDay:
 		base.Confidence = "medium"
-		base.Reason = fmt.Sprintf("Channel matches %s; closest set by time (%s away).", best.stage, best.delta.Round(time.Minute))
+		base.Reason = fmt.Sprintf("Filename partially matches \"%s\" on %s, playing that day - double check.", best.artist, best.stage)
+	case matchedStage && hasTimeOfDay && best.delta <= 30*time.Minute:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("Channel/stage matches %s; closest set by time (%s away).", best.stage, best.delta.Round(time.Minute))
+	case matchedStage && best.sameDay:
+		base.Confidence = "medium"
+		base.Reason = fmt.Sprintf("Channel/stage matches %s, and it's the right day - verify the exact set.", best.stage)
 	default:
 		base.Confidence = "low"
-		base.Reason = fmt.Sprintf("Closest guess: %s on %s, %s away - verify before approving.", best.artist, best.stage, best.delta.Round(time.Minute))
+		if hasTimeOfDay {
+			base.Reason = fmt.Sprintf("Closest guess: %s on %s, %s away - verify before approving.", best.artist, best.stage, best.delta.Round(time.Minute))
+		} else {
+			base.Reason = fmt.Sprintf("Closest guess: %s on %s - verify before approving.", best.artist, best.stage)
+		}
 	}
 	return base
-}
-
-// betterCandidate prefers a contained+stage-matching set over anything
-// else, then contained over not, then stage match over not, then smaller
-// time delta.
-func betterCandidate(a, b matchCandidate) bool {
-	if a.contained != b.contained {
-		return a.contained
-	}
-	if a.stageMatch != b.stageMatch {
-		return a.stageMatch
-	}
-	return a.delta < b.delta
 }
 
 // handleLibraryEvents lists or creates LibraryEvents - the "album" grouping

@@ -4,8 +4,9 @@
     {
       "name": "auto-recorder",
       "runtimeExecutable": "go",
-      "runtimeArgs": ["run", "./cmd/web/", "-addr", ":8080"],
-      "port": 8080
+      "runtimeArgs": ["run", "./cmd/web/"],
+      "port": 8080,
+      "autoPort": true
     }
   ]
 }

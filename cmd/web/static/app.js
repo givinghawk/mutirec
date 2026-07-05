@@ -1529,6 +1529,7 @@ function renderMatchList() {
       <div class="min-w-0">
         <div class="truncate font-medium">${escapeHtml(s.name)}</div>
         <div class="text-xs text-zinc-400">${escapeHtml(s.channel)}${s.eventName ? ' · ' + escapeHtml(s.eventName) : ''}${s.artist ? ' · ' + escapeHtml(s.artist) : ''}</div>
+        ${s.guessedArtist ? `<div class="text-xs text-zinc-500">Filename suggests: "${escapeHtml(s.guessedArtist)}"</div>` : ''}
         <div class="text-xs ${badge[s.confidence] || 'text-zinc-500'}">${escapeHtml(s.reason)}</div>
       </div>
       <div class="flex flex-shrink-0 items-center gap-2">
@@ -2681,18 +2682,22 @@ function renderEvFestivalDetail(festivalId, libEventId) {
     ? (state.sources || []).filter(s => s.festivalId === festival.id)
     : [];
   $('ev-detail-sources').innerHTML = sources.length
-    ? sources.map(s => `<div class="flex items-center gap-2 py-1">
+    ? sources.map(s => `<div class="ev-detail-source flex items-center gap-2 py-1 cursor-pointer hover:text-white" data-id="${escapeAttr(s.id)}" title="Jump to this source">
         <span class="inline-block w-2 h-2 rounded-full flex-shrink-0" style="background:${escapeAttr(s.color || '#71717a')}"></span>
         <span>${escapeHtml(s.name)}</span>
         <span class="text-xs text-zinc-500 ml-auto">${escapeHtml(s.status || '')}</span>
       </div>`).join('')
     : '<p class="text-zinc-400">No live sources linked.</p>';
+  document.querySelectorAll('.ev-detail-source').forEach(el => el.addEventListener('click', () => {
+    highlightSourceId = el.dataset.id;
+    document.querySelector('.nav[data-view="sources"]').click();
+  }));
 
   // Editions (library events)
   $('ev-detail-editions').innerHTML = editions.length
     ? editions.map(e => {
         const eRecCount = recordings.filter(r => r.eventId === e.id).length;
-        return `<div class="flex items-center justify-between rounded border border-white/10 px-3 py-2 cursor-pointer hover:border-white/20" onclick="openLibraryEvent('${escapeAttr(e.id)}'); document.querySelector('.nav[data-view=\\'recordings\\']').click()">
+        return `<div class="ev-detail-edition flex items-center justify-between rounded border border-white/10 px-3 py-2 cursor-pointer hover:border-white/20" data-id="${escapeAttr(e.id)}">
           <div>
             <div class="font-medium">${escapeHtml(e.name)}</div>
             <div class="text-xs text-zinc-400">${escapeHtml(e.startDate || String(e.year || ''))} · ${eRecCount} recording${eRecCount === 1 ? '' : 's'}</div>
@@ -2701,6 +2706,10 @@ function renderEvFestivalDetail(festivalId, libEventId) {
         </div>`;
       }).join('')
     : '<p class="text-zinc-400">No recording archives linked to this event.</p>';
+  document.querySelectorAll('.ev-detail-edition').forEach(el => el.addEventListener('click', () => {
+    openLibraryEvent(el.dataset.id);
+    document.querySelector('.nav[data-view="recordings"]').click();
+  }));
 
   // Live timetable stages
   const timetable = config.timetable || [];
