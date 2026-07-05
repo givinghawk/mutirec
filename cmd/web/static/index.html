@@ -26,6 +26,7 @@
         <button data-view="recordings" class="nav">Recordings</button>
         <button data-view="timetable" class="nav">Timetable</button>
         <button data-view="settings" class="nav">Settings</button>
+        <button data-view="diagnostics" class="nav">Diagnostics</button>
         <button data-view="help" class="nav">Help</button>
       </nav>
       <div class="mt-auto flex flex-col gap-2 pt-2">
@@ -145,15 +146,167 @@
         </div>
       </div>
 
-      <section id="recordings" class="view hidden">
-        <div class="panel">
+      <div id="recording-player-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel player-modal-panel">
           <div class="panel-head">
-            <h2>Recordings</h2>
-            <input id="recordings-filter" class="input max-w-xs" placeholder="Filter by source or filename" style="margin:0">
+            <h2 id="rec-player-title" class="truncate">Recording</h2>
+            <button type="button" id="rec-player-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <div id="recordings-list" class="space-y-2 text-sm"></div>
+          <div class="custom-player" id="custom-player">
+            <video id="rec-video" class="custom-player-video" playsinline></video>
+            <div class="custom-player-overlay-btn hidden" id="cp-center-play" aria-label="Play">&#9658;</div>
+            <div class="custom-player-controls">
+              <button type="button" id="cp-playpause" class="cp-btn cp-playpause" aria-label="Play/Pause">&#9658;</button>
+              <button type="button" id="cp-back10" class="cp-btn" aria-label="Back 10 seconds" title="Back 10s">&#8630;10</button>
+              <button type="button" id="cp-fwd10" class="cp-btn" aria-label="Forward 10 seconds" title="Forward 10s">10&#8631;</button>
+              <span id="cp-time" class="cp-time">0:00 / 0:00</span>
+              <div class="cp-seek-wrap" id="cp-seek-wrap">
+                <div id="cp-seek-buffer" class="cp-seek-buffer"></div>
+                <div id="cp-seek-progress" class="cp-seek-progress"></div>
+                <input type="range" id="cp-seek" class="cp-seek" min="0" max="1000" step="1" value="0">
+              </div>
+              <div class="cp-volume-wrap">
+                <button type="button" id="cp-mute" class="cp-btn" aria-label="Mute">&#128266;</button>
+                <input type="range" id="cp-volume" class="cp-volume" min="0" max="1" step="0.01" value="1">
+              </div>
+              <select id="cp-speed" class="cp-speed" title="Playback speed">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+              </select>
+              <button type="button" id="cp-fullscreen" class="cp-btn" aria-label="Fullscreen">&#9974;</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section id="recordings" class="view hidden space-y-4">
+        <div class="panel lib-toolbar flex flex-wrap items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <button type="button" id="lib-back" class="btn hidden">&larr; Events</button>
+            <h2 id="lib-title" class="truncate text-base font-semibold">Recordings Library</h2>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <input id="lib-search" class="input max-w-xs" placeholder="Search artist, channel, or filename" style="margin:0">
+            <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
+          </div>
+        </div>
+
+        <div id="lib-search-results" class="panel hidden">
+          <div class="panel-head"><h2>Search results</h2></div>
+          <div id="lib-search-list" class="space-y-2 text-sm"></div>
+        </div>
+
+        <div id="lib-home">
+          <div class="panel">
+            <div class="panel-head"><h2>Events</h2></div>
+            <div id="lib-events-grid" class="grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4"></div>
+          </div>
+        </div>
+
+        <div id="lib-event-view" class="hidden space-y-4">
+          <div class="panel lib-event-banner" id="lib-event-banner">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <h2 id="lib-event-name" class="truncate text-xl font-bold"></h2>
+                <p id="lib-event-dates" class="text-sm text-zinc-300"></p>
+                <p id="lib-event-desc" class="mt-1 text-sm text-zinc-400"></p>
+              </div>
+              <div class="flex flex-shrink-0 flex-wrap gap-2">
+                <button type="button" id="lib-event-edit" class="btn hidden">Edit event</button>
+                <button type="button" id="lib-event-timetable" class="btn hidden">Import timetable</button>
+                <button type="button" id="lib-event-delete" class="btn hidden" style="color:#fda4af">Delete event</button>
+              </div>
+            </div>
+          </div>
+          <div id="lib-channel-rows" class="space-y-6"></div>
         </div>
       </section>
+
+      <!-- Event create/edit modal -->
+      <div id="event-editor-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2 id="event-editor-title">New Event</h2>
+            <button type="button" id="event-editor-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <label>Name<input id="ev-name" class="input" placeholder="e.g. Defqon.1 2022"></label>
+          <div class="grid gap-2 md:grid-cols-3">
+            <label>Year<input id="ev-year" type="number" class="input" placeholder="2022"></label>
+            <label>Start date<input id="ev-start" type="date" class="input"></label>
+            <label>End date<input id="ev-end" type="date" class="input"></label>
+          </div>
+          <div class="grid gap-2 md:grid-cols-2">
+            <label>Color<input id="ev-color" type="color" class="input color-input" value="#ef4444"></label>
+            <label>Cover image URL<input id="ev-cover" class="input" placeholder="https://..."></label>
+          </div>
+          <label>Description<textarea id="ev-desc" class="input" rows="2"></textarea></label>
+          <p id="event-editor-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" onclick="closeEventEditor()">Cancel</button>
+            <button type="button" id="event-editor-save" class="btn primary">Save Event</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Archived timetable import modal -->
+      <div id="event-timetable-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Import archived timetable</h2>
+            <button type="button" id="event-timetable-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Paste the timetable JSON for this event (same per-stage/sets shape as the live timetable import). This replaces any timetable previously imported for this event and is used to match recordings to an artist/set below.</p>
+          <textarea id="event-timetable-json" class="codebox h-64" placeholder='[{"stage":"RED","url":"...","sets":[[2022,6,24,13,0,"Opening Ceremony"], ...]}]'></textarea>
+          <p id="event-timetable-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <p id="event-timetable-status" class="mt-1 text-sm text-emerald-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" onclick="closeEventTimetableImport()">Close</button>
+            <button type="button" id="event-timetable-import-btn" class="btn primary">Import</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Assign/organize a recording modal -->
+      <div id="assign-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2 id="assign-title" class="truncate">Organize recording</h2>
+            <button type="button" id="assign-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <label>Event<select id="assign-event" class="input"></select></label>
+          <label>Channel <span class="text-xs text-zinc-500">(optional display name override)</span><input id="assign-channel" class="input" placeholder="defaults to source folder name"></label>
+
+          <div class="mb-2 flex gap-2" id="assign-mode-tabs">
+            <button type="button" class="btn assign-mode-btn active" data-mode="artist">By artist / set</button>
+            <button type="button" class="btn assign-mode-btn" data-mode="time">By time</button>
+          </div>
+
+          <div id="assign-mode-artist" class="assign-mode-panel">
+            <label>Pick a set from this event's archived timetable<select id="assign-set" class="input"><option value="">No timetable imported for this event yet</option></select></label>
+          </div>
+          <div id="assign-mode-time" class="assign-mode-panel hidden">
+            <label>Approximate time this was recorded<input id="assign-time" type="datetime-local" class="input"></label>
+            <button type="button" id="assign-find-btn" class="btn mb-2">Find closest set</button>
+            <p id="assign-find-result" class="mb-2 text-sm text-zinc-400"></p>
+          </div>
+
+          <div class="grid gap-2 md:grid-cols-1">
+            <label>Artist / set name<input id="assign-artist" class="input"></label>
+          </div>
+          <p id="assign-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-between gap-2">
+            <button type="button" id="assign-clear" class="btn" style="color:#fda4af">Unassign</button>
+            <div class="flex gap-2">
+              <button type="button" class="btn" onclick="closeAssignModal()">Cancel</button>
+              <button type="button" id="assign-save" class="btn primary">Save</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <section id="timetable" class="view hidden space-y-4">
         <div class="panel">
@@ -276,6 +429,17 @@
           </div>
         </div>
         <button id="save-settings" class="btn primary mt-4">Save Settings</button>
+      </section>
+
+      <section id="diagnostics" class="view hidden">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>System Check</h2>
+            <button type="button" id="diag-rerun" class="btn">Re-run check</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Confirms ffmpeg/ffprobe/streamlink are installed and working, the internet is reachable, storage directories are writable, and how this machine's CPU/memory/disk compare to what the recorder needs.</p>
+          <div id="diag-body"><p class="text-sm text-zinc-400">Checking…</p></div>
+        </div>
       </section>
 
       <section id="help" class="view hidden">

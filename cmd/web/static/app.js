@@ -157,6 +157,42 @@ function renderFavoritesPanel() {
     </div>`).join('');
 }
 
+function setupCustomDropdowns() {
+  document.querySelectorAll('.custom-dropdown').forEach(dropdown => {
+    const toggle = dropdown.querySelector('.dropdown-toggle');
+    const menu = dropdown.querySelector('.dropdown-menu');
+    const hiddenInput = dropdown.querySelector('input[type="hidden"]');
+    const sourceRow = dropdown.closest('.source-row');
+
+    toggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
+        if (m !== menu) m.classList.add('hidden');
+      });
+      menu.classList.toggle('hidden');
+    });
+
+    dropdown.querySelectorAll('.dropdown-option').forEach(option => {
+      option.addEventListener('click', () => {
+        const value = option.dataset.value;
+        const label = option.querySelector('.font-semibold').textContent;
+        hiddenInput.value = value;
+        toggle.textContent = label + '▼';
+        menu.classList.add('hidden');
+        if (sourceRow) markCardUnsaved(sourceRow);
+      });
+    });
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.custom-dropdown')) {
+      document.querySelectorAll('.custom-dropdown .dropdown-menu').forEach(m => {
+        m.classList.add('hidden');
+      });
+    }
+  });
+}
+
 function renderEditors() {
   if (!$('source-editor').dataset.loaded) {
     $('source-editor').dataset.loaded = '1';
@@ -208,7 +244,62 @@ function drawSourceEditor() {
           <label>Type<select class="input src-type"><option ${sel(s.type,'youtube')}>youtube</option><option ${sel(s.type,'twitch')}>twitch</option><option ${sel(s.type,'http')}>http</option></select></label>
           <label>URL<input class="input src-url" value="${escapeAttr(s.url)}"></label>
           <label>Quality<input class="input src-quality" value="${escapeAttr(s.quality || 'best')}"></label>
-          <label>Container<input class="input src-container" value="${escapeAttr(s.container || 'mkv')}"></label>
+          <label>Container
+            <div class="custom-dropdown" data-field="src-container" data-value="${escapeAttr(s.container || 'mkv')}">
+              <button type="button" class="dropdown-toggle input">${s.container || 'mkv'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="mkv">
+                  <div class="font-semibold">Matroska (MKV)</div>
+                  <div class="text-xs text-zinc-400">Best quality, flexible</div>
+                </div>
+                <div class="dropdown-option" data-value="mp4">
+                  <div class="font-semibold">MP4</div>
+                  <div class="text-xs text-zinc-400">Streaming-friendly</div>
+                </div>
+                <div class="dropdown-option" data-value="ts">
+                  <div class="font-semibold">MPEG-TS (.ts)</div>
+                  <div class="text-xs text-zinc-400">Live playback, low overhead</div>
+                </div>
+                <div class="dropdown-option" data-value="m4a">
+                  <div class="font-semibold">M4A</div>
+                  <div class="text-xs text-zinc-400">Audio only, compact</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-container" value="${escapeAttr(s.container || 'mkv')}">
+            </div>
+          </label>
+          <label>Transcode
+            <div class="custom-dropdown" data-field="src-transcode" data-value="${s.transcode ? 'yes' : 'no'}">
+              <button type="button" class="dropdown-toggle input">${s.transcode ? 'Yes (re-encode)' : 'No (copy codec)'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="no">
+                  <div class="font-semibold">No - Copy codec</div>
+                  <div class="text-xs text-zinc-400">Fastest, lowest CPU</div>
+                </div>
+                <div class="dropdown-option" data-value="yes">
+                  <div class="font-semibold">Yes - Re-encode</div>
+                  <div class="text-xs text-zinc-400">H.264/AAC, more compatible</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-transcode" value="${s.transcode ? 'yes' : 'no'}">
+            </div>
+          </label>
+          <label>Live Rewind
+            <div class="custom-dropdown" data-field="src-liverewind" data-value="${s.liveRewind ? 'hls' : 'none'}">
+              <button type="button" class="dropdown-toggle input">${s.liveRewind ? 'HLS Buffer' : 'Disabled'}<span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="none">
+                  <div class="font-semibold">Disabled</div>
+                  <div class="text-xs text-zinc-400">No live playback</div>
+                </div>
+                <div class="dropdown-option" data-value="hls">
+                  <div class="font-semibold">HLS Buffer</div>
+                  <div class="text-xs text-zinc-400">Scrubbing, extra CPU</div>
+                </div>
+              </div>
+              <input type="hidden" class="src-liverewind" value="${s.liveRewind ? 'hls' : 'none'}">
+            </div>
+          </label>
           <label>HW accel<select class="input src-hw"><option ${sel(s.hardwareAccel,'')}>none</option><option ${sel(s.hardwareAccel,'cuda')}>cuda</option><option ${sel(s.hardwareAccel,'qsv')}>qsv</option><option ${sel(s.hardwareAccel,'vaapi')}>vaapi</option></select></label>
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
@@ -216,8 +307,6 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-enabled" type="checkbox" ${s.enabled ? 'checked' : ''}> Enabled</label>
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
-          <label class="inline-flex items-center gap-2"><input class="src-transcode" type="checkbox" ${s.transcode ? 'checked' : ''}> Transcode</label>
-          <label class="inline-flex items-center gap-2" title="Lets viewers scrub backward while this source is recording live, using a rolling HLS buffer. Uses extra CPU for the transcode."><input class="src-liverewind" type="checkbox" ${s.liveRewind ? 'checked' : ''}> Live rewind</label>
         </div>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
@@ -233,6 +322,8 @@ function drawSourceEditor() {
   document.querySelectorAll('.source-row').forEach(el => {
     el.querySelectorAll('input, select').forEach(field => field.addEventListener('input', () => markCardUnsaved(el)));
   });
+
+  setupCustomDropdowns();
 
   if (highlightSourceId) {
     openSourceIds.add(highlightSourceId);
@@ -263,8 +354,8 @@ function readSourceCard(el) {
     enabled: el.querySelector('.src-enabled').checked,
     record: el.querySelector('.src-record').checked,
     audioOnly: el.querySelector('.src-audio').checked,
-    transcode: el.querySelector('.src-transcode').checked,
-    liveRewind: el.querySelector('.src-liverewind').checked,
+    transcode: el.querySelector('.src-transcode').value === 'yes',
+    liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value
   };
 }
@@ -478,8 +569,49 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   // showing whatever was rendered (possibly stale) the last time it was open.
   $('source-editor').dataset.loaded = '';
   await refresh();
-  if (b.dataset.view === 'recordings') loadRecordings();
+  if (b.dataset.view === 'recordings') initLibrary();
+  if (b.dataset.view === 'diagnostics') runDiagnostics();
 });
+
+// --- Diagnostics (system check) ---
+
+function renderDiagnostics(container, report) {
+  const icon = s => s === 'pass' ? '&#10003;' : s === 'warn' ? '!' : '&#10007;';
+  const banner = report.overallOk
+    ? '<div class="syscheck-banner ok">Everything required is in place.</div>'
+    : '<div class="syscheck-banner issues">Some required checks are failing — recording may not work correctly until these are fixed.</div>';
+  const items = report.checks.map(c => `
+    <div class="syscheck-item syscheck-${escapeAttr(c.status)}">
+      <span class="syscheck-icon">${icon(c.status)}</span>
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(c.label)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(c.detail)}</div>
+      </div>
+    </div>`).join('');
+  const rows = report.requirements.map(req => `
+    <tr class="req-${escapeAttr(req.status)}">
+      <td>${escapeHtml(req.label)}</td><td>${escapeHtml(req.min)}</td><td>${escapeHtml(req.recommended)}</td><td>${escapeHtml(req.value)}</td>
+    </tr>`).join('');
+  container.innerHTML = `
+    ${banner}
+    <div class="syscheck-list">${items}</div>
+    <table class="syscheck-req-table">
+      <thead><tr><th>Hardware</th><th>Minimum</th><th>Recommended</th><th>Your system</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function runDiagnostics() {
+  const body = $('diag-body');
+  body.innerHTML = '<p class="text-sm text-zinc-400">Checking…</p>';
+  try {
+    const report = await api('/api/system-check');
+    renderDiagnostics(body, report);
+  } catch {
+    body.innerHTML = '<p class="text-sm text-rose-300">Could not run the system check — see the notification for details.</p>';
+  }
+}
+$('diag-rerun').onclick = runDiagnostics;
 
 $('logout-btn').onclick = async () => {
   try { await api('/api/logout', { method: 'POST' }); } catch { /* ignore */ }
@@ -834,32 +966,599 @@ function renderLinkedBadge() {
   $('tt-lol-unlink').classList.remove('hidden');
 }
 
-async function loadRecordings() {
+// --- Recordings Library (Events -> Channels -> Sets) ---
+//
+// Recordings are plain files scanned from FinishedDir (via /api/recordings),
+// enriched server-side with whatever RecordingMeta has been assigned to them
+// (eventId/channel/setId/artist/start/end). LibraryEvents themselves live in
+// config.libraryEvents, so no separate fetch is needed for those - only the
+// per-file metadata and each event's *archived* timetable (fetched lazily)
+// require their own requests.
+
+const UNSORTED_ID = '__unsorted__';
+let libView = 'home'; // 'home' | 'event'
+let libCurrentEventId = null;
+let libEditingEventId = null;
+let libTimetableEventId = null;
+let libAssignTarget = null;
+let libEventTimetableCache = {};
+
+async function initLibrary() {
   try {
     recordings = await api('/api/recordings');
   } catch {
     return;
   }
-  renderRecordings();
+  renderLibrary();
 }
 
-function renderRecordings() {
-  const filter = ($('recordings-filter').value || '').toLowerCase();
-  const rows = recordings.filter(r => !filter || r.name.toLowerCase().includes(filter) || (r.source || '').toLowerCase().includes(filter));
-  if (!rows.length) {
-    $('recordings-list').innerHTML = `<p class="text-zinc-400">No recordings found${filter ? ' matching that filter' : ''}.</p>`;
+async function reloadLibraryData() {
+  await refresh();
+  try {
+    recordings = await api('/api/recordings');
+  } catch {
     return;
   }
-  $('recordings-list').innerHTML = rows.map(r => `
+  renderLibrary();
+}
+
+function libraryEvents() { return config.libraryEvents || []; }
+
+function libEventById(id) {
+  if (id === UNSORTED_ID) return { id: UNSORTED_ID, name: 'Unsorted', color: '#52525b', description: 'Recordings not yet assigned to an event.' };
+  return libraryEvents().find(e => e.id === id) || null;
+}
+
+function libDisplayTitle(r) { return r.artist || r.name; }
+
+function libEventDates(e) {
+  if (e.startDate) return `${e.startDate}${e.endDate && e.endDate !== e.startDate ? ' – ' + e.endDate : ''}`;
+  return e.year ? String(e.year) : '';
+}
+
+function renderLibrary() {
+  const term = ($('lib-search').value || '').trim().toLowerCase();
+  if (term) {
+    renderLibrarySearch(term);
+    return;
+  }
+  $('lib-search-results').classList.add('hidden');
+  if (libView === 'event' && libCurrentEventId) {
+    $('lib-home').classList.add('hidden');
+    $('lib-event-view').classList.remove('hidden');
+    $('lib-back').classList.remove('hidden');
+    renderLibraryEventView(libCurrentEventId);
+  } else {
+    $('lib-event-view').classList.add('hidden');
+    $('lib-home').classList.remove('hidden');
+    $('lib-back').classList.add('hidden');
+    $('lib-title').textContent = 'Recordings Library';
+    renderLibraryHome();
+  }
+}
+$('lib-search').addEventListener('input', renderLibrary);
+
+$('lib-back').onclick = () => {
+  libView = 'home';
+  libCurrentEventId = null;
+  $('lib-search').value = '';
+  renderLibrary();
+};
+
+function renderLibraryHome() {
+  const evs = [...libraryEvents()].sort((a, b) => (b.year || 0) - (a.year || 0) || a.name.localeCompare(b.name));
+  const unsortedCount = recordings.filter(r => !r.eventId).length;
+  const cards = [libEventCardHtml(libEventById(UNSORTED_ID), unsortedCount)];
+  evs.forEach(e => cards.push(libEventCardHtml(e, recordings.filter(r => r.eventId === e.id).length)));
+  $('lib-events-grid').innerHTML = cards.join('');
+  document.querySelectorAll('.lib-event-card').forEach(card => {
+    card.addEventListener('click', () => openLibraryEvent(card.dataset.id));
+  });
+}
+
+function libEventCardHtml(e, count) {
+  const bg = e.coverUrl
+    ? `background-image:url('${escapeAttr(e.coverUrl)}');background-size:cover;background-position:center;`
+    : `background:linear-gradient(160deg, ${e.color || 'var(--accent)'}66, rgb(0 0 0 / .45) 75%);`;
+  return `
+    <div class="lib-event-card" data-id="${escapeAttr(e.id)}" style="${bg}">
+      <div class="lib-event-card-overlay">
+        <div class="truncate font-semibold">${escapeHtml(e.name)}</div>
+        <div class="text-xs text-zinc-300">${escapeHtml(libEventDates(e))}</div>
+        <div class="text-xs text-zinc-400">${count} recording${count === 1 ? '' : 's'}</div>
+      </div>
+    </div>`;
+}
+
+function openLibraryEvent(id) {
+  libView = 'event';
+  libCurrentEventId = id;
+  $('lib-search').value = '';
+  renderLibrary();
+}
+
+function renderLibraryEventView(id) {
+  const ev = libEventById(id);
+  if (!ev) {
+    libView = 'home';
+    libCurrentEventId = null;
+    renderLibrary();
+    return;
+  }
+  $('lib-title').textContent = ev.name;
+  $('lib-event-name').textContent = ev.name;
+  $('lib-event-dates').textContent = libEventDates(ev);
+  $('lib-event-desc').textContent = ev.description || '';
+  $('lib-event-banner').style.borderLeftColor = ev.color || 'var(--accent)';
+  const isReal = id !== UNSORTED_ID;
+  $('lib-event-edit').classList.toggle('hidden', !isReal);
+  $('lib-event-timetable').classList.toggle('hidden', !isReal);
+  $('lib-event-delete').classList.toggle('hidden', !isReal);
+  if (isReal) {
+    $('lib-event-edit').onclick = () => openEventEditor(ev);
+    $('lib-event-timetable').onclick = () => openEventTimetableImport(ev.id);
+    $('lib-event-delete').onclick = () => deleteLibraryEvent(ev.id);
+  }
+
+  const rows = recordings.filter(r => (isReal ? r.eventId === id : !r.eventId));
+  const byChannel = new Map();
+  rows.forEach(r => {
+    const ch = r.channel || r.source || 'Unknown';
+    if (!byChannel.has(ch)) byChannel.set(ch, []);
+    byChannel.get(ch).push(r);
+  });
+  const channels = [...byChannel.keys()].sort();
+  if (!channels.length) {
+    $('lib-channel-rows').innerHTML = `<p class="text-sm text-zinc-400">No recordings here yet${isReal ? ' — organize one from Unsorted to bring it into this event.' : '.'}</p>`;
+    return;
+  }
+  $('lib-channel-rows').innerHTML = channels.map(ch => {
+    const items = byChannel.get(ch).sort((a, b) => (b.start || b.modTime || '').localeCompare(a.start || a.modTime || ''));
+    return `
+      <div class="lib-channel-row">
+        <h3 class="mb-2 font-semibold">${escapeHtml(ch)}</h3>
+        <div class="lib-row-scroll">${items.map(r => libSetCardHtml(r)).join('')}</div>
+      </div>`;
+  }).join('');
+
+  document.querySelectorAll('.lib-set-card').forEach(card => {
+    const path = card.dataset.path;
+    const r = rows.find(x => x.path === path);
+    if (!r) return;
+    card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(r.path, libDisplayTitle(r)));
+    card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(r); });
+  });
+}
+
+function libSetCardHtml(r) {
+  const title = escapeHtml(libDisplayTitle(r));
+  const when = r.start
+    ? new Date(r.start).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : new Date(r.modTime).toLocaleDateString();
+  return `
+    <div class="lib-set-card" data-path="${escapeAttr(r.path)}">
+      <div class="lib-set-thumb lib-set-play">
+        <span class="lib-set-play-icon">&#9658;</span>
+        <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
+      </div>
+      <div class="lib-set-info">
+        <div class="truncate text-sm font-medium">${title}</div>
+        <div class="truncate text-xs text-zinc-400">${escapeHtml(when)} · ${formatBytes(r.size)}</div>
+      </div>
+    </div>`;
+}
+
+function renderLibrarySearch(term) {
+  $('lib-home').classList.add('hidden');
+  $('lib-event-view').classList.add('hidden');
+  $('lib-back').classList.add('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  $('lib-search-results').classList.remove('hidden');
+  const matches = recordings.filter(r => `${r.artist || ''} ${r.channel || r.source || ''} ${r.name}`.toLowerCase().includes(term)).slice(0, 200);
+  if (!matches.length) {
+    $('lib-search-list').innerHTML = `<p class="text-zinc-400">No recordings match "${escapeHtml(term)}".</p>`;
+    return;
+  }
+  $('lib-search-list').innerHTML = matches.map(r => {
+    const ev = r.eventId ? libEventById(r.eventId) : null;
+    return `
     <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
       <div class="min-w-0">
-        <div class="truncate font-medium">${escapeHtml(r.name)}</div>
-        <div class="text-xs text-zinc-400">${escapeHtml(r.source || '')} · ${formatBytes(r.size)} · ${new Date(r.modTime).toLocaleString()}</div>
+        <div class="truncate font-medium">${escapeHtml(libDisplayTitle(r))}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(r.channel || r.source || '')} · ${ev ? escapeHtml(ev.name) : 'Unsorted'} · ${formatBytes(r.size)}</div>
       </div>
-      <a class="btn" href="/media/${encodeMediaPath(r.path)}" target="_blank" rel="noopener">Open</a>
-    </div>`).join('');
+      <div class="flex flex-shrink-0 items-center gap-2">
+        <button type="button" class="btn primary lib-search-play" data-path="${escapeAttr(r.path)}">&#9658; Play</button>
+        <button type="button" class="btn lib-search-organize" data-path="${escapeAttr(r.path)}">Organize</button>
+        <a class="btn" href="/media/${encodeMediaPath(r.path)}" download title="Download">&#8681;</a>
+      </div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.lib-search-play').forEach(btn => btn.addEventListener('click', () => {
+    const r = recordings.find(x => x.path === btn.dataset.path);
+    if (r) openRecordingPlayer(r.path, libDisplayTitle(r));
+  }));
+  document.querySelectorAll('.lib-search-organize').forEach(btn => btn.addEventListener('click', () => {
+    const r = recordings.find(x => x.path === btn.dataset.path);
+    if (r) openAssignModal(r);
+  }));
 }
-$('recordings-filter').addEventListener('input', renderRecordings);
+
+// --- Event create/edit modal ---
+
+function openEventEditor(ev) {
+  libEditingEventId = ev ? ev.id : null;
+  $('event-editor-title').textContent = ev ? 'Edit Event' : 'New Event';
+  $('ev-name').value = ev ? ev.name : '';
+  $('ev-year').value = ev && ev.year ? ev.year : '';
+  $('ev-start').value = ev ? (ev.startDate || '') : '';
+  $('ev-end').value = ev ? (ev.endDate || '') : '';
+  $('ev-color').value = (ev && ev.color) || '#ef4444';
+  $('ev-cover').value = ev ? (ev.coverUrl || '') : '';
+  $('ev-desc').value = ev ? (ev.description || '') : '';
+  $('event-editor-error').classList.add('hidden');
+  $('event-editor-overlay').classList.remove('hidden');
+}
+function closeEventEditor() { $('event-editor-overlay').classList.add('hidden'); }
+$('event-editor-close').onclick = closeEventEditor;
+$('event-editor-overlay').addEventListener('click', (e) => { if (e.target.id === 'event-editor-overlay') closeEventEditor(); });
+$('lib-new-event').onclick = () => openEventEditor(null);
+
+$('event-editor-save').onclick = async () => {
+  const name = $('ev-name').value.trim();
+  if (!name) {
+    $('event-editor-error').textContent = 'Name is required';
+    $('event-editor-error').classList.remove('hidden');
+    return;
+  }
+  const payload = {
+    name,
+    year: parseInt($('ev-year').value, 10) || 0,
+    startDate: $('ev-start').value,
+    endDate: $('ev-end').value,
+    color: $('ev-color').value,
+    coverUrl: $('ev-cover').value.trim(),
+    description: $('ev-desc').value.trim(),
+  };
+  try {
+    if (libEditingEventId) {
+      await api(`/api/events/${libEditingEventId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Saved "${name}"`, 'info');
+    } else {
+      const created = await api('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      toast(`Created "${name}"`, 'info');
+      libView = 'event';
+      libCurrentEventId = created.id;
+    }
+  } catch {
+    return;
+  }
+  closeEventEditor();
+  await reloadLibraryData();
+};
+
+async function deleteLibraryEvent(id) {
+  const ev = libEventById(id);
+  if (!ev) return;
+  if (!confirm(`Delete event "${ev.name}"? Recordings assigned to it become Unsorted, not deleted.`)) return;
+  try {
+    await api(`/api/events/${id}`, { method: 'DELETE' });
+    toast(`Deleted "${ev.name}"`, 'info');
+  } catch {
+    return;
+  }
+  libView = 'home';
+  libCurrentEventId = null;
+  await reloadLibraryData();
+}
+
+// --- Archived timetable import modal ---
+
+function openEventTimetableImport(eventId) {
+  libTimetableEventId = eventId;
+  $('event-timetable-json').value = '';
+  $('event-timetable-error').classList.add('hidden');
+  $('event-timetable-status').textContent = '';
+  $('event-timetable-overlay').classList.remove('hidden');
+}
+function closeEventTimetableImport() { $('event-timetable-overlay').classList.add('hidden'); }
+$('event-timetable-close').onclick = closeEventTimetableImport;
+$('event-timetable-overlay').addEventListener('click', (e) => { if (e.target.id === 'event-timetable-overlay') closeEventTimetableImport(); });
+
+$('event-timetable-import-btn').onclick = async () => {
+  const raw = $('event-timetable-json').value.trim();
+  $('event-timetable-error').classList.add('hidden');
+  if (!raw) {
+    $('event-timetable-error').textContent = 'Paste the timetable JSON first';
+    $('event-timetable-error').classList.remove('hidden');
+    return;
+  }
+  try {
+    JSON.parse(raw);
+  } catch (err) {
+    $('event-timetable-error').textContent = `Invalid JSON: ${err.message}`;
+    $('event-timetable-error').classList.remove('hidden');
+    return;
+  }
+  let tt;
+  try {
+    tt = await api(`/api/events/${libTimetableEventId}/timetable`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: raw });
+  } catch {
+    return;
+  }
+  delete libEventTimetableCache[libTimetableEventId];
+  const stageCount = tt.length;
+  const setCount = tt.reduce((n, s) => n + (s.sets || []).length, 0);
+  $('event-timetable-status').textContent = `Imported ${stageCount} stage(s), ${setCount} set(s).`;
+  toast('Archived timetable imported', 'info');
+};
+
+// --- Organize/assign modal: link a recording to an Event + artist/set ---
+
+async function fetchEventTimetable(eventId) {
+  if (!eventId || eventId === UNSORTED_ID) return [];
+  if (libEventTimetableCache[eventId]) return libEventTimetableCache[eventId];
+  try {
+    const tt = await api(`/api/events/${eventId}/timetable`);
+    libEventTimetableCache[eventId] = tt || [];
+  } catch {
+    libEventTimetableCache[eventId] = [];
+  }
+  return libEventTimetableCache[eventId];
+}
+
+function toDatetimeLocal(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return '';
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function openAssignModal(r) {
+  libAssignTarget = r;
+  $('assign-title').textContent = `Organize: ${r.name}`;
+  $('assign-channel').value = (r.channel && r.channel !== r.source) ? r.channel : '';
+  $('assign-artist').value = r.artist || '';
+  $('assign-time').value = r.start ? toDatetimeLocal(r.start) : '';
+  $('assign-find-result').textContent = '';
+  $('assign-error').classList.add('hidden');
+
+  $('assign-event').innerHTML = `<option value="">Unsorted</option>` + libraryEvents().map(e => `<option value="${escapeAttr(e.id)}">${escapeHtml(e.name)}</option>`).join('');
+  $('assign-event').value = r.eventId || '';
+
+  setAssignMode('artist');
+  populateAssignSetOptions();
+  $('assign-overlay').classList.remove('hidden');
+}
+function closeAssignModal() { $('assign-overlay').classList.add('hidden'); libAssignTarget = null; }
+$('assign-close').onclick = closeAssignModal;
+$('assign-overlay').addEventListener('click', (e) => { if (e.target.id === 'assign-overlay') closeAssignModal(); });
+
+function setAssignMode(mode) {
+  document.querySelectorAll('.assign-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+  $('assign-mode-artist').classList.toggle('hidden', mode !== 'artist');
+  $('assign-mode-time').classList.toggle('hidden', mode !== 'time');
+}
+document.querySelectorAll('.assign-mode-btn').forEach(b => b.addEventListener('click', () => setAssignMode(b.dataset.mode)));
+$('assign-event').addEventListener('change', () => populateAssignSetOptions());
+
+async function populateAssignSetOptions() {
+  const eventId = $('assign-event').value;
+  const setSel = $('assign-set');
+  if (!eventId) {
+    setSel.innerHTML = `<option value="">Choose an event first</option>`;
+    return;
+  }
+  setSel.innerHTML = `<option value="">Loading…</option>`;
+  const tt = await fetchEventTimetable(eventId);
+  if (!tt.length) {
+    setSel.innerHTML = `<option value="">No timetable imported for this event yet</option>`;
+    return;
+  }
+  const opts = ['<option value="">— choose a set —</option>'];
+  tt.forEach(stage => (stage.sets || []).forEach(set => {
+    const when = set.start ? new Date(set.start).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+    opts.push(`<option value="${escapeAttr(set.id)}">${escapeHtml(stage.stage)} · ${escapeHtml(when)} · ${escapeHtml(set.name)}</option>`);
+  }));
+  setSel.innerHTML = opts.join('');
+}
+
+$('assign-set').addEventListener('change', () => {
+  const opt = $('assign-set').selectedOptions[0];
+  if (!opt || !opt.value) return;
+  const parts = opt.textContent.split(' · ');
+  $('assign-artist').value = parts.slice(2).join(' · ') || opt.textContent;
+});
+
+$('assign-find-btn').onclick = async () => {
+  const eventId = $('assign-event').value;
+  const timeVal = $('assign-time').value;
+  if (!eventId) { $('assign-find-result').textContent = 'Choose an event first.'; return; }
+  if (!timeVal) { $('assign-find-result').textContent = 'Enter a time first.'; return; }
+  const tt = await fetchEventTimetable(eventId);
+  if (!tt.length) { $('assign-find-result').textContent = "This event has no imported timetable yet."; return; }
+  const target = new Date(timeVal).getTime();
+  let best = null, bestDelta = Infinity, bestStage = '';
+  tt.forEach(stage => (stage.sets || []).forEach(set => {
+    const start = new Date(set.start).getTime();
+    const end = set.end ? new Date(set.end).getTime() : start + 3600000;
+    const delta = (target >= start && target < end) ? 0 : Math.min(Math.abs(target - start), Math.abs(target - end));
+    if (delta < bestDelta) { bestDelta = delta; best = set; bestStage = stage.stage; }
+  }));
+  if (!best) { $('assign-find-result').textContent = 'No sets found in this timetable.'; return; }
+  $('assign-artist').value = best.name;
+  $('assign-set').value = best.id;
+  const mins = Math.round(bestDelta / 60000);
+  $('assign-find-result').textContent = mins === 0
+    ? `Matched: ${bestStage} · ${best.name} (within this set's window)`
+    : `Closest match: ${bestStage} · ${best.name} (${mins} min away)`;
+};
+
+$('assign-clear').onclick = async () => {
+  if (!libAssignTarget) return;
+  try {
+    await api(`/api/recordings/meta?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'DELETE' });
+    toast('Unassigned', 'info');
+  } catch {
+    return;
+  }
+  closeAssignModal();
+  await reloadLibraryData();
+};
+
+$('assign-save').onclick = async () => {
+  if (!libAssignTarget) return;
+  const setId = $('assign-set').value;
+  const payload = {
+    path: libAssignTarget.path,
+    eventId: $('assign-event').value,
+    channel: $('assign-channel').value.trim(),
+    setId,
+    artist: $('assign-artist').value.trim(),
+  };
+  if (!setId && $('assign-time').value) {
+    payload.start = new Date($('assign-time').value).toISOString();
+  }
+  try {
+    await api('/api/recordings/meta', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    toast('Saved', 'info');
+  } catch {
+    return;
+  }
+  closeAssignModal();
+  await reloadLibraryData();
+};
+
+// --- Custom video player (Recordings tab) ---
+
+let customPlayerBound = false;
+
+function openRecordingPlayer(path, name) {
+  const video = $('rec-video');
+  $('rec-player-title').textContent = name || 'Recording';
+  $('recording-player-overlay').classList.remove('hidden');
+  setupCustomPlayerControls(video);
+  video.src = `/media/${encodeMediaPath(path)}`;
+  video.currentTime = 0;
+  video.play().catch(() => { /* autoplay may be blocked; controls still work */ });
+}
+
+function closeRecordingPlayer() {
+  const video = $('rec-video');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  $('recording-player-overlay').classList.add('hidden');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+$('rec-player-close').onclick = closeRecordingPlayer;
+$('recording-player-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'recording-player-overlay') closeRecordingPlayer();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('recording-player-overlay').classList.contains('hidden')) closeRecordingPlayer();
+});
+
+function formatTime(s) {
+  if (!isFinite(s) || s < 0) return '0:00';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  const mm = h ? String(m).padStart(2, '0') : String(m);
+  const ss = String(sec).padStart(2, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+// Bound once: the modal reuses a single <video> element, so controls only
+// need to be wired up the first time the player is opened.
+function setupCustomPlayerControls(video) {
+  if (customPlayerBound) return;
+  customPlayerBound = true;
+
+  const playPauseBtn = $('cp-playpause');
+  const centerPlay = $('cp-center-play');
+  const back10 = $('cp-back10');
+  const fwd10 = $('cp-fwd10');
+  const timeEl = $('cp-time');
+  const seek = $('cp-seek');
+  const seekWrap = $('cp-seek-wrap');
+  const seekProgress = $('cp-seek-progress');
+  const seekBuffer = $('cp-seek-buffer');
+  const muteBtn = $('cp-mute');
+  const volume = $('cp-volume');
+  const speed = $('cp-speed');
+  const fullscreenBtn = $('cp-fullscreen');
+  let scrubbing = false;
+
+  const setPlayIcon = (playing) => {
+    const icon = playing ? '&#10074;&#10074;' : '&#9658;';
+    playPauseBtn.innerHTML = icon;
+  };
+
+  const togglePlay = () => { if (video.paused || video.ended) video.play().catch(() => {}); else video.pause(); };
+
+  playPauseBtn.onclick = togglePlay;
+  centerPlay.onclick = togglePlay;
+  video.addEventListener('click', togglePlay);
+  video.addEventListener('play', () => { setPlayIcon(true); centerPlay.classList.add('hidden'); });
+  video.addEventListener('pause', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  video.addEventListener('ended', () => { setPlayIcon(false); centerPlay.classList.remove('hidden'); });
+  video.addEventListener('waiting', () => $('custom-player').classList.add('cp-buffering'));
+  video.addEventListener('playing', () => $('custom-player').classList.remove('cp-buffering'));
+  video.addEventListener('error', () => toast('Could not play this recording — the file may be missing or unsupported', 'error'));
+
+  back10.onclick = () => { video.currentTime = Math.max(0, video.currentTime - 10); };
+  fwd10.onclick = () => { video.currentTime = Math.min(video.duration || video.currentTime + 10, video.currentTime + 10); };
+
+  video.addEventListener('timeupdate', () => {
+    if (scrubbing || !isFinite(video.duration) || !video.duration) return;
+    const pct = (video.currentTime / video.duration) * 1000;
+    seek.value = pct;
+    seekProgress.style.width = `${pct / 10}%`;
+    timeEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+  });
+  video.addEventListener('progress', () => {
+    if (video.buffered.length && isFinite(video.duration) && video.duration) {
+      const end = video.buffered.end(video.buffered.length - 1);
+      seekBuffer.style.width = `${(end / video.duration) * 100}%`;
+    }
+  });
+  video.addEventListener('loadedmetadata', () => {
+    timeEl.textContent = `${formatTime(0)} / ${formatTime(video.duration)}`;
+  });
+
+  seek.addEventListener('input', () => {
+    scrubbing = true;
+    const pct = seek.value / 1000;
+    seekProgress.style.width = `${pct * 100}%`;
+    if (isFinite(video.duration) && video.duration) timeEl.textContent = `${formatTime(pct * video.duration)} / ${formatTime(video.duration)}`;
+  });
+  seek.addEventListener('change', () => {
+    if (isFinite(video.duration) && video.duration) video.currentTime = (seek.value / 1000) * video.duration;
+    scrubbing = false;
+  });
+  seekWrap.addEventListener('mousedown', () => { scrubbing = true; });
+
+  volume.addEventListener('input', () => {
+    video.volume = parseFloat(volume.value);
+    video.muted = video.volume === 0;
+    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
+  });
+  muteBtn.onclick = () => {
+    video.muted = !video.muted;
+    muteBtn.innerHTML = video.muted ? '&#128263;' : '&#128266;';
+    if (!video.muted && video.volume === 0) { video.volume = 1; volume.value = 1; }
+  };
+
+  speed.addEventListener('change', () => { video.playbackRate = parseFloat(speed.value); });
+
+  fullscreenBtn.onclick = () => {
+    const el = $('custom-player');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else el.requestFullscreen?.().catch(() => {});
+  };
+}
 
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
