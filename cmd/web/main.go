@@ -42,6 +42,9 @@ var version = "dev"
 //go:embed static/*
 var staticFiles embed.FS
 
+//go:embed presets/presets.json
+var presetsFile embed.FS
+
 type AppConfig struct {
 	Settings        Settings                 `json:"settings"`
 	UI              UISettings               `json:"ui"`
@@ -188,6 +191,20 @@ type Source struct {
 	LoudnessNormalize bool     `json:"loudnessNormalize,omitempty"`
 }
 
+// SourcePreset is one bundled, ready-to-add pack of sources - a DJ/streamer,
+// an event, or (in the future) a whole festival's set of stages - offered in
+// the Sources tab so a common setup can be added in one click instead of
+// hand-entering each URL. Bundled read-only in presets/presets.json; nothing
+// here is user-editable (users still add/edit their own sources normally).
+type SourcePreset struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Category    string   `json:"category,omitempty"`
+	Description string   `json:"description,omitempty"`
+	LogoURL     string   `json:"logoUrl,omitempty"`
+	Sources     []Source `json:"sources"`
+}
+
 type StageSchedule struct {
 	Stage string        `json:"stage"`
 	URL   string        `json:"url"`
@@ -314,6 +331,8 @@ type App struct {
 
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
+
+	sourcePresets []SourcePreset
 }
 
 // hashCacheEntry remembers the sha256 hash last computed for a recording, so
@@ -381,6 +400,7 @@ func NewApp(configPath string) (*App, error) {
 		remindersSent: map[string]time.Time{},
 		retry:         map[string]*retryState{},
 		sessions:      map[string]time.Time{},
+		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -783,6 +803,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/system-check", a.handleSystemCheck)
 	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/api/presets", a.handlePresets)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
@@ -1354,6 +1375,34 @@ func validateSource(src Source) error {
 		return errors.New("type must be youtube, twitch, or http")
 	}
 	return nil
+}
+
+// loadSourcePresets parses the bundled presets/presets.json into the list of
+// preset packs served by /api/presets. Errors are swallowed to a nil/empty
+// slice - a broken embedded file should never take down the whole app, and
+// this is checked once at startup.
+func loadSourcePresets() []SourcePreset {
+	data, err := presetsFile.ReadFile("presets/presets.json")
+	if err != nil {
+		return nil
+	}
+	var presets []SourcePreset
+	if err := json.Unmarshal(data, &presets); err != nil {
+		log.Printf("presets/presets.json is invalid, ignoring: %s", err)
+		return nil
+	}
+	return presets
+}
+
+// handlePresets serves the bundled preset packs (well-known DJs/streamers/
+// events, ready to add as sources). Read-only - applying one just POSTs each
+// of its sources through the normal /api/sources endpoint from the client.
+func (a *App) handlePresets(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, a.sourcePresets)
 }
 
 func (a *App) handleSources(w http.ResponseWriter, r *http.Request) {

@@ -1217,6 +1217,80 @@ $('wiz-test').onclick = async () => {
     label.textContent = 'Test request failed';
   }
 };
+
+// --- Preset Packs: bundled, ready-to-add DJs/streamers/events ---
+
+let presetPacks = [];
+
+$('open-presets').onclick = openPresets;
+$('presets-close').onclick = () => $('presets-overlay').classList.add('hidden');
+
+async function openPresets() {
+  $('presets-overlay').classList.remove('hidden');
+  $('presets-list').innerHTML = '<p class="text-sm text-zinc-400">Loading…</p>';
+  try {
+    presetPacks = await api('/api/presets');
+  } catch {
+    presetPacks = [];
+  }
+  renderPresetsList();
+}
+
+function presetIsFullyAdded(preset) {
+  const existingUrls = new Set((config.sources || []).map(s => s.url.toLowerCase()));
+  return preset.sources.every(s => existingUrls.has(s.url.toLowerCase()));
+}
+
+function renderPresetsList() {
+  if (!presetPacks.length) {
+    $('presets-list').innerHTML = '<p class="text-sm text-zinc-400">No presets available.</p>';
+    return;
+  }
+  $('presets-list').innerHTML = presetPacks.map(p => {
+    const added = presetIsFullyAdded(p);
+    return `
+    <div class="flex flex-wrap items-center justify-between gap-3 rounded border border-white/10 px-3 py-2">
+      <div class="flex min-w-0 items-center gap-3">
+        ${p.logoUrl ? `<img src="${escapeAttr(p.logoUrl)}" class="h-10 w-10 flex-shrink-0 rounded object-cover" alt="">` : ''}
+        <div class="min-w-0">
+          <div class="font-medium">${escapeHtml(p.name)} ${p.category ? `<span class="pill">${escapeHtml(p.category)}</span>` : ''}</div>
+          ${p.description ? `<div class="text-xs text-zinc-400">${escapeHtml(p.description)}</div>` : ''}
+          <div class="truncate text-xs text-zinc-500">${p.sources.map(s => escapeHtml(s.url)).join(', ')}</div>
+        </div>
+      </div>
+      <button type="button" class="btn flex-shrink-0 ${added ? '' : 'primary'}" ${added ? 'disabled' : ''} onclick="applyPreset('${escapeAttr(p.id)}')">${added ? 'Added' : 'Add'}</button>
+    </div>`;
+  }).join('');
+}
+
+async function applyPreset(id) {
+  const preset = presetPacks.find(p => p.id === id);
+  if (!preset) return;
+  const existingUrls = new Set((config.sources || []).map(s => s.url.toLowerCase()));
+  const toAdd = preset.sources.filter(s => !existingUrls.has(s.url.toLowerCase()));
+  if (!toAdd.length) {
+    toast(`${preset.name} is already added`, 'info');
+    return;
+  }
+  let added = 0;
+  for (const src of toAdd) {
+    try {
+      await api('/api/sources', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...src, enabled: true, record: false })
+      });
+      added++;
+    } catch { /* toast already shown by api() */ }
+  }
+  if (added) {
+    toast(`Added ${added} source${added === 1 ? '' : 's'} from "${preset.name}"`, 'info');
+    $('source-editor').dataset.loaded = '';
+    await refresh();
+    renderPresetsList();
+  }
+}
+
 $('save-timetable').onclick = async () => {
   try {
     config.timetable = JSON.parse($('timetable-json').value);

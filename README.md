@@ -19,6 +19,7 @@ YouTube, Streamlink-compatible, or raw HTTP/HLS source.
 - Optional single-pass loudness normalization (EBU R128) per source, so recordings from different artists/sources land at a consistent volume.
 - Auto-reconnect: a source that drops mid-stream is retried automatically with exponential backoff, instead of being hammered every scheduler tick or left stopped.
 - Installable as a PWA (add to home screen on mobile/desktop) for quick access to the dashboard and Watch tab.
+- Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events (Sources tab → Preset Packs), one click each - no URLs to hand-type.
 - Optional `.nfo` files beside completed recordings.
 - Disk free-space guard that pauses recording below 1 GB free and warns earlier.
 - SMTP and Discord webhook notifications.
@@ -191,6 +192,18 @@ permanent copy, and normal playback resumes from `/media/`.
 This costs extra CPU per rewind-enabled source (it runs a second transcode
 alongside the archival copy) and a bounded amount of temp disk space for the
 rolling window, so it's opt-in per source rather than global.
+
+## Preset Packs
+
+The Sources tab has a "Preset Packs" button next to "+ Add Source" that lists
+bundled, ready-to-add sources - currently a set of well-known hardstyle
+DJs/streamers/events on Twitch - so you don't have to hand-type their URLs.
+Clicking "Add" on a pack adds its source(s) the same way as adding one
+manually (enabled, but not auto-recording), and is a no-op if you've already
+added it. Presets are bundled read-only with the app (`cmd/web/presets/presets.json`,
+served via `GET /api/presets`); they're a starting point, not a restriction -
+edit or delete the resulting source like any other afterward. There's no
+Defqon preset since its stages already ship as the default source list.
 
 ## Auto-Reconnect
 

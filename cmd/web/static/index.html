@@ -192,7 +192,10 @@
             <h2 class="text-base font-semibold">Sources</h2>
             <p class="mt-1 text-xs text-zinc-500">Add a new stream to record, or expand one below to edit it.</p>
           </div>
-          <button type="button" id="open-wizard" class="btn primary">+ Add Source</button>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" id="open-presets" class="btn">Preset Packs</button>
+            <button type="button" id="open-wizard" class="btn primary">+ Add Source</button>
+          </div>
         </div>
 
         <div class="panel">
@@ -201,6 +204,17 @@
           <datalist id="timetable-stage-names"></datalist>
         </div>
       </section>
+
+      <div id="presets-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Preset Packs</h2>
+            <button type="button" id="presets-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Bundled DJs/streamers/events, ready to add as sources in one click. Adding one only adds its source(s) - enabled but not auto-recording, same as adding manually.</p>
+          <div id="presets-list" class="space-y-2"></div>
+        </div>
+      </div>
 
       <div id="wizard-overlay" class="modal-overlay hidden">
         <div class="modal-panel panel">

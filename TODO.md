@@ -96,6 +96,24 @@
   recording in the same batch ("N other recording(s) in this batch also match this same set -
   likely duplicate files or parts split by a dropped/reconnected stream"). Covered by
   `TestFlagSharedSetCandidates`.
+- **Preset Packs**: new `SourcePreset` type (`id`, `name`, `category`, optional `description`/
+  `logoUrl`, and a `sources` array reusing the existing `Source` shape) bundled read-only via
+  `//go:embed presets/presets.json` (no Dockerfile change needed, unlike `dq-timetable.json` -
+  embedding bakes it into the binary regardless of working directory) and served by
+  `GET /api/presets`. Sources tab has a new "Preset Packs" button/overlay
+  (`openPresets`/`renderPresetsList`/`applyPreset` in `app.js`) listing each pack with an
+  "Add"/"Added" button - applying one just `POST`s each not-yet-added source (matched by URL)
+  through the existing `/api/sources` endpoint, same as the Quick Add wizard, so no new
+  backend write path was needed. Seeded with 17 hardstyle DJ/streamer/event Twitch channels
+  (HSU, VIORIT, The Smiler, Equal2, Rubaz, RealHardstyle, Pulse, Wasted Penguinz, CREST, Sven
+  Carnage, Missterious, Rooler, United Music Events, HVRIZON, The Event Without Name,
+  MizzBehave, GPF) - deliberately no Defqon preset, since its stages already ship as the
+  default source list via `dq-timetable.json`/`sourcesFromTimetable`. No `logoUrl`s were set
+  for any of these - a real Twitch avatar CDN URL can't be derived from a channel name/handle
+  (it's a content-addressed hash assigned per-account), so one would have to be fabricated;
+  the field is left empty rather than guessed. If avatars matter later, fetch them for real via
+  Twitch's Helix API (needs a registered app + OAuth token, so it's a deliberate follow-up, not
+  something to wire in speculatively) rather than guessing URLs.
 
 ## Remaining (in suggested order)
 
@@ -133,6 +151,10 @@
 - The reconnect backoff is per-source and in-memory only; if this app is ever run with more
   than one process/replica behind a shared config, backoff state won't be shared. Not a
   problem for the single-process deployment this app currently assumes.
+- Add a Defqon.1 preset pack once there's a clean way to express "this is the same as the
+  built-in default sources" without duplicating `dq-timetable.json`'s stage list by hand -
+  not done yet since it'd just be a second copy of data that already ships by default.
+  Consider more preset packs (other festivals/events) as they come up.
 
 ## Patterns established - reuse these rather than reinventing
 - Custom dropdowns: `setupCustomDropdowns()` / `setDropdownOptions(id, options, opts)` /

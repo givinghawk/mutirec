@@ -1,0 +1,138 @@
+[
+  {
+    "id": "hsu",
+    "name": "HSU",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "HSU", "type": "twitch", "url": "https://www.twitch.tv/hsu_live", "quality": "best", "container": "mkv", "color": "#ef4444" }
+    ]
+  },
+  {
+    "id": "viorit",
+    "name": "VIORIT",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "VIORIT", "type": "twitch", "url": "https://www.twitch.tv/viorit", "quality": "best", "container": "mkv", "color": "#3b82f6" }
+    ]
+  },
+  {
+    "id": "the-smiler",
+    "name": "The Smiler",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "The Smiler", "type": "twitch", "url": "https://www.twitch.tv/thesmilerdj", "quality": "best", "container": "mkv", "color": "#a3a3a3" }
+    ]
+  },
+  {
+    "id": "equal2",
+    "name": "Equal2",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Equal2", "type": "twitch", "url": "https://www.twitch.tv/equal_2", "quality": "best", "container": "mkv", "color": "#a855f7" }
+    ]
+  },
+  {
+    "id": "rubaz",
+    "name": "Rubaz",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Rubaz", "type": "twitch", "url": "https://www.twitch.tv/rubaz", "quality": "best", "container": "mkv", "color": "#d946ef" }
+    ]
+  },
+  {
+    "id": "realhardstyle",
+    "name": "RealHardstyle",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "RealHardstyle", "type": "twitch", "url": "https://www.twitch.tv/realhardstyle", "quality": "best", "container": "mkv", "color": "#eab308" }
+    ]
+  },
+  {
+    "id": "pulse",
+    "name": "Pulse",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Pulse", "type": "twitch", "url": "https://www.twitch.tv/wearepulse", "quality": "best", "container": "mkv", "color": "#f97316" }
+    ]
+  },
+  {
+    "id": "wasted-penguinz",
+    "name": "Wasted Penguinz",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Wasted Penguinz", "type": "twitch", "url": "https://www.twitch.tv/wastedpenguinzofficial", "quality": "best", "container": "mkv", "color": "#22c55e" }
+    ]
+  },
+  {
+    "id": "crest",
+    "name": "CREST",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "CREST", "type": "twitch", "url": "https://www.twitch.tv/crest_dj", "quality": "best", "container": "mkv", "color": "#ef4444" }
+    ]
+  },
+  {
+    "id": "sven-carnage",
+    "name": "Sven Carnage",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Sven Carnage", "type": "twitch", "url": "https://www.twitch.tv/svencarnage", "quality": "best", "container": "mkv", "color": "#3b82f6" }
+    ]
+  },
+  {
+    "id": "missterious",
+    "name": "Missterious",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Missterious", "type": "twitch", "url": "https://www.twitch.tv/missterious", "quality": "best", "container": "mkv", "color": "#a3a3a3" }
+    ]
+  },
+  {
+    "id": "rooler",
+    "name": "Rooler",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "Rooler", "type": "twitch", "url": "https://www.twitch.tv/roolerofficial", "quality": "best", "container": "mkv", "color": "#a855f7" }
+    ]
+  },
+  {
+    "id": "united-music-events",
+    "name": "United Music Events",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "United Music Events", "type": "twitch", "url": "https://www.twitch.tv/unitedmusicevents", "quality": "best", "container": "mkv", "color": "#d946ef" }
+    ]
+  },
+  {
+    "id": "hvrizon",
+    "name": "HVRIZON",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "HVRIZON", "type": "twitch", "url": "https://www.twitch.tv/hvrizon", "quality": "best", "container": "mkv", "color": "#eab308" }
+    ]
+  },
+  {
+    "id": "the-event-without-name",
+    "name": "The Event Without Name",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "The Event Without Name", "type": "twitch", "url": "https://www.twitch.tv/theeventwithoutname", "quality": "best", "container": "mkv", "color": "#f97316" }
+    ]
+  },
+  {
+    "id": "mizzbehave",
+    "name": "MizzBehave",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "MizzBehave", "type": "twitch", "url": "https://www.twitch.tv/mizzbehaveofficial", "quality": "best", "container": "mkv", "color": "#22c55e" }
+    ]
+  },
+  {
+    "id": "gpf",
+    "name": "GPF",
+    "category": "Hardstyle",
+    "sources": [
+      { "name": "GPF", "type": "twitch", "url": "https://www.twitch.tv/therealgpf", "quality": "best", "container": "mkv", "color": "#ef4444" }
+    ]
+  }
+]
