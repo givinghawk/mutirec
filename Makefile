@@ -1,4 +1,4 @@
-APP          := defqon-stream-recorder
+APP          := mutirec
 PKG          := ./cmd/web
 BASE_VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
 COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)

@@ -1,7 +1,7 @@
 {
-  "name": "Defqon Stream Recorder",
-  "short_name": "StreamRec",
-  "description": "Multi-user Twitch/YouTube/HLS stream recorder with live watch and reminders.",
+  "name": "MutiRec",
+  "short_name": "MutiRec",
+  "description": "Mutual Recorder — multi-user Twitch/YouTube/HLS stream recorder with live watch and reminders.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

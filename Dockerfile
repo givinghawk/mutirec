@@ -15,7 +15,7 @@ ARG VERSION=dev
 ARG APP=web
 RUN CGO_ENABLED=0 go build \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /out/defqon-recorder ./cmd/${APP}
+    -o /out/mutirec ./cmd/${APP}
 
 # ---- Runtime stage ----
 FROM ubuntu:22.04
@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R app:app /app /home/app
 
 WORKDIR /app
-COPY --from=builder /out/defqon-recorder /usr/local/bin/defqon-recorder
+COPY --from=builder /out/mutirec /usr/local/bin/mutirec
 COPY dq-timetable.json /app/dq-timetable.json
 
 USER app
@@ -46,4 +46,4 @@ ENV LOG_DIR=/data/logs
 VOLUME ["/data"]
 EXPOSE 8080
 
-ENTRYPOINT ["defqon-recorder"]
+ENTRYPOINT ["mutirec"]

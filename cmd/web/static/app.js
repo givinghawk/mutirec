@@ -133,7 +133,7 @@ function renderVersion() {
 
 function applyTheme() {
   document.body.className = `min-h-screen text-zinc-100 theme-${config.ui.theme || 'midnight'} bg-zinc-950`;
-  $('app-name').textContent = config.ui.appName || 'Defqon Stream Recorder';
+  $('app-name').textContent = config.ui.appName || 'MutiRec';
   $('custom-css').textContent = config.ui.customCss || '';
   if (config.ui.logoUrl) {
     $('logo').src = config.ui.logoUrl;

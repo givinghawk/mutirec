@@ -391,7 +391,7 @@ func main() {
 		app.stopAll()
 	}()
 
-	log.Printf("Defqon recorder web UI listening on %s", addr)
+	log.Printf("MutiRec web UI listening on %s", addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -3062,7 +3062,7 @@ Source: %s
 URL: %s
 Started: %s
 Finished: %s
-Recorder: Defqon Stream Recorder %s
+Recorder: MutiRec %s
 
 %s
 `, rec.source.Name, rec.source.Type, rec.source.URL, rec.startedAt.Format(time.RFC3339), time.Now().Format(time.RFC3339), version, rec.source.ExtraNFO))
@@ -3191,7 +3191,7 @@ func defaultConfig() AppConfig {
 			AllowLiveProxy:          true,
 			LiveRewindWindowSeconds: 1800,
 		},
-		UI: UISettings{AppName: "Defqon Stream Recorder", Theme: "midnight", Accent: "red"},
+		UI: UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
 		Sources: []Source{{
 			ID:        "red",
 			Name:      "RED",
@@ -3232,7 +3232,7 @@ func normalizeConfig(cfg *AppConfig) {
 		cfg.Settings.LiveRewindWindowSeconds = 1800
 	}
 	if cfg.UI.AppName == "" {
-		cfg.UI.AppName = "Defqon Stream Recorder"
+		cfg.UI.AppName = "MutiRec"
 	}
 	for i := range cfg.Sources {
 		if cfg.Sources[i].ID == "" {

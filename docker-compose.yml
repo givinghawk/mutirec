@@ -4,8 +4,8 @@ services:
       context: .
       args:
         APP: web
-    image: ghcr.io/your-github-user/defqon-stream-recorder:local
-    container_name: defqon-stream-recorder
+    image: ghcr.io/your-github-user/mutirec:local
+    container_name: mutirec
     restart: unless-stopped
     ports:
       - "8080:8080"
