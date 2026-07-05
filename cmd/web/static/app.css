@@ -166,3 +166,12 @@ a { color: #67e8f9; }
 .syscheck-req-table tr.req-pass td:last-child { color: #6ee7b7; font-weight: 600; }
 .syscheck-req-table tr.req-warn td:last-child { color: #fcd34d; font-weight: 600; }
 .syscheck-req-table tr.req-fail td:last-child { color: #fca5a5; font-weight: 600; }
+
+/* Audio-only playback: visualizer + interactive waveform (Recordings player) */
+.custom-player.audio-mode .custom-player-video { display: none; }
+.custom-player.audio-mode .cp-seek-wrap { display: none; }
+.custom-player-audio-stage { display: flex; flex-direction: column; width: 100%; background: linear-gradient(160deg, rgb(39 39 42), #000 85%); }
+.custom-player-audio-stage.hidden { display: none; }
+.cp-visualizer { display: block; width: 100%; height: 180px; }
+.cp-wave { padding: 6px 14px 10px; }
+.cp-wave:empty { min-height: 56px; }
