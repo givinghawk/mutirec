@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"embed"
@@ -49,6 +50,7 @@ type AppConfig struct {
 	LibraryEvents   []LibraryEvent           `json:"libraryEvents"`
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
 	Festivals       []Festival               `json:"festivals"`
+	Organisations   []Organisation           `json:"organisations"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
@@ -59,6 +61,19 @@ type AppConfig struct {
 // than any one edition. Named Festival in code only to avoid colliding with
 // the unrelated Event type used for the activity log below.
 type Festival struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	Color          string `json:"color,omitempty"`
+	LogoURL        string `json:"logoUrl,omitempty"`
+	OrganisationID string `json:"organisationId,omitempty"`
+}
+
+// Organisation is the parent label above Festivals — a promoter, brand, or
+// collective (e.g. "Q-dance", "ID&T") that owns one or more Festival
+// franchises. Optional: Festivals that don't belong to an Organisation still
+// show up as standalone entries.
+type Organisation struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
@@ -80,6 +95,7 @@ type LibraryEvent struct {
 	Color       string          `json:"color,omitempty"`
 	CoverURL    string          `json:"coverUrl,omitempty"`
 	Description string          `json:"description,omitempty"`
+	FestivalID  string          `json:"festivalId,omitempty"`
 	Timetable   []StageSchedule `json:"timetable,omitempty"`
 }
 
@@ -88,12 +104,13 @@ type LibraryEvent struct {
 // timetable set. Channel is an optional display-name override for grouping
 // in the library UI - if blank, the recording's source folder name is used.
 type RecordingMeta struct {
-	EventID string `json:"eventId,omitempty"`
-	Channel string `json:"channel,omitempty"`
-	SetID   string `json:"setId,omitempty"`
-	Artist  string `json:"artist,omitempty"`
-	Start   string `json:"start,omitempty"`
-	End     string `json:"end,omitempty"`
+	EventID   string `json:"eventId,omitempty"`
+	Channel   string `json:"channel,omitempty"`
+	SetID     string `json:"setId,omitempty"`
+	Artist    string `json:"artist,omitempty"`
+	Start     string `json:"start,omitempty"`
+	End       string `json:"end,omitempty"`
+	Tracklist string `json:"tracklist,omitempty"`
 }
 
 type Settings struct {
@@ -226,17 +243,18 @@ type SourceStatus struct {
 // whatever library metadata (event/channel/artist/set) has been assigned to
 // it via RecordingMeta.
 type RecordingFile struct {
-	Name    string    `json:"name"`
-	Source  string    `json:"source"`
-	Path    string    `json:"path"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"modTime"`
-	EventID string    `json:"eventId,omitempty"`
-	Channel string    `json:"channel,omitempty"`
-	SetID   string    `json:"setId,omitempty"`
-	Artist  string    `json:"artist,omitempty"`
-	Start   string    `json:"start,omitempty"`
-	End     string    `json:"end,omitempty"`
+	Name      string    `json:"name"`
+	Source    string    `json:"source"`
+	Path      string    `json:"path"`
+	Size      int64     `json:"size"`
+	ModTime   time.Time `json:"modTime"`
+	EventID   string    `json:"eventId,omitempty"`
+	Channel   string    `json:"channel,omitempty"`
+	SetID     string    `json:"setId,omitempty"`
+	Artist    string    `json:"artist,omitempty"`
+	Start     string    `json:"start,omitempty"`
+	End       string    `json:"end,omitempty"`
+	Tracklist string    `json:"tracklist,omitempty"`
 }
 
 type NowItem struct {
@@ -285,6 +303,19 @@ type App struct {
 	credUser   string
 	credHash   []byte
 	needsSetup bool
+
+	hashMu    sync.Mutex
+	hashCache map[string]hashCacheEntry
+}
+
+// hashCacheEntry remembers the sha256 hash last computed for a recording, so
+// re-scans (matchfile export/import) don't re-hash unchanged files every
+// time - keyed by path relative to FinishedDir, invalidated by size/mtime
+// change. Kept in memory only; a cold restart just re-hashes on first use.
+type hashCacheEntry struct {
+	ModTime time.Time
+	Size    int64
+	Hash    string
 }
 
 const sessionCookieName = "dqr_session"
@@ -746,10 +777,14 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings", a.handleRecordings)
 	mux.HandleFunc("/api/recordings/meta", a.handleRecordingMeta)
 	mux.HandleFunc("/api/recordings/match-suggestions", a.handleRecordingMatchSuggestions)
+	mux.HandleFunc("/api/recordings/matchfile/export", a.handleRecordingsMatchfileExport)
+	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
 	mux.HandleFunc("/api/festivals/", a.handleFestivalItem)
+	mux.HandleFunc("/api/organisations", a.handleOrganisations)
+	mux.HandleFunc("/api/organisations/", a.handleOrganisationItem)
 	mux.HandleFunc("/media/", a.handleMedia)
 }
 
@@ -1368,6 +1403,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			rf.Artist = meta.Artist
 			rf.Start = meta.Start
 			rf.End = meta.End
+			rf.Tracklist = meta.Tracklist
 			if meta.Channel != "" {
 				rf.Channel = meta.Channel
 			}
@@ -1377,6 +1413,219 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	})
 	sort.Slice(files, func(i, j int) bool { return files[i].ModTime.After(files[j].ModTime) })
 	writeJSON(w, files)
+}
+
+// fileHash returns the sha256 hash of the file at absPath (relPath is used
+// only as the cache key), reusing a cached value when the file's size and
+// mtime haven't changed since it was last hashed - streamed via io.Copy so
+// large recordings never get fully loaded into memory.
+func (a *App) fileHash(absPath, relPath string, size int64, modTime time.Time) (string, error) {
+	a.hashMu.Lock()
+	if entry, ok := a.hashCache[relPath]; ok && entry.Size == size && entry.ModTime.Equal(modTime) {
+		a.hashMu.Unlock()
+		return entry.Hash, nil
+	}
+	a.hashMu.Unlock()
+
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	hash := hex.EncodeToString(h.Sum(nil))
+
+	a.hashMu.Lock()
+	if a.hashCache == nil {
+		a.hashCache = map[string]hashCacheEntry{}
+	}
+	a.hashCache[relPath] = hashCacheEntry{ModTime: modTime, Size: size, Hash: hash}
+	a.hashMu.Unlock()
+	return hash, nil
+}
+
+// MatchFileEntry is one exported recording's identity - a content hash paired
+// with enough denormalized library metadata (names, not local IDs, since IDs
+// aren't stable across different users' installs) that an importer can apply
+// it without already having a matching LibraryEvent/Festival locally.
+type MatchFileEntry struct {
+	Hash         string `json:"hash"`
+	EventID      string `json:"eventId,omitempty"`
+	SetID        string `json:"setId,omitempty"`
+	Artist       string `json:"artist,omitempty"`
+	Start        string `json:"start,omitempty"`
+	End          string `json:"end,omitempty"`
+	EventName    string `json:"eventName,omitempty"`
+	FestivalName string `json:"festivalName,omitempty"`
+	StageName    string `json:"stageName,omitempty"`
+}
+
+// handleRecordingsMatchfileExport hashes every organized recording (one
+// that's already been assigned to a LibraryEvent) and emits a shareable
+// {hash -> metadata} list, so someone else with a different copy of the same
+// files can import it and skip organizing manually - the exact-match sibling
+// of the fuzzy Smart Match wizard.
+func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	eventByID := make(map[string]LibraryEvent, len(cfg.LibraryEvents))
+	for _, e := range cfg.LibraryEvents {
+		eventByID[e.ID] = e
+	}
+	festivalByID := make(map[string]Festival, len(cfg.Festivals))
+	for _, f := range cfg.Festivals {
+		festivalByID[f.ID] = f
+	}
+	out := []MatchFileEntry{}
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		meta, ok := cfg.RecordingMeta[rel]
+		if !ok || meta.EventID == "" {
+			return nil
+		}
+		hash, err := a.fileHash(p, rel, info.Size(), info.ModTime())
+		if err != nil {
+			return nil
+		}
+		entry := MatchFileEntry{Hash: hash, EventID: meta.EventID, SetID: meta.SetID, Artist: meta.Artist, Start: meta.Start, End: meta.End, StageName: meta.Channel}
+		if ev, ok := eventByID[meta.EventID]; ok {
+			entry.EventName = ev.Name
+			if f, ok := festivalByID[ev.FestivalID]; ok {
+				entry.FestivalName = f.Name
+			}
+		}
+		out = append(out, entry)
+		return nil
+	})
+	writeJSON(w, out)
+}
+
+// handleRecordingsMatchfileImport hashes every not-yet-organized local
+// recording and, on an exact hash match against the imported list, applies
+// that entry's metadata - resolving (or creating) a local LibraryEvent/
+// Festival by name, since the exporter's IDs mean nothing on this install.
+// The imported SetID is deliberately dropped: it points at a timetable set
+// in the exporter's own LibraryEvent, which won't exist locally unless that
+// archived timetable was also imported separately.
+func (a *App) handleRecordingsMatchfileImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var entries []MatchFileEntry
+	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	byHash := make(map[string]MatchFileEntry, len(entries))
+	for _, e := range entries {
+		if e.Hash != "" {
+			byHash[e.Hash] = e
+		}
+	}
+
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	type pendingMatch struct {
+		path  string
+		entry MatchFileEntry
+	}
+	var matched []pendingMatch
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if m, ok := cfg.RecordingMeta[rel]; ok && m.EventID != "" {
+			return nil
+		}
+		hash, err := a.fileHash(p, rel, info.Size(), info.ModTime())
+		if err != nil {
+			return nil
+		}
+		if entry, ok := byHash[hash]; ok {
+			matched = append(matched, pendingMatch{path: rel, entry: entry})
+		}
+		return nil
+	})
+
+	a.mu.Lock()
+	if a.cfg.RecordingMeta == nil {
+		a.cfg.RecordingMeta = map[string]RecordingMeta{}
+	}
+	for _, m := range matched {
+		eventID := ""
+		if m.entry.EventName != "" {
+			eventID = a.resolveOrCreateLibraryEventLocked(m.entry.EventName, m.entry.FestivalName)
+		}
+		a.cfg.RecordingMeta[m.path] = RecordingMeta{
+			EventID: eventID,
+			Channel: m.entry.StageName,
+			Artist:  m.entry.Artist,
+			Start:   m.entry.Start,
+			End:     m.entry.End,
+		}
+	}
+	newCfg := a.cfg
+	a.mu.Unlock()
+	if len(matched) > 0 {
+		_ = a.persist(newCfg)
+	}
+	writeJSON(w, map[string]int{"matched": len(matched)})
+}
+
+// resolveOrCreateLibraryEventLocked finds a LibraryEvent by name, creating it
+// (and its Festival, if named and not already present) when missing. Caller
+// must hold a.mu.
+func (a *App) resolveOrCreateLibraryEventLocked(eventName, festivalName string) string {
+	for _, e := range a.cfg.LibraryEvents {
+		if e.Name == eventName {
+			return e.ID
+		}
+	}
+	festivalID := ""
+	if festivalName != "" {
+		for _, f := range a.cfg.Festivals {
+			if f.Name == festivalName {
+				festivalID = f.ID
+				break
+			}
+		}
+		if festivalID == "" {
+			f := Festival{ID: newID(), Name: festivalName}
+			a.cfg.Festivals = append(a.cfg.Festivals, f)
+			festivalID = f.ID
+		}
+	}
+	e := LibraryEvent{ID: newID(), Name: eventName, FestivalID: festivalID, Timetable: []StageSchedule{}}
+	a.cfg.LibraryEvents = append(a.cfg.LibraryEvents, e)
+	return e.ID
 }
 
 // filenameTimestampRe matches this app's own recording naming convention
@@ -1775,6 +2024,104 @@ func (a *App) handleFestivalItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleOrganisations lists or creates Organisations - the parent grouping
+// above Festivals (e.g. the promoter "Q-dance" owns "Defqon.1", "Rebirth").
+func (a *App) handleOrganisations(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		writeJSON(w, a.snapshotConfig().Organisations)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var o Organisation
+	if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(o.Name) == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	o.ID = newID()
+	a.mu.Lock()
+	a.cfg.Organisations = append(a.cfg.Organisations, o)
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	writeJSON(w, o)
+}
+
+// handleOrganisationItem handles per-organisation operations at
+// /api/organisations/{id}.
+func (a *App) handleOrganisationItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/organisations/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var o Organisation
+		if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(o.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		o.ID = id
+		a.mu.Lock()
+		idx := -1
+		for i, existing := range a.cfg.Organisations {
+			if existing.ID == id {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		a.cfg.Organisations[idx] = o
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, o)
+	case http.MethodDelete:
+		a.mu.Lock()
+		found := false
+		out := a.cfg.Organisations[:0:0]
+		for _, o := range a.cfg.Organisations {
+			if o.ID == id {
+				found = true
+				continue
+			}
+			out = append(out, o)
+		}
+		a.cfg.Organisations = out
+		// Unassign (not delete) any festivals that referenced this organisation.
+		for i := range a.cfg.Festivals {
+			if a.cfg.Festivals[i].OrganisationID == id {
+				a.cfg.Festivals[i].OrganisationID = ""
+			}
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // handleLibraryEventTimetable serves and imports the archived timetable for
 // one LibraryEvent. POST accepts the same raw JSON shape as dq-timetable.json
 // (an array of stage objects with [year,month,day,hour,minute,name] set
@@ -1837,13 +2184,14 @@ func (a *App) handleRecordingMeta(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
-			Path    string `json:"path"`
-			EventID string `json:"eventId"`
-			Channel string `json:"channel,omitempty"`
-			SetID   string `json:"setId,omitempty"`
-			Artist  string `json:"artist,omitempty"`
-			Start   string `json:"start,omitempty"`
-			End     string `json:"end,omitempty"`
+			Path      string `json:"path"`
+			EventID   string `json:"eventId"`
+			Channel   string `json:"channel,omitempty"`
+			SetID     string `json:"setId,omitempty"`
+			Artist    string `json:"artist,omitempty"`
+			Start     string `json:"start,omitempty"`
+			End       string `json:"end,omitempty"`
+			Tracklist string `json:"tracklist,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1853,7 +2201,7 @@ func (a *App) handleRecordingMeta(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "a valid path is required", http.StatusBadRequest)
 			return
 		}
-		meta := RecordingMeta{EventID: req.EventID, Channel: req.Channel, SetID: req.SetID, Artist: req.Artist, Start: req.Start, End: req.End}
+		meta := RecordingMeta{EventID: req.EventID, Channel: req.Channel, SetID: req.SetID, Artist: req.Artist, Start: req.Start, End: req.End, Tracklist: req.Tracklist}
 		// A specific timetable set was picked ("by artist") rather than a
 		// manual time entry - look up its name/start/end so the client
 		// doesn't have to duplicate that logic.
@@ -2724,6 +3072,9 @@ func normalizeConfig(cfg *AppConfig) {
 	if cfg.Festivals == nil {
 		cfg.Festivals = []Festival{}
 	}
+	if cfg.Organisations == nil {
+		cfg.Organisations = []Organisation{}
+	}
 	assignScheduleIDs(cfg.Timetable)
 	for i := range cfg.LibraryEvents {
 		if cfg.LibraryEvents[i].ID == "" {
@@ -2737,6 +3088,11 @@ func normalizeConfig(cfg *AppConfig) {
 	for i := range cfg.Festivals {
 		if cfg.Festivals[i].ID == "" {
 			cfg.Festivals[i].ID = newID()
+		}
+	}
+	for i := range cfg.Organisations {
+		if cfg.Organisations[i].ID == "" {
+			cfg.Organisations[i].ID = newID()
 		}
 	}
 }
