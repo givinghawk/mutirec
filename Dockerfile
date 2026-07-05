@@ -34,7 +34,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=builder /out/mutirec /usr/local/bin/mutirec
-COPY dq-timetable.json /app/dq-timetable.json
 
 USER app
 

@@ -18,10 +18,12 @@ Tailwind WebUI. Point it at Twitch, YouTube, or any Streamlink/raw HTTP/HLS
 source, hand out accounts to the people helping you record, and let it run
 unattended through an entire festival weekend.
 
-It ships tuned for hardstyle festival weekends (DEFQON.1's stages are the
-default source list, and a handful of well-known DJs/streamers are one click
-away as Preset Packs) but there's nothing festival-specific about the
-recorder itself — add any source you like.
+It ships empty - no bundled festival, no pre-added sources - but leans toward
+hardstyle festival weekends in its defaults and extras: a handful of
+well-known DJs/streamers are one click away as Preset Packs, and the
+Organisations/Festivals/Timetable model is built for recurring multi-stage
+events. There's nothing festival-specific about the recorder itself, though —
+add any source you like.
 
 ---
 
@@ -111,9 +113,11 @@ data/
   recordings/
 ```
 
-The bundled `dq-timetable.json` is used to seed DEFQON.1 stages and timetable
-entries. Auto-recording starts disabled by default so you can review sources,
-storage, and backup settings before recording.
+There are no sources or timetable entries yet - add your first source from
+the Sources tab (or a Preset Pack) and build a timetable by hand or by
+importing one from [timetable.lol](https://timetable.lol). Auto-recording
+starts disabled by default so you can review sources, storage, and backup
+settings before recording.
 
 ## Docker Compose
 
@@ -189,7 +193,7 @@ use RFC3339 timestamps:
 [
   {
     "stage": "RED",
-    "url": "https://www.youtube.com/@qdance/live",
+    "url": "https://www.youtube.com/@example/live",
     "sets": [
       {
         "id": "opt-stable-id",
@@ -253,7 +257,9 @@ manually (enabled, but not auto-recording), and is a no-op if you've already
 added it. Presets are bundled read-only with the app (`cmd/web/presets/presets.json`,
 served via `GET /api/presets`); they're a starting point, not a restriction -
 edit or delete the resulting source like any other afterward. There's no
-DEFQON.1 preset since its stages already ship as the default source list.
+preset tied to any one specific festival's own stages - presets are for
+individual streamers/DJs/events, and any festival's stages are just regular
+sources you add yourself.
 
 ## Auto-Reconnect
 
@@ -447,6 +453,8 @@ the host — only share admin accounts with people you'd trust with that
 
 ## Disclaimer
 
-This project is not affiliated with or endorsed by Q-dance, DEFQON.1, Twitch,
-YouTube, or any stream provider. Use it only where you have the right to record
-and store the content.
+MutiRec is an independent, unaffiliated tool. It isn't endorsed by, affiliated
+with, or sponsored by Twitch, YouTube, Discord, or any festival, promoter, or
+event organizer whose stream you point it at. Names of festivals, artists, or
+events you configure it with belong to their respective owners. Use it only
+where you have the right to record and store the content.

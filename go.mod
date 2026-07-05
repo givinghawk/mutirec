@@ -1,4 +1,4 @@
-module defqon-stream-recorder
+module mutirec
 
 go 1.26
 

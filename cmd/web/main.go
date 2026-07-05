@@ -31,7 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"defqon-stream-recorder/internal/disk"
+	"mutirec/internal/disk"
 )
 
 var version = "dev"
@@ -55,7 +55,7 @@ type AppConfig struct {
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
-// "Defqon.1", "Sensation") - shown to the user simply as "Event". It's
+// "Neonbeat", "Aurora Nights") - shown to the user simply as "Event". It's
 // intentionally a separate, lighter-weight concept from LibraryEvent (which
 // represents one specific yearly edition/recording archive): a live Source's
 // stream URL is reused every year, so it's grouped by the franchise rather
@@ -71,9 +71,8 @@ type Festival struct {
 }
 
 // Organisation is the parent label above Festivals — a promoter, brand, or
-// collective (e.g. "Q-dance", "ID&T") that owns one or more Festival
-// franchises. Optional: Festivals that don't belong to an Organisation still
-// show up as standalone entries.
+// collective that owns one or more Festival franchises. Optional: Festivals
+// that don't belong to an Organisation still show up as standalone entries.
 type Organisation struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -83,7 +82,7 @@ type Organisation struct {
 }
 
 // LibraryEvent groups recorded files into one edition of a festival (e.g.
-// "Defqon.1 2022"), independent of whatever Sources/Timetable are currently
+// "Neonbeat 2022"), independent of whatever Sources/Timetable are currently
 // configured for live recording. Each event can carry its own archived
 // timetable, imported separately, so old recordings can be matched back up
 // to the artist/set that was actually playing when they were captured.
@@ -1550,8 +1549,8 @@ var filenameTimestampRe = regexp.MustCompile(`(\d{4})-?(\d{2})-?(\d{2})[ _.T-]?(
 
 // dateDMYRe matches a day-month-year date separated by underscores, dashes,
 // or dots (e.g. "25_06_2026") - the convention many non-US recording tools
-// (and this app's own suggested Defqon.1-style filenames) use, as opposed to
-// the YYYY-first convention filenameTimestampRe expects.
+// (and this app's own suggested festival-recording filenames) use, as
+// opposed to the YYYY-first convention filenameTimestampRe expects.
 var dateDMYRe = regexp.MustCompile(`(?:^|[_\-. ])(\d{1,2})[_\-.](\d{1,2})[_\-.](\d{4})(?:$|[_\-. ])`)
 
 // weekdayAbbrevs maps the first three letters of a weekday name (case
@@ -1703,7 +1702,7 @@ func normalizeArtistWords(s string) []string {
 // artistSimilarity gives a rough 0..1 score for how closely a guessed
 // artist name (parsed from a filename) matches an archived timetable set's
 // name, tolerant of case, punctuation, and extra words on either side (e.g.
-// "DJ Isaac" vs "DJ Isaac B2B Adaro" still scores 1.0, not diluted by the
+// "DJ Vertex" vs "DJ Vertex B2B Fenrix" still scores 1.0, not diluted by the
 // combo's extra name).
 func artistSimilarity(guessed, setName string) float64 {
 	g := normalizeArtistWords(guessed)
@@ -2215,7 +2214,7 @@ func (a *App) handleFestivalItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOrganisations lists or creates Organisations - the parent grouping
-// above Festivals (e.g. the promoter "Q-dance" owns "Defqon.1", "Rebirth").
+// above Festivals (e.g. a promoter that owns several festival franchises).
 func (a *App) handleOrganisations(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, a.snapshotConfig().Organisations)
@@ -2313,9 +2312,9 @@ func (a *App) handleOrganisationItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLibraryEventTimetable serves and imports the archived timetable for
-// one LibraryEvent. POST accepts the same raw JSON shape as dq-timetable.json
-// (an array of stage objects with [year,month,day,hour,minute,name] set
-// tuples) so a previous year's schedule can be pasted in directly.
+// one LibraryEvent. POST accepts a compact per-stage JSON shape (an array of
+// stage objects with [year,month,day,hour,minute,name] set tuples) so a
+// previous year's schedule can be pasted in directly.
 func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request, id string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2333,7 +2332,7 @@ func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		tt, err := parseDQTimetableJSON(body)
+		tt, err := parseStageTimetableJSON(body)
 		if err != nil {
 			http.Error(w, "could not parse timetable JSON: "+err.Error(), http.StatusBadRequest)
 			return
@@ -3165,10 +3164,6 @@ func loadConfig(path string) (AppConfig, error) {
 		return cfg, nil
 	}
 	cfg := defaultConfig()
-	if tt := loadDQTimetable("dq-timetable.json"); len(tt) > 0 {
-		cfg.Timetable = tt
-		cfg.Sources = sourcesFromTimetable(tt)
-	}
 	normalizeConfig(&cfg)
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
@@ -3191,18 +3186,8 @@ func defaultConfig() AppConfig {
 			AllowLiveProxy:          true,
 			LiveRewindWindowSeconds: 1800,
 		},
-		UI: UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
-		Sources: []Source{{
-			ID:        "red",
-			Name:      "RED",
-			Type:      "youtube",
-			URL:       "https://www.youtube.com/@qdance/live",
-			Enabled:   true,
-			Record:    false,
-			Quality:   "best",
-			Container: "mkv",
-			Color:     "#ef4444",
-		}},
+		UI:      UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
+		Sources: []Source{},
 	}
 }
 
@@ -3313,24 +3298,12 @@ type rawStage struct {
 	Sets  [][]any `json:"sets"`
 }
 
-func loadDQTimetable(path string) []StageSchedule {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	tt, err := parseDQTimetableJSON(data)
-	if err != nil {
-		return nil
-	}
-	return tt
-}
-
-// parseDQTimetableJSON parses the raw per-stage timetable JSON shape used by
-// dq-timetable.json (and, by extension, any archived timetable pasted into a
-// LibraryEvent): an array of stage objects whose "sets" are
-// [year, month, day, hour, minute, name?] tuples. A row with no name marks
-// only the end time of the previous set.
-func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
+// parseStageTimetableJSON parses a compact per-stage timetable JSON shape -
+// an array of stage objects whose "sets" are
+// [year, month, day, hour, minute, name?] tuples - used when pasting an
+// archived timetable into a LibraryEvent. A row with no name marks only the
+// end time of the previous set.
+func parseStageTimetableJSON(data []byte) ([]StageSchedule, error) {
 	var raw []rawStage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -3371,25 +3344,6 @@ func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
 		out = append(out, StageSchedule{Stage: stage.Stage, URL: stage.URL, Sets: sets})
 	}
 	return out, nil
-}
-
-func sourcesFromTimetable(tt []StageSchedule) []Source {
-	colors := map[string]string{"RED": "#ef4444", "BLUE": "#3b82f6", "BLACK": "#a3a3a3", "UV": "#a855f7", "MAGENTA": "#d946ef", "YELLOW": "#eab308", "ORANGE": "#f97316", "GREEN": "#22c55e"}
-	var srcs []Source
-	for _, st := range tt {
-		if st.URL == "" {
-			continue
-		}
-		typ := "http"
-		if strings.Contains(st.URL, "youtube") || strings.Contains(st.URL, "youtu.be") {
-			typ = "youtube"
-		}
-		if strings.Contains(st.URL, "twitch.tv") || strings.Contains(st.URL, "mixlr.com") {
-			typ = "twitch"
-		}
-		srcs = append(srcs, Source{ID: strings.ToLower(safeName(st.Stage)), Name: st.Stage, Type: typ, URL: st.URL, Enabled: true, Record: false, Quality: "best", Container: "mkv", Color: colors[st.Stage]})
-	}
-	return srcs
 }
 
 func scheduleFor(tt []StageSchedule, stage string, now time.Time) (*ScheduleSet, *ScheduleSet) {

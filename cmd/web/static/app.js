@@ -126,7 +126,7 @@ function maybeStartOnboarding() {
 function renderVersion() {
   const v = state.version || 'dev';
   $('version-footer').textContent = v;
-  $('version-footer').title = `Defqon Stream Recorder ${v}`;
+  $('version-footer').title = `MutiRec ${v}`;
   const helpVersion = $('help-version');
   if (helpVersion) helpVersion.textContent = v;
 }
@@ -575,7 +575,7 @@ function drawSourceEditor() {
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
           <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
-          <label title="Groups this source under a recurring event (e.g. Defqon.1) for the Watch tab's source picker and Dashboard groups.">Event
+          <label title="Groups this source under a recurring event (e.g. a festival franchise) for the Watch tab's source picker and Dashboard groups.">Event
             <div class="custom-dropdown">
               <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(festivalName(s.festivalId) || 'None')}</span><span class="ml-auto">▼</span></button>
               <div class="dropdown-menu hidden">
@@ -2628,15 +2628,17 @@ function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 
 // --- Theme Switcher ---
 
+// Generic colour presets, not named after (or derived from) any real
+// festival's branding - just a starting palette to tweak from.
 const festivalThemes = {
-  'defqon': { name: 'Defqon.1', colors: { primary: '#ef4444', secondary: '#dc2626', bg: '#09090b', accent: '#ef4444', text: '#f4f4f5', textMuted: '#a1a1aa' } },
-  'qlimax': { name: 'Qlimax', colors: { primary: '#7c3aed', secondary: '#6d28d9', bg: '#0a0a0a', accent: '#ec4899', text: '#f4f4f5', textMuted: '#a1a1aa' } },
-  'defqon-pink': { name: 'Defqon Pink', colors: { primary: '#ec4899', secondary: '#be185d', bg: '#0f0a0a', accent: '#ec4899', text: '#fce7f3', textMuted: '#be185d' } },
-  'defqon-cyan': { name: 'Defqon Cyan', colors: { primary: '#06b6d4', secondary: '#0891b2', bg: '#000d0f', accent: '#06b6d4', text: '#cffafe', textMuted: '#0a7ea4' } },
-  'defqon-gold': { name: 'Defqon Gold', colors: { primary: '#f59e0b', secondary: '#d97706', bg: '#0b0803', accent: '#fbbf24', text: '#f9f5f0', textMuted: '#92400e' } },
-  'xtreme': { name: 'Xtreme (Lime)', colors: { primary: '#84cc16', secondary: '#65a30d', bg: '#0a0a0a', accent: '#84cc16', text: '#f4f4f5', textMuted: '#4b5320' } },
-  'mysteryland': { name: 'Mysteryland', colors: { primary: '#a855f7', secondary: '#9333ea', bg: '#0d0010', accent: '#d946ef', text: '#f4f4f5', textMuted: '#8b5cf6' } },
-  'tomorrowland': { name: 'Tomorrowland', colors: { primary: '#3b82f6', secondary: '#1d4ed8', bg: '#000812', accent: '#0ea5e9', text: '#f4f4f5', textMuted: '#60a5fa' } },
+  'crimson': { name: 'Crimson', colors: { primary: '#ef4444', secondary: '#dc2626', bg: '#09090b', accent: '#ef4444', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'violet': { name: 'Violet Pulse', colors: { primary: '#7c3aed', secondary: '#6d28d9', bg: '#0a0a0a', accent: '#ec4899', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'rose': { name: 'Rose', colors: { primary: '#ec4899', secondary: '#be185d', bg: '#0f0a0a', accent: '#ec4899', text: '#fce7f3', textMuted: '#be185d' } },
+  'cyan': { name: 'Cyan Wave', colors: { primary: '#06b6d4', secondary: '#0891b2', bg: '#000d0f', accent: '#06b6d4', text: '#cffafe', textMuted: '#0a7ea4' } },
+  'amber': { name: 'Amber', colors: { primary: '#f59e0b', secondary: '#d97706', bg: '#0b0803', accent: '#fbbf24', text: '#f9f5f0', textMuted: '#92400e' } },
+  'lime': { name: 'Lime', colors: { primary: '#84cc16', secondary: '#65a30d', bg: '#0a0a0a', accent: '#84cc16', text: '#f4f4f5', textMuted: '#4b5320' } },
+  'orchid': { name: 'Orchid', colors: { primary: '#a855f7', secondary: '#9333ea', bg: '#0d0010', accent: '#d946ef', text: '#f4f4f5', textMuted: '#8b5cf6' } },
+  'ocean': { name: 'Ocean Blue', colors: { primary: '#3b82f6', secondary: '#1d4ed8', bg: '#000812', accent: '#0ea5e9', text: '#f4f4f5', textMuted: '#60a5fa' } },
 };
 
 function renderFestivalPresets() {

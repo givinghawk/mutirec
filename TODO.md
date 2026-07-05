@@ -18,14 +18,14 @@
 
 ## Done (merged in PR #11)
 - **Events tab deep linking**: source cards in the per-festival detail are now clickable (jumps to Sources tab, expands and highlights that source, via the existing `highlightSourceId` mechanism); edition cards jump straight into the Recordings library's event view instead of landing on the library home screen (`.ev-detail-source` / `.ev-detail-edition` + `addEventListener`, replacing the old inline-`onclick`-with-escaped-quotes approach).
-- **Smart Match filename parsing overhaul** — the fuzzy matcher (`bestMatchSuggestion` in `main.go`) previously only understood YYYY-first dates and had zero artist-name awareness, so filenames like `DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3` (day-first date, no clock time) mostly missed:
+- **Smart Match filename parsing overhaul** — the fuzzy matcher (`bestMatchSuggestion` in `main.go`) previously only understood YYYY-first dates and had zero artist-name awareness, so filenames like `DJ_Vertex_BLUE_Thursday_25_06_2026_Neonbeat_Prime_Directive_HardDance.mp3` (day-first date, no clock time) mostly missed:
   - `guessTimeFromName` now also parses `DD_MM_YYYY`/`DD-MM-YYYY`/`DD.MM.YYYY`, disambiguating day/month order (when both are ≤12) using an embedded weekday name if present (e.g. "Thursday" + "25_06_2026" → confirms day-first). Returns a new `hasTimeOfDay` bool so date-only filenames (midnight default) don't get treated as if they had a real clock time.
   - `guessArtistFromName` extracts the artist name from the filename prefix (before the date), stripping a trailing weekday word and/or the recording's own channel name.
-  - `artistSimilarity` does tolerant word-overlap scoring between the guessed artist and each archived set's name (ignores "dj"/"b2b"/"vs", handles combos like "DJ Isaac" matching inside "DJ Isaac B2B Adaro").
+  - `artistSimilarity` does tolerant word-overlap scoring between the guessed artist and each archived set's name (ignores "dj"/"b2b"/"vs", handles combos like "DJ Vertex" matching inside "DJ Vertex B2B Fenrix").
   - All signals feed into `candidateScore`, a single weighted score (replacing the old hand-rolled `betterCandidate` comparator) so the best candidate can be picked in one pass; "high" confidence requires the artist-name match to be corroborated by either exact time containment or a real channel/stage match (`stageMatch`, from the recording's folder name), not an artist-name coincidence alone.
   - `MatchSuggestion.GuessedArtist` is now returned so the Smart Match UI shows "Filename suggests: ..." even when no confident match was found, so the user has a starting point for manual assignment.
   - Added `cmd/web/match_test.go` with unit tests covering date parsing (including the weekday-disambiguation case), artist extraction, similarity scoring, and a full end-to-end scenario using the exact filename reported by the user - confirms "high" confidence with the correct artist/stage/day.
-  - **Correction**: an earlier draft of this change added a `filenameContainsStage` heuristic based on misreading "Sacred Oath" in the example filename as a real stage name — it's actually that year's festival edition/theme name ("Defqon.1 - Sacred Oath"), and "BLUE" (already handled correctly by the existing folder-based channel match) is the real stage. Removed the heuristic entirely rather than leave a signal built on a wrong premise; the channel/date/artist signals already fully disambiguate without it.
+  - **Correction**: an earlier draft of this change added a `filenameContainsStage` heuristic based on misreading "Prime Directive" in the example filename as a real stage name — it's actually that year's festival edition/theme name ("Neonbeat - Prime Directive"), and "BLUE" (already handled correctly by the existing folder-based channel match) is the real stage. Removed the heuristic entirely rather than leave a signal built on a wrong premise; the channel/date/artist signals already fully disambiguate without it.
 - **Dev server portability fix**: the app previously only listened on `HTTP_ADDR` (default `:8080`) with no way to run on an arbitrary port; added `PORT` env var support (`main.go`) and switched `.claude/launch.json` to `autoPort: true` so the preview tooling can run alongside other things already bound to 8080.
 
 ## Done (this session)
@@ -107,7 +107,7 @@
   backend write path was needed. Seeded with 17 hardstyle DJ/streamer/event Twitch channels
   (HSU, VIORIT, The Smiler, Equal2, Rubaz, RealHardstyle, Pulse, Wasted Penguinz, CREST, Sven
   Carnage, Missterious, Rooler, United Music Events, HVRIZON, The Event Without Name,
-  MizzBehave, GPF) - deliberately no Defqon preset, since its stages already ship as the
+  MizzBehave, GPF) - deliberately no festival-specific preset, since its stages already ship as the
   default source list via `dq-timetable.json`/`sourcesFromTimetable`. No `logoUrl`s were set
   for any of these - a real Twitch avatar CDN URL can't be derived from a channel name/handle
   (it's a content-addressed hash assigned per-account), so one would have to be fabricated;
@@ -188,6 +188,45 @@
     single-credential `auth.json` install migrates into `users.json` on first boot and logs in
     successfully; Discord settings save/reload correctly and the login-start redirect produces
     a well-formed `https://discord.com/api/oauth2/authorize` URL.
+- **Rebrand to MutiRec ("Mutual Recorder") and full removal of DEFQON.1-specific content**:
+  the repo name's missing "l" (multirec → mutirec) became the identity - "Muti-" as in
+  Mutual, reflecting the multi-source/multi-user shape the app had already grown into. First
+  pass renamed every user-facing "Defqon Stream Recorder" string (page titles, sidebar app
+  name default, `.nfo` "Recorder:" line, PWA manifest, `LICENSE`, local dev binary/image
+  names) and rewrote the README with a title/tagline/origin-story callout, badges, a table of
+  contents, and a features list regrouped by theme.
+  - **Second, deeper pass** removed every actual tie to the real, trademarked DEFQON.1
+    festival, not just the product's own name: the Go module itself is now `mutirec` (was
+    `defqon-stream-recorder` - every import path updated accordingly); deleted the bundled
+    `dq-timetable.json` entirely (it carried a real festival's real 2026 stage lineup, artist
+    names, and Discord channel/emoji IDs) along with the Dockerfile `COPY` that shipped it and
+    the `defaultConfig()`/`loadConfig()` bootstrap path that seeded a default "RED" source
+    pointed at `youtube.com/@qdance`- a fresh install now starts with zero sources and no
+    timetable, same as any other empty state, guided by the existing onboarding wizard rather
+    than pre-seeded content. `loadDQTimetable` and `sourcesFromTimetable` (only ever used by
+    that bootstrap path) were deleted outright; `parseDQTimetableJSON` survived under the
+    generic name `parseStageTimetableJSON` since it's genuinely reusable - it's the format
+    for pasting an archived timetable into a LibraryEvent, not tied to any one festival.
+  - Theme presets in `app.js` (`festivalThemes`) were carrying *other* real trademarked
+    festival names too (Qlimax, Mysteryland, Tomorrowland, alongside several "Defqon ..."
+    variants) - renamed all eight to purely descriptive colour names (Crimson, Violet Pulse,
+    Rose, Cyan Wave, Amber, Lime, Orchid, Ocean Blue) with the same colour values, since the
+    underlying concern (shipping real festival branding) applied equally to those, not just
+    the one the request named.
+  - Scrubbed remaining incidental mentions across doc comments (`main.go`, `syscheck.go`),
+    placeholder examples (`index.html`'s "e.g. Defqon.1"/"e.g. Q-dance" input hints), and test
+    fixtures (`match_test.go`'s example filename used a real artist name and a real festival's
+    edition subtitle; `internal/disk/disk_test.go` had a real festival name in a test
+    filename) - replaced with fully fictional stand-ins (a placeholder festival, artist, and
+    edition name invented for this purpose) that exercise the same code paths without
+    referencing anything real. Left `openapi.json` alone - it's a vendored copy of
+    timetable.lol's own public API spec (not this project's content), and one of its example
+    values happens to reference real channel slugs; editing a third-party reference doc to
+    scrub someone else's example text isn't this project's call to make, and it's never
+    served or shipped as running code.
+  - README's Quick Start/Preset Packs sections updated to match: no more "bundled
+    `dq-timetable.json` seeds DEFQON.1 stages" language, and the disclaimer no longer names
+    Q-dance/DEFQON.1 specifically.
 
 ## Remaining (in suggested order)
 
@@ -206,7 +245,7 @@
   hash) but worth a defensive check if this becomes user-facing/shared widely.
 
 ### 3. Smart Match follow-ups (optional, not blocking)
-- The festival/edition-name/genre tail of filenames like "..._Defqon_1_Sacred_Oath_HardDance"
+- The festival/edition-name/genre tail of filenames like "..._Neonbeat_Prime_Directive_HardDance"
   (festival name + that edition's theme name + genre) is intentionally not parsed at all -
   the channel, date, and artist-name signals already fully disambiguate which set a
   recording belongs to, so there was no need to also parse this tail. If multiple
@@ -224,10 +263,10 @@
 - The reconnect backoff is per-source and in-memory only; if this app is ever run with more
   than one process/replica behind a shared config, backoff state won't be shared. Not a
   problem for the single-process deployment this app currently assumes.
-- Add a Defqon.1 preset pack once there's a clean way to express "this is the same as the
-  built-in default sources" without duplicating `dq-timetable.json`'s stage list by hand -
-  not done yet since it'd just be a second copy of data that already ships by default.
-  Consider more preset packs (other festivals/events) as they come up.
+- Consider more preset packs (other festivals/events) as they come up - now that there's no
+  bundled default timetable/source list at all (removed to avoid shipping any specific
+  festival's real schedule/branding), a preset pack is the only "starter content" this app
+  offers, so it's a reasonable place to grow.
 - Per-user favorites/reminders: `Settings.FavoriteSetIDs` is still one global list shared by
   every account, not per-user - a viewer starring a set would (if ever allowed to) affect
   everyone. Fine for now since only admins can reach Settings/the favorite toggle currently,
@@ -269,12 +308,12 @@
   signal a weight and sum them, then pick the max - much easier to extend/tune than a
   hand-written cascade of comparator conditions, and the confidence-label logic can still
   inspect the winning candidate's individual flags afterward for a human-readable reason.
-- **Defqon.1 recording filename convention** (from a real user example):
+- **A real reported recording filename convention (genericized here)** (from a real user example):
   `{Artist}_{Stage}_{Weekday}_{DD}_{MM}_{YYYY}_{Festival}_{EditionTheme}_{Genre}.ext`, e.g.
-  `DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3`. Stage names are
+  `DJ_Vertex_BLUE_Thursday_25_06_2026_Neonbeat_Prime_Directive_HardDance.mp3`. Stage names are
   short channel-style labels ("BLUE", "RED", "BLACK", etc.) that match the recording's own
   folder/channel - they are *not* the flowery per-edition theme name that follows the date
-  (e.g. "Sacred Oath" is 2026's edition subtitle, not a stage). Don't guess meaning from a
+  (e.g. "Prime Directive" is 2026's edition subtitle, not a stage). Don't guess meaning from a
   single example filename without checking - ask, or verify against how the surrounding
   fields (channel folder names, existing LibraryEvent names) are actually used elsewhere in
   the app before building matching logic around an assumption.

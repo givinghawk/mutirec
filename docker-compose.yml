@@ -27,7 +27,7 @@ services:
     volumes:
       - ./data:/data
       # SMB/NFS option: mount the share on the host, then bind it here.
-      # - /mnt/defqon-recordings:/data/recordings
+      # - /mnt/mutirec-recordings:/data/recordings
       # rclone option: mount your rclone.conf for backups.
       # - ~/.config/rclone/rclone.conf:/home/app/.config/rclone/rclone.conf:ro
 
