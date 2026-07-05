@@ -1698,7 +1698,13 @@ function renderLibraryEventView(id) {
     // Group by day (YYYY-MM-DD extracted from r.start, or fallback to mod date)
     const byDay = new Map();
     items.forEach(r => {
-      const day = r.start ? r.start.slice(0, 10) : new Date(r.modTime).toISOString().slice(0, 10);
+      let day = '';
+      if (r.start) {
+        day = r.start.slice(0, 10);
+      } else {
+        const d = new Date(r.modTime);
+        day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      }
       if (!byDay.has(day)) byDay.set(day, []);
       byDay.get(day).push(r);
     });
