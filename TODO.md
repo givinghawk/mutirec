@@ -530,6 +530,26 @@
     matches-existing-event and proposes-new-event branches) in
     `match_test.go`.
 
+## Done (this session, part 6)
+- **Liveness pre-check before every reconnect attempt**: the scheduler used to
+  just start the full `streamlink|ffmpeg` recording pipeline on every retry
+  and treat that as the liveness check - fine in principle, but some
+  streamlink plugins return a few KB of a placeholder/offline stream before
+  erroring out, which was enough to clear `minViableRecordingBytes` and get
+  saved as a real (but junk) recording on every retry of a flaky/offline
+  channel. Added `App.isSourceLive` (`cmd/web/main.go`): a cheap, separate
+  probe run before `a.start(src)` in `evaluate()` - `streamlink --stream-url`
+  (with the source's own `StreamlinkArgs`/quality) for streamlink-based
+  sources, an HTTP HEAD for direct-URL sources. Only a successful probe leads
+  to `a.start`; a failed one now goes through `recordFailure` directly (same
+  backoff/visible-window bookkeeping as a failed recording attempt) without
+  ever spawning ffmpeg or touching disk. Runs in a per-source goroutine off
+  the scheduler tick so one slow/hanging probe can't back up the rest.
+  README's Auto-Reconnect section documents the two-step check. Tests in
+  `cmd/web/livecheck_test.go` (`TestIsSourceLiveHTTPType` against a real
+  httptest server, `TestIsSourceLiveStreamlinkTypeWhenLive`/`WhenOffline`
+  against a stub `streamlink` script substituted onto `PATH`).
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

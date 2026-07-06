@@ -300,6 +300,16 @@ within 10m0s" note is logged once) - by that point it's more likely the
 stream is over for now than that it's about to come back any second.
 Clicking Record on a source clears its backoff and retries immediately.
 
+Before every retry, a lightweight liveness probe runs first - `streamlink
+--stream-url` for streamlink-based sources, an HTTP HEAD for direct-URL
+sources - and the actual streamlink|ffmpeg recording pipeline only starts if
+that probe succeeds. This is deliberately a separate, cheaper check than
+"just start recording and see what happens": some streamlink plugins return a
+few KB of a placeholder/offline stream before erroring out, which used to be
+enough to count as a real (if tiny and useless) recording on every retry of a
+flaky or offline channel. A failed probe counts toward the same backoff as a
+failed recording attempt, so it doesn't get spammed either.
+
 ## Progressive Web App
 
 The WebUI can be installed to a phone or desktop home screen (look for

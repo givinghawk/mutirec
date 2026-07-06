@@ -568,8 +568,59 @@ func (a *App) evaluate() {
 		if _, blocked := a.retryBlocked(src.ID); blocked {
 			continue
 		}
-		a.start(src)
+		go func() {
+			if !a.isSourceLive(src, cfg) {
+				a.recordFailure(src.Name, src.ID)
+				return
+			}
+			a.start(src)
+		}()
 	}
+}
+
+// liveCheckTimeout bounds how long the pre-flight liveness probe below is
+// allowed to run before treating a source as "not live yet" - well under any
+// reasonable CheckIntervalSeconds so a slow/hanging check on one source
+// can't back up the rest.
+const liveCheckTimeout = 15 * time.Second
+
+// isSourceLive does a lightweight pre-flight check for whether a source
+// actually has a live stream available right now, without spawning the full
+// streamlink|ffmpeg recording pipeline. This is deliberately a *different*
+// (cheaper) method than "just try to record it and see what happens": some
+// streamlink plugins return a few KB of a placeholder/offline stream before
+// erroring out, which used to be enough to clear minViableRecordingBytes and
+// get saved as a real (but junk) recording on every retry of a flaky or
+// offline channel. Checking first means an offline source never gets as far
+// as producing an output file at all.
+func (a *App) isSourceLive(src Source, cfg AppConfig) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), liveCheckTimeout)
+	defer cancel()
+
+	if src.Type == "http" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, src.URL, nil)
+		if err != nil {
+			return false
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode < 400
+	}
+
+	quality := src.Quality
+	if quality == "" {
+		quality = cfg.Settings.DefaultQuality
+	}
+	if quality == "" {
+		quality = "best"
+	}
+	slArgs := append([]string{"--stream-url"}, src.StreamlinkArgs...)
+	slArgs = append(slArgs, src.URL, quality)
+	out, err := exec.CommandContext(ctx, "streamlink", slArgs...).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func (a *App) start(src Source) {
