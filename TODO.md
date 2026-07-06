@@ -29,6 +29,42 @@
 - **Dev server portability fix**: the app previously only listened on `HTTP_ADDR` (default `:8080`) with no way to run on an arbitrary port; added `PORT` env var support (`main.go`) and switched `.claude/launch.json` to `autoPort: true` so the preview tooling can run alongside other things already bound to 8080.
 
 ## Done (this session)
+- **Peer-to-peer set sharing** (`sharing.go`, new file): one instance publishes a bundle of
+  recordings and hands another a short share code (`base64url(JSON{u:publicURL, t:token})`) to
+  pull them directly over HTTP. Config: `Settings.Sharing` (`SharingConfig`: enabled/publicURL/
+  verifiedAt) + `AppConfig.Shares` (`[]Share`, each a token + resolved file-path list).
+  - **Setup-first, checked**: `POST /api/share/verify` generates a one-time nonce and fetches
+    `{publicURL}/api/share/ping?nonce=…` back at itself; success proves the URL routes to *this*
+    instance and is reachable (nonce is single-use, `consumeShareNonce`). `looksPublicHost`
+    warns when a verified URL is actually loopback/RFC1918/single-label (so localhost testing
+    works but the user is told it's LAN-only). Sharing won't create shares until verified
+    (`412` otherwise).
+  - **Sender**: `POST /api/shares` accepts explicit paths + `eventIds` + `stages`, resolved to a
+    concrete deduped file list (`resolveSharePaths`) at creation. `GET /api/share/get/{token}`
+    (public, token-authed) serves the manifest; `/f/{i}` and `/nfo/{i}` stream the file and its
+    sidecar by index (never by caller-supplied path). `DELETE /api/shares/{token}` revokes.
+  - **Receiver**: `POST /api/share/preview` fetches+returns the remote manifest; `POST
+    /api/share/import` downloads selected items (streamed via `.part`→rename, `downloadTo`),
+    pulls `.nfo` sidecars, and recreates event/festival grouping by name
+    (`resolveOrCreateLibraryEventLocked`, same content-addressed pattern as matchfile import).
+    Destination paths are sanitized (`shareImportDest` → `safeName`'d channel+basename, verified
+    under FinishedDir) so a malicious manifest can't traverse out; existing files are skipped,
+    never clobbered.
+  - **Auth**: `/api/share/ping` and `/api/share/get/` are public (`isPublicPath`) - the download
+    surface is authed purely by the unguessable path token, since the receiving instance has no
+    account here; everything else is admin-gated (`isAdminReq` in handlers on top of `rbac`).
+    Share tokens are stripped from non-admin `/api/state`/`/api/config` via `redactSecrets`.
+  - **UI**: Settings → "Peer Sharing (P2P)" panel (URL + Verify/Disable + status). Recordings
+    toolbar → "Share Sets" (multi-select recordings grouped by stage, per-stage select-all,
+    create code, copy, list/revoke active shares) and "Receive" (paste code → preview with
+    per-item checkboxes → import) overlay views, mirroring the Smart Match view pattern; both
+    admin-only (`data-admin-only`).
+  - Verified end-to-end with **two real instances on localhost**: verify (loopback nonce),
+    create a stage share (code = 76 chars), preview+import on the receiver (files + NFO arrived
+    byte-identical), re-import skips, revoke → receiver gets 404; plus auth-boundary checks
+    (unauth management → 401, bad token → 404, unverified create → 412). Unit tests in
+    `sharing_test.go` cover code round-trip/rejection, `looksPublicHost`, path-traversal safety,
+    and one-time nonce use.
 - **UI polish pass** (`app.css` rewritten around a design-token layer): introduced `:root`
   tokens (`--surface-1/2/3`, `--border`/`--border-strong`, `--radius*`, `--shadow-1/2/3`,
   `--ring`, `--ease`) that everything keys off, all still driven by the runtime `--accent`.

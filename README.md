@@ -41,6 +41,7 @@ add any source you like.
 - [Storage](#storage)
 - [Backups](#backups)
 - [Notifications](#notifications)
+- [Peer Sharing (P2P)](#peer-sharing-p2p)
 - [Hardware Transcoding](#hardware-transcoding)
 - [Development](#development)
 - [Authentication and Users](#authentication-and-users)
@@ -64,6 +65,7 @@ add any source you like.
 - Recordings library with search/filter, plus Smart Match to suggest which archived set an unsorted recording belongs to.
 - Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
+- Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly.
 
 **Accounts & security**
 
@@ -350,6 +352,44 @@ The WebUI supports:
 
 Notifications are sent when recordings finish. Backup failures are written to
 the app event log.
+
+## Peer Sharing (P2P)
+
+Two MutiRec instances can send recordings directly to each other — no cloud
+service in the middle. One instance ("sender") publishes a bundle of
+recordings; the other ("receiver") pastes a short code and pulls the files
+(and their metadata) straight over HTTP.
+
+### Setup (required first)
+
+The sender must be reachable at a public URL. Expose it however you like — a
+reverse proxy, a Cloudflare/ngrok-style tunnel, or a port forward — then, in
+**Settings → Peer Sharing**, enter that URL and click **Verify & enable**. The
+check generates a one-time nonce and fetches the URL back to confirm it
+actually routes to this instance (catching typos and misconfigured proxies);
+it also warns if the URL looks like a LAN/loopback address that outside
+instances won't reach. Sharing stays disabled until a URL verifies.
+
+### Sending
+
+In **Recordings → Share Sets**, tick the recordings you want (individually, or
+a whole stage at once via its group checkbox), optionally name the share, and
+click **Create share code**. You get a short code — base64 of just the public
+URL and an unguessable token — to send however you like (chat, email). Each
+share exposes only the exact files you selected; revoke it any time from the
+same panel and its code stops working immediately.
+
+### Receiving
+
+In **Recordings → Receive**, paste the code and click **Preview** to see
+what's on offer (artist, stage, size, whether an `.nfo` sidecar is included).
+Pick what you want and **Import** — files download into your library under
+their stage folder, `.nfo` sidecars come along, and the event/festival
+grouping is recreated by name (the same content-addressed approach as Match
+Files). Files you already have are skipped rather than overwritten.
+
+Sharing setup, share creation, and importing are all admin-only; share tokens
+are never exposed to viewer accounts.
 
 ## Hardware Transcoding
 

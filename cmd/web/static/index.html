@@ -345,6 +345,8 @@
             <button type="button" id="lib-matchfile-export" class="btn" title="Download a shareable match file for everything you've organized">Export Match File</button>
             <button type="button" id="lib-matchfile-import" class="btn" title="Apply an exact-match file someone else exported">Import Match File</button>
             <input type="file" id="lib-matchfile-input" accept="application/json" class="hidden">
+            <button type="button" id="lib-share-open" class="btn" data-admin-only title="Select recordings and generate a share code to send to another MutiRec instance">Share Sets</button>
+            <button type="button" id="lib-receive-open" class="btn" data-admin-only title="Paste a share code to pull recordings from another MutiRec instance">Receive</button>
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -364,6 +366,55 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Best-guess matches for unsorted recordings, from the timestamp in each filename (or its file date) and its channel name against every event's archived timetable. Nothing is applied until you approve it - correct anything wrong first.</p>
           <div id="lib-match-list" class="space-y-2 text-sm"></div>
+        </div>
+
+        <div id="lib-share-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Share Sets</h2>
+            <div class="flex items-center gap-2">
+              <span id="lib-share-selcount" class="pill">0 selected</span>
+              <button type="button" id="lib-share-close" class="btn">Back to Library</button>
+            </div>
+          </div>
+          <p id="lib-share-setup-warn" class="mb-3 hidden text-sm text-amber-300"></p>
+          <p class="mb-3 text-sm text-zinc-400">Pick the recordings to share, then generate a code. The receiver pastes it into <span class="font-medium">Receive</span> to pull the files and their metadata straight from this instance.</p>
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <input id="lib-share-name" class="input max-w-xs" placeholder="Share name (optional)" style="margin:0">
+            <input id="lib-share-filter" class="input max-w-xs" placeholder="Filter list…" style="margin:0">
+            <button type="button" id="lib-share-selectall" class="btn">Select all shown</button>
+            <button type="button" id="lib-share-clear" class="btn">Clear</button>
+            <button type="button" id="lib-share-create" class="btn primary">Create share code</button>
+          </div>
+          <div id="lib-share-code-box" class="mb-3 hidden rounded border border-emerald-400/30 bg-emerald-500/10 p-3">
+            <div class="mb-1 text-sm font-medium text-emerald-200">Share code — send this to the other instance</div>
+            <div class="flex items-center gap-2">
+              <input id="lib-share-code" class="input codebox" readonly style="margin:0">
+              <button type="button" id="lib-share-copy" class="btn">Copy</button>
+            </div>
+          </div>
+          <div id="lib-share-list" class="space-y-3 text-sm"></div>
+          <div id="lib-share-existing" class="mt-4"></div>
+        </div>
+
+        <div id="lib-receive-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Receive a Share</h2>
+            <button type="button" id="lib-receive-close" class="btn">Back to Library</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Paste a share code from another MutiRec instance to preview what's on offer, then pull the recordings (and their metadata sidecars) into your library.</p>
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <input id="lib-receive-code" class="input flex-1" placeholder="Paste share code here" style="margin:0;min-width:260px">
+            <button type="button" id="lib-receive-preview" class="btn primary">Preview</button>
+          </div>
+          <p id="lib-receive-status" class="mb-3 text-sm text-zinc-400"></p>
+          <div id="lib-receive-preview-box" class="hidden">
+            <div class="mb-3 flex flex-wrap items-center gap-2">
+              <span id="lib-receive-selcount" class="pill">0 selected</span>
+              <button type="button" id="lib-receive-selectall" class="btn">Select all</button>
+              <button type="button" id="lib-receive-import" class="btn primary">Import selected</button>
+            </div>
+            <div id="lib-receive-list" class="space-y-2 text-sm"></div>
+          </div>
         </div>
 
         <div id="lib-home">
@@ -697,6 +748,20 @@
             <label>Client Secret<input id="discordOAuthClientSecret" type="password" class="input"></label>
             <label>Redirect URL<input id="discordOAuthRedirectUrl" class="input" placeholder="https://your-domain/api/auth/discord/callback"></label>
             <p class="-mt-2 text-xs text-zinc-500">Register this exact URL in the Discord application's OAuth2 redirect settings - both the login page's button and linking from Account use this same callback.</p>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head">
+              <h2>Peer Sharing (P2P)</h2>
+              <span id="share-status-pill" class="pill">off</span>
+            </div>
+            <p class="mb-3 text-sm text-zinc-400">Let another MutiRec instance pull recordings straight from this one. This instance must be reachable at a public URL — set it below and verify it before sharing (the check confirms the URL routes back here). Once verified, use <span class="font-medium">Recordings → Share Sets</span> to generate a code.</p>
+            <label>Public URL<input id="share-public-url" class="input" placeholder="https://your-domain-or-tunnel"></label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" id="share-verify" class="btn primary">Verify &amp; enable</button>
+              <button type="button" id="share-disable" class="btn hidden">Disable sharing</button>
+              <span id="share-verify-status" class="text-sm text-zinc-400"></span>
+            </div>
+            <p class="mt-2 text-xs text-zinc-500">Expose this instance publicly however you like — a reverse proxy, a Cloudflare/ngrok tunnel, or a port forward. Share tokens are unguessable and each only exposes the exact files you put in that share; revoke a share any time from Recordings → Share Sets.</p>
           </div>
         </div>
         <button id="save-settings" class="btn primary mt-4" data-admin-only>Save Settings</button>

@@ -460,6 +460,7 @@ function renderEditors() {
     fillSettings();
     loadAccount();
     loadUsers();
+    loadShareConfig();
     renderVisualTimetable();
     renderLinkedBadge();
     loadLolEvents();
@@ -927,6 +928,51 @@ $('user-add').onclick = async () => {
     $('user-new-admin').checked = false;
     await loadUsers();
   } catch { /* toast already shown */ }
+};
+
+// --- Peer sharing setup (Settings) ---
+
+async function loadShareConfig() {
+  if (state.role !== 'admin') return;
+  let cfg;
+  try { cfg = await api('/api/share/config'); } catch { return; }
+  $('share-public-url').value = cfg.publicUrl || '';
+  const pill = $('share-status-pill');
+  if (cfg.enabled) {
+    pill.textContent = cfg.public ? 'on' : 'on (LAN?)';
+    pill.className = 'pill status-recording';
+    $('share-disable').classList.remove('hidden');
+  } else {
+    pill.textContent = 'off';
+    pill.className = 'pill status-idle';
+    $('share-disable').classList.add('hidden');
+  }
+  if (cfg.enabled && !cfg.public) {
+    $('share-verify-status').textContent = 'Verified, but the URL looks like a LAN/loopback address — other instances on the internet may not reach it.';
+  } else if (cfg.verifiedAt) {
+    $('share-verify-status').textContent = `Verified ${new Date(cfg.verifiedAt).toLocaleString()}.`;
+  } else {
+    $('share-verify-status').textContent = '';
+  }
+}
+
+$('share-verify').onclick = async () => {
+  const publicUrl = $('share-public-url').value.trim();
+  if (!publicUrl) { toast('Enter the public URL first', 'error'); return; }
+  $('share-verify-status').textContent = 'Checking reachability…';
+  let result;
+  try {
+    result = await api('/api/share/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ publicUrl }) });
+  } catch { $('share-verify-status').textContent = ''; return; }
+  if (!result.ok) { $('share-verify-status').textContent = result.error || 'Verification failed.'; toast('Could not verify that URL', 'error'); return; }
+  toast(result.public ? 'Public URL verified — sharing enabled' : 'Verified, but the URL looks LAN-only', 'info');
+  await loadShareConfig();
+};
+
+$('share-disable').onclick = async () => {
+  try { await api('/api/share/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); } catch { return; }
+  toast('Sharing disabled', 'info');
+  await loadShareConfig();
 };
 
 async function start(id) { try { await api(`/api/record/${id}`, { method: 'POST' }); } catch { return; } await refresh(); }
@@ -1724,6 +1770,8 @@ async function openMatchView() {
   $('lib-home').classList.add('hidden');
   $('lib-event-view').classList.add('hidden');
   $('lib-search-results').classList.add('hidden');
+  $('lib-share-view').classList.add('hidden');
+  $('lib-receive-view').classList.add('hidden');
   $('lib-back').classList.add('hidden');
   $('lib-match-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -1791,6 +1839,197 @@ $('lib-matchfile-input').addEventListener('change', async () => {
   toast(result.matched ? `Matched and organized ${result.matched} recording${result.matched === 1 ? '' : 's'}` : 'No local recordings matched this file', result.matched ? 'info' : 'warn');
   await reloadLibraryData();
 });
+
+// --- Peer-to-peer sharing (sender side): pick sets, generate a share code ---
+
+let shareSelected = new Set(); // recording paths chosen to share
+
+function openShareView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-share-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  shareSelected = new Set();
+  $('lib-share-code-box').classList.add('hidden');
+  $('lib-share-name').value = '';
+  $('lib-share-filter').value = '';
+  const s = (config.settings && config.settings.sharing) || {};
+  const warn = $('lib-share-setup-warn');
+  if (!s.enabled || !s.publicUrl) {
+    warn.textContent = 'Set up and verify a public URL in Settings → Peer Sharing before a share code will work.';
+    warn.classList.remove('hidden');
+  } else {
+    warn.classList.add('hidden');
+  }
+  renderShareList();
+  renderExistingShares();
+}
+function closeShareView() { $('lib-share-view').classList.add('hidden'); reloadLibraryData(); }
+
+function updateShareSelCount() { $('lib-share-selcount').textContent = `${shareSelected.size} selected`; }
+
+function shareFilteredRecordings() {
+  const q = $('lib-share-filter').value.trim().toLowerCase();
+  let list = recordings || [];
+  if (q) list = list.filter(r => `${r.name} ${r.channel || ''} ${r.artist || ''}`.toLowerCase().includes(q));
+  return list;
+}
+
+function renderShareList() {
+  const list = shareFilteredRecordings();
+  if (!list.length) {
+    $('lib-share-list').innerHTML = '<p class="text-zinc-400">No recordings to share yet.</p>';
+    updateShareSelCount();
+    return;
+  }
+  // Group by channel for "select whole stage".
+  const groups = new Map();
+  list.forEach(r => { const ch = r.channel || 'Unsorted'; if (!groups.has(ch)) groups.set(ch, []); groups.get(ch).push(r); });
+  $('lib-share-list').innerHTML = [...groups.entries()].map(([ch, items]) => `
+    <div class="source-group open">
+      <div class="source-group-head">
+        <label class="flex items-center gap-2 font-semibold"><input type="checkbox" class="share-group-check" data-ch="${escapeAttr(ch)}"> ${escapeHtml(ch)}</label>
+        <span class="pill">${items.length}</span>
+      </div>
+      <div class="source-group-body space-y-1">
+        ${items.map(r => `
+          <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+            <span class="flex min-w-0 items-center gap-2">
+              <input type="checkbox" class="share-item-check" data-path="${escapeAttr(r.path)}" ${shareSelected.has(r.path) ? 'checked' : ''}>
+              <span class="truncate">${escapeHtml(libDisplayTitle(r))}</span>
+            </span>
+            <span class="flex-shrink-0 text-xs text-zinc-500">${formatBytes(r.size)}</span>
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+  $('lib-share-list').querySelectorAll('.share-item-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) shareSelected.add(cb.dataset.path); else shareSelected.delete(cb.dataset.path);
+    updateShareSelCount();
+  }));
+  $('lib-share-list').querySelectorAll('.share-group-check').forEach(cb => cb.addEventListener('change', () => {
+    const ch = cb.dataset.ch;
+    (groups.get(ch) || []).forEach(r => { if (cb.checked) shareSelected.add(r.path); else shareSelected.delete(r.path); });
+    renderShareList(); updateShareSelCount();
+  }));
+  updateShareSelCount();
+}
+
+async function renderExistingShares() {
+  let shares;
+  try { shares = await api('/api/shares'); } catch { return; }
+  const box = $('lib-share-existing');
+  if (!shares.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="mb-2 text-sm font-medium text-zinc-300">Active shares</div>` + shares.map(s => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(s.name || '(unnamed)')} <span class="pill">${s.count} file${s.count === 1 ? '' : 's'}</span></div>
+        <div class="truncate text-xs text-zinc-500">${escapeHtml(s.code)}</div>
+      </div>
+      <div class="flex flex-shrink-0 gap-2">
+        <button class="btn" onclick="copyShareCode('${escapeAttr(s.code)}')">Copy code</button>
+        <button class="btn" style="color:#fda4af" onclick="revokeShare('${escapeAttr(s.token)}')">Revoke</button>
+      </div>
+    </div>`).join('');
+}
+
+function copyShareCode(code) { navigator.clipboard.writeText(code).then(() => toast('Share code copied', 'info')).catch(() => {}); }
+
+async function revokeShare(token) {
+  if (!confirm('Revoke this share? Its code will stop working immediately.')) return;
+  try { await api(`/api/shares/${encodeURIComponent(token)}`, { method: 'DELETE' }); toast('Share revoked', 'info'); } catch { return; }
+  renderExistingShares();
+}
+
+$('lib-share-open').onclick = openShareView;
+$('lib-share-close').onclick = closeShareView;
+$('lib-share-filter').addEventListener('input', renderShareList);
+$('lib-share-selectall').onclick = () => { shareFilteredRecordings().forEach(r => shareSelected.add(r.path)); renderShareList(); };
+$('lib-share-clear').onclick = () => { shareSelected = new Set(); renderShareList(); };
+$('lib-share-copy').onclick = () => copyShareCode($('lib-share-code').value);
+$('lib-share-create').onclick = async () => {
+  if (!shareSelected.size) { toast('Select at least one recording to share', 'error'); return; }
+  let result;
+  try {
+    result = await api('/api/shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: $('lib-share-name').value.trim(), paths: [...shareSelected] }) });
+  } catch { return; }
+  $('lib-share-code').value = result.code;
+  $('lib-share-code-box').classList.remove('hidden');
+  toast(`Share created with ${result.count} recording${result.count === 1 ? '' : 's'}`, 'info');
+  renderExistingShares();
+};
+
+// --- Peer-to-peer sharing (receiver side): paste a code, preview, import ---
+
+let receiveManifest = null;
+let receiveSelected = new Set();
+
+function openReceiveView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-receive-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  $('lib-receive-code').value = '';
+  $('lib-receive-status').textContent = '';
+  $('lib-receive-preview-box').classList.add('hidden');
+  receiveManifest = null;
+  receiveSelected = new Set();
+}
+function closeReceiveView() { $('lib-receive-view').classList.add('hidden'); reloadLibraryData(); }
+
+function updateReceiveSelCount() { $('lib-receive-selcount').textContent = `${receiveSelected.size} selected`; }
+
+function renderReceiveList() {
+  if (!receiveManifest) return;
+  const items = receiveManifest.items || [];
+  $('lib-receive-list').innerHTML = items.map(it => `
+    <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <span class="flex min-w-0 items-center gap-2">
+        <input type="checkbox" class="receive-item-check" data-index="${it.index}" ${receiveSelected.has(it.index) ? 'checked' : ''}>
+        <span class="min-w-0">
+          <span class="block truncate font-medium">${escapeHtml(it.artist || it.name)}</span>
+          <span class="block truncate text-xs text-zinc-500">${escapeHtml(it.channel || '')}${it.eventName ? ' · ' + escapeHtml(it.eventName) : ''} · ${formatBytes(it.size)}${it.hasNfo ? ' · +nfo' : ''}</span>
+        </span>
+      </span>
+    </label>`).join('');
+  $('lib-receive-list').querySelectorAll('.receive-item-check').forEach(cb => cb.addEventListener('change', () => {
+    const i = Number(cb.dataset.index);
+    if (cb.checked) receiveSelected.add(i); else receiveSelected.delete(i);
+    updateReceiveSelCount();
+  }));
+  updateReceiveSelCount();
+}
+
+$('lib-receive-open').onclick = openReceiveView;
+$('lib-receive-close').onclick = closeReceiveView;
+$('lib-receive-selectall').onclick = () => { (receiveManifest.items || []).forEach(it => receiveSelected.add(it.index)); renderReceiveList(); };
+$('lib-receive-preview').onclick = async () => {
+  const code = $('lib-receive-code').value.trim();
+  if (!code) { toast('Paste a share code first', 'error'); return; }
+  $('lib-receive-status').textContent = 'Fetching…';
+  let result;
+  try {
+    result = await api('/api/share/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  } catch { $('lib-receive-status').textContent = ''; return; }
+  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Could not read that share.'; $('lib-receive-preview-box').classList.add('hidden'); return; }
+  receiveManifest = result.manifest;
+  receiveSelected = new Set((receiveManifest.items || []).map(it => it.index));
+  $('lib-receive-status').textContent = `"${receiveManifest.name || 'Share'}" — ${receiveManifest.items.length} recording(s):`;
+  $('lib-receive-preview-box').classList.remove('hidden');
+  renderReceiveList();
+};
+$('lib-receive-import').onclick = async () => {
+  if (!receiveManifest) return;
+  if (!receiveSelected.size) { toast('Select at least one recording to import', 'error'); return; }
+  const code = $('lib-receive-code').value.trim();
+  $('lib-receive-status').textContent = 'Importing… (large files may take a while)';
+  let result;
+  try {
+    result = await api('/api/share/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, indices: [...receiveSelected] }) });
+  } catch { $('lib-receive-status').textContent = 'Import failed.'; return; }
+  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Import failed.'; return; }
+  toast(`Imported ${result.imported} recording(s)${result.skipped ? `, ${result.skipped} already present` : ''}${result.failed ? `, ${result.failed} failed` : ''}`, 'info');
+  $('lib-receive-status').textContent = `Done: ${result.imported} imported, ${result.skipped} skipped, ${result.failed} failed.`;
+};
 
 function renderMatchList() {
   $('lib-match-count').textContent = `${matchSuggestions.length} unsorted`;
@@ -1874,6 +2113,9 @@ function libEventDates(e) {
 }
 
 function renderLibrary() {
+  // The Smart Match / Share / Receive overlays sit alongside the library views;
+  // rendering the normal library always dismisses them.
+  ['lib-match-view', 'lib-share-view', 'lib-receive-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
   const term = ($('lib-search').value || '').trim().toLowerCase();
   if (term) {
     renderLibrarySearch(term);

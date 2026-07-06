@@ -52,6 +52,7 @@ type AppConfig struct {
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
 	Festivals       []Festival               `json:"festivals"`
 	Organisations   []Organisation           `json:"organisations"`
+	Shares          []Share                  `json:"shares,omitempty"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
@@ -132,6 +133,7 @@ type Settings struct {
 	ReminderLeadMinutes     int                `json:"reminderLeadMinutes"`
 	RecordingSetLookahead   time.Duration      `json:"-"`
 	DiscordOAuth            DiscordOAuthConfig `json:"discordOAuth"`
+	Sharing                 SharingConfig      `json:"sharing"`
 }
 
 // DiscordOAuthConfig holds this instance's Discord OAuth2 application
@@ -342,6 +344,9 @@ type App struct {
 	oauthMu    sync.Mutex
 	oauthState map[string]pendingOAuth
 
+	shareNonceMu sync.Mutex
+	shareNonces  map[string]time.Time
+
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
@@ -411,6 +416,7 @@ func NewApp(configPath string) (*App, error) {
 		retry:         map[string]*retryState{},
 		sessions:      map[string]sessionInfo{},
 		oauthState:    map[string]pendingOAuth{},
+		shareNonces:   map[string]time.Time{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -478,6 +484,16 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/match-suggestions", a.handleRecordingMatchSuggestions)
 	mux.HandleFunc("/api/recordings/matchfile/export", a.handleRecordingsMatchfileExport)
 	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
+	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
+	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
+	mux.HandleFunc("/api/share/ping", a.handleSharePing)
+	mux.HandleFunc("/api/share/verify", a.handleShareVerify)
+	mux.HandleFunc("/api/share/config", a.handleShareConfig)
+	mux.HandleFunc("/api/share/preview", a.handleSharePreview)
+	mux.HandleFunc("/api/share/import", a.handleShareImport)
+	mux.HandleFunc("/api/share/get/", a.handleShareGet)
+	mux.HandleFunc("/api/shares", a.handleShares)
+	mux.HandleFunc("/api/shares/", a.handleShareItem)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)

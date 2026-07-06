@@ -331,13 +331,21 @@ func (a *App) checkCredentials(username, password string) (User, bool) {
 func isPublicPath(p string) bool {
 	switch p {
 	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js",
-		"/api/auth/discord/status", "/api/auth/discord/login/start", "/api/auth/discord/callback":
+		"/api/auth/discord/status", "/api/auth/discord/login/start", "/api/auth/discord/callback",
+		"/api/share/ping":
 		return true
 	}
 	// Icons are pure branding assets (no user data) and need to load
 	// unauthenticated for the browser's install/add-to-home-screen prompt
 	// and for the login/setup pages themselves.
-	return strings.HasPrefix(p, "/icons/")
+	if strings.HasPrefix(p, "/icons/") {
+		return true
+	}
+	// Peer-to-peer share downloads are authenticated by an unguessable token
+	// in the path, not a session - a receiving instance (or its user) has no
+	// account here. The handler validates the token and only ever serves
+	// files that token's share explicitly lists.
+	return strings.HasPrefix(p, "/api/share/get/")
 }
 
 // rbacAllowed reports whether a given role may make a given request. Any
@@ -808,6 +816,9 @@ func redactSecrets(cfg *AppConfig) {
 	cfg.Settings.Notifications.DiscordWebhook = ""
 	cfg.Settings.DiscordOAuth.ClientSecret = ""
 	cfg.Settings.Backup.RcloneArgs = nil
+	// Share tokens are bearer credentials - never expose them (or the list of
+	// what's being shared) to a non-admin.
+	cfg.Shares = nil
 }
 
 // --- Discord OAuth ---
