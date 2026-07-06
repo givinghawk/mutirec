@@ -530,6 +530,421 @@
     matches-existing-event and proposes-new-event branches) in
     `match_test.go`.
 
+## Done (this session, part 6)
+- **Liveness pre-check before every reconnect attempt**: the scheduler used to
+  just start the full `streamlink|ffmpeg` recording pipeline on every retry
+  and treat that as the liveness check - fine in principle, but some
+  streamlink plugins return a few KB of a placeholder/offline stream before
+  erroring out, which was enough to clear `minViableRecordingBytes` and get
+  saved as a real (but junk) recording on every retry of a flaky/offline
+  channel. Added `App.isSourceLive` (`cmd/web/main.go`): a cheap, separate
+  probe run before `a.start(src)` in `evaluate()` - `streamlink --stream-url`
+  (with the source's own `StreamlinkArgs`/quality) for streamlink-based
+  sources, an HTTP HEAD for direct-URL sources. Only a successful probe leads
+  to `a.start`; a failed one now goes through `recordFailure` directly (same
+  backoff/visible-window bookkeeping as a failed recording attempt) without
+  ever spawning ffmpeg or touching disk. Runs in a per-source goroutine off
+  the scheduler tick so one slow/hanging probe can't back up the rest.
+  README's Auto-Reconnect section documents the two-step check. Tests in
+  `cmd/web/livecheck_test.go` (`TestIsSourceLiveHTTPType` against a real
+  httptest server, `TestIsSourceLiveStreamlinkTypeWhenLive`/`WhenOffline`
+  against a stub `streamlink` script substituted onto `PATH`).
+
+## Done (this session, part 7)
+- **Set Cutter, phase 1 - sidecar timecode + rich metadata + waveform**
+  (`cmd/web/cutter.go`, new file). Every finished recording now gets a
+  `<recording>.timecode.json` sidecar (deliberately separate from the
+  human-readable `.nfo`) written right after the atomic rename in
+  `runRecording`, plus a cached waveform PNG under `thumbnails/` (same
+  content-addressed-by-relative-path convention as recording thumbnails, just
+  a different hash namespace so the two never collide) - generated for every
+  recording, audio-only or video, since the eventual Set Cutter cuts by audio
+  waveform either way.
+  - `RecordingSidecar` carries as much metadata as a single `ffprobe` pass
+    can produce - duration, size, bitrate, video/audio codec, resolution,
+    frame rate, channels, sample rate - plus the recording's wall-clock
+    anchor (`startedAt`, `offsetMs`, `timeSource`) and the source it came
+    from (id/name/type/url/quality/container/flags).
+  - Wall-clock accuracy: `timeCorrection()` does a one-shot, 3s-timeout
+    `GET https://worldtimeapi.org/api/ip` at `a.start(src)` and stores the
+    correction (`offsetMs`) against the system clock; any failure (offline,
+    blocked, rate-limited) falls back to the system clock silently with
+    `timeSource: "system-ntp"` - never blocks or fails the recording.
+  - `GET /api/recordings/timecode?path=` serves the sidecar (404 if none
+    yet); `POST` (admin only) writes/overwrites one - either from a supplied
+    RFC3339 `startedAt` (manual correction) or, if none is given, falls back
+    to `file mtime - probed duration` (`timeSource: "file-mtime-fallback"`)
+    for recordings that predate this feature or arrived outside the live
+    recording pipeline (File Explorer, URL fetch, P2P import).
+  - `GET /api/recordings/waveform?path=` serves the cached PNG, generating
+    it on first request if missing (same on-demand + cache pattern as
+    thumbnails).
+  - `POST /api/recordings/backfill-timecodes` (admin only) walks the whole
+    `FinishedDir` tree and writes a sidecar + waveform for anything missing
+    one - wired to a new "Backfill timecodes & waveforms" button in
+    Settings → Recorder, with a toast summarizing scanned/written/skipped/
+    failed counts.
+  - The recordings scanner's old `strings.HasSuffix(p, ".nfo")` exclusion
+    (four call sites) is now the shared `isSidecarPath()` helper, extended to
+    also skip `.timecode.json` and the upcoming `.markers.json` (Set Cutter
+    phase 2) so neither is ever mistaken for a recording in its own right.
+  - Tests in `cmd/web/cutter_test.go`: sidecar path derivation, frame-rate
+    parsing, `ffprobe` JSON → `RecordingSidecar` field mapping (video+audio
+    and audio-only cases), waveform/thumbnail key non-collision, path-escape
+    rejection, and the timecode GET/POST handlers end-to-end (including the
+    manual-backfill round-trip).
+- **Set Cutter, phase 2 - the Cutter UI itself** (`cmd/web/cutter.go` +
+  `cmd/web/static/{index.html,app.js,app.css}`). A "Cut" button (scissors
+  icon) on every library card and search result opens a modal that splits a
+  whole-day recording into individual set files.
+  - Markers (`CutterMarker`: offset, name, channel, optional
+    `eventId`/`setId`, artist, start/end, tracklist) are edited in the modal
+    and persisted to a `<recording>.markers.json` sidecar via
+    `GET`/`PUT /api/cutter/markers?path=` - the third and last sidecar kind
+    `isSidecarPath()` now excludes from the recordings scanner.
+  - The modal always plays the real file (`<audio>` for audio-only
+    containers, `<video>` for everything else - `cutterIsAudioOnly()` picks
+    by extension) alongside the waveform image from phase 1, so "video sets
+    are also cuttable, treated like audio but with the video running
+    alongside" per the request: markers are placed by ear/eye against the
+    same waveform in both cases, just with a video element instead of a bare
+    audio one. Clicking the waveform seeks the player; "Add marker at
+    current time" reads its `currentTime`.
+  - "Load from timetable" uses the recording's assigned `eventId` + channel
+    to find the matching `StageSchedule` in that event's archived timetable,
+    and the phase-1 sidecar's `startedAt` to convert each set's wall-clock
+    start into a file offset - only sets that actually fall within the
+    file's span become markers, and one already within 1s of an existing
+    marker is skipped rather than duplicated.
+  - Export (`POST /api/cutter/export`, admin only) runs as a background
+    `CutterJob` (same mutex-guarded-struct-plus-`view()` shape as
+    `URLFetchJob`/`ShareJob`) polled via `GET /api/cutter/jobs/<id>` - the
+    settings answer was "background job with a progress toast", so the
+    client shows one immediately and polls every 2s rather than blocking on
+    the request. Stream-copies (`-c copy`) by default for a near-instant,
+    lossless split; an "Advanced options" `<details>` panel (both the
+    silence-threshold sliders **and** this checkbox were asked to live under
+    Advanced, not inline) exposes "Precise cut" which re-encodes audio
+    (`-c:v copy -c:a aac`) for a frame-accurate boundary instead of only
+    keyframe-accurate.
+  - Each segment's output path follows the fixed convention settled on:
+    `<event>/<year>/<stage>/sets/<Artist>_<Stage>_<date>.<ext>`
+    (`cutterExportPath`), falling back to the recording's own folder/channel
+    when a marker isn't linked to a library event. A `RecordingMeta` entry
+    is written for every exported segment (same map `handleRecordingMeta`
+    already uses) so it shows up organized in the library immediately, and a
+    thumbnail is generated for any segment that isn't a known audio-only
+    container.
+  - Tests in `cmd/web/cutter_test.go`: export path building (with and
+    without a linked library event), audio-extension detection, and the
+    markers GET/PUT handlers (empty-array default, round-trip, admin-only
+    enforcement on PUT).
+  - Verified end-to-end against a running instance (no ffmpeg/ffprobe
+    installed in that sandbox, so waveform/export correctly report
+    unavailable/failed rather than silently succeeding) plus a Playwright
+    check that the audio/video element toggle picks the right element by
+    file extension.
+  - **Still to come**: assisted mode (silence detection + optional Whisper,
+    both scoped to ≤20-minute windows around timetable slot boundaries,
+    with silence-threshold sliders under Advanced options) and a general
+    mass-transcode tool for bulk re-encoding recordings.
+
+- **Mass Transcode** (`cmd/web/transcode.go`, new file, plus a "Mass
+  Transcode" view in the Library tab). Bulk re-encode a batch of recordings
+  - video or audio - in one background job, following the same
+  handler-starts-a-goroutine-returns-a-job-ID shape as every other
+  long-running operation (`URLFetchJob`/`ShareJob`/`CutterJob`).
+  - `TranscodeOptions`: target container (blank keeps the source's own),
+    video codec (`copy`/`h264`/`h265`/`none` for audio-only extraction from a
+    video source), audio codec (`copy`/`aac`/`opus`/`mp3`/`flac`), CRF and
+    audio bitrate (both default sensibly when unset), hardware accel (same
+    values as a Source's `HardwareAccel`), and `Replace` (overwrite the
+    original in place vs. write a new `-transcoded` file alongside it).
+  - `POST /api/transcode/start` (admin only) validates every path resolves
+    under `FinishedDir`, starts a `TranscodeJob`, and returns its ID
+    immediately; `GET /api/transcode/jobs/<id>` polls per-file progress
+    (done/failed counts + a log line per file). Files are processed
+    **sequentially, not in parallel** - re-encoding is CPU/GPU-bound, so a
+    batch of concurrent ffmpeg processes would just contend with each other
+    (and with any live recording in progress) rather than finish faster.
+  - `transcodeOneFile` writes to a `.transcoding.tmp` path first and only
+    replaces/places the final file after ffmpeg succeeds - a failed file
+    never touches the original. If a container change means the output path
+    differs from the input, the old file is removed and its `RecordingMeta`
+    entry migrated to the new path (`migrateRecordingMeta`) so the library
+    assignment survives the encode. `rewriteSidecarsAfterTranscode` carries
+    forward whatever timing metadata the old `.timecode.json` had (the
+    recording's real wall-clock start doesn't change just because it was
+    re-encoded) and regenerates the waveform + a thumbnail against the new
+    file.
+  - Frontend mirrors the existing "Share Sets" view almost exactly (same
+    group-by-channel checkbox list, filter box, select-all/clear) since it's
+    the same "pick some recordings" interaction - a new `<select>`-based
+    options form above it, then a progress bar + log reused from the
+    Receive-a-share job box pattern.
+  - Tests in `cmd/web/transcode_test.go`: codec/encoder/container-extension
+    mapping, ffmpeg argument construction (copy defaults, a full re-encode
+    with hardware accel, audio-only extraction), and the start/poll HTTP
+    handlers (admin-only enforcement, empty-paths rejection, a real
+    start→poll round trip).
+  - Verified end-to-end against a running instance (no ffmpeg installed in
+    that sandbox, so the job correctly records a per-file error instead of
+    silently succeeding) plus a Playwright screenshot confirming the Mass
+    Transcode view renders and its selection checkboxes wire up correctly.
+
+- **Set Cutter, phase 3 - assisted mode** (`cmd/web/assist.go`, new file).
+  "Auto-detect cuts" in the Set Cutter modal proposes a refined cut point at
+  every timetable set boundary, without ever processing more than a bounded
+  window per boundary.
+  - `POST /api/cutter/detect` validates the recording has a timecode sidecar
+    with a real `startedAt` and is assigned to a library event with an
+    archived timetable for its channel (all three are hard requirements -
+    without them there's nothing to map wall-clock boundaries onto), then
+    starts a background `DetectJob` and returns its ID; `GET
+    /api/cutter/detect/jobs/<id>` polls it, same shape as every other job
+    type in this app.
+  - For each boundary (one set's end = the next set's start) that falls
+    within the recording's own span, `runDetectJob` opens a ±10-minute
+    (20-minute total) window and runs **silence detection always**
+    (`detectSilenceNear`/`parseSilenceLog`/`pickClosestSilence` - parses
+    ffmpeg's `silencedetect` stderr output, picks the gap whose end lands
+    closest to the expected boundary, ties broken by the longer silence)
+    plus **Whisper optionally** (`detectWhisperNear`/`matchWhisperTranscript`
+    - extracts the window to a 16kHz mono WAV, runs whichever of
+      `whisper`/`whisper-cli`/`faster-whisper` is on `PATH`, and scans the
+      transcript for the next set's own artist name first, falling back to
+      a generic MC handoff phrase in English or Dutch).
+  - The two signals are combined into a confidence score: both agreeing
+    within 30s → `"high"`/`"combined"`; either alone → `"medium"`; neither →
+    `"low"`/`"timetable-only"` (falls back to the raw, un-refined timetable
+    time). Nothing is written automatically - the client reviews each
+    `DetectedMarker` proposal and accepts it (or all of them) into the
+    working marker list.
+  - Silence threshold (`-50dB` default) and minimum duration (`2s` default)
+    are exposed as sliders, and Whisper as a checkbox + language dropdown
+    (`"auto"` default, or a fixed language), both tucked under the Set
+    Cutter's existing "Advanced options" panel per the plan - some stages
+    have continuous crowd noise with no true silence, so these needed to be
+    adjustable rather than hardcoded.
+  - `syscheck.go` gained a `checkWhisper()` row (optional - a warning, not a
+    failure, when absent) so it's visible from Diagnostics whether
+    Whisper-assisted detection is available on this install.
+  - Tests in `cmd/web/assist_test.go`: silence-log parsing, closest-silence
+    selection (including the duration tie-break), Whisper transcript
+    matching (artist name, generic phrase fallback, no-match case), and the
+    detect handler's three-part validation (admin-only, requires a timecode
+    sidecar, requires an assigned event+timetable) plus a full
+    request→job-exists round trip.
+  - Verified end-to-end against a running instance: created a real library
+    event + archived timetable + timecode sidecar, confirmed the detect
+    endpoint's validation chain passes and the job starts, and (since ffmpeg
+    isn't installed in that sandbox) correctly records a probe error rather
+    than silently succeeding. Confirmed via direct JS-state assertions
+    (not just a screenshot, since the sandbox's Tailwind CDN load was
+    unreliable) that the proposals panel starts hidden, becomes visible
+    with rendered rows once a job returns proposals, and correctly
+    transfers an accepted proposal into the marker list.
+
+  This completes all three planned Set Cutter phases from this session.
+
+## Done (this session, part 8)
+- **Free-space settings shown in GB, not raw bytes**
+  (`cmd/web/static/{index.html,app.js}`). Settings → Recorder's minimum/
+  warning free-space fields now take/display GB (`minFreeGb`/`warnFreeGb`
+  inputs, one decimal place); `config.settings.minFreeBytes`/`warnFreeBytes`
+  are unchanged on disk (still bytes, for backward compatibility with
+  existing `config.json` files) - `fillSettings`/`readSettings` convert at
+  the UI boundary via new `bytesToGb`/`gbToBytes` helpers.
+- **Storage forecasting on the Dashboard** (`main.go`: `StorageForecast`,
+  `computeStorageForecast`). Estimates the current combined write rate
+  across every active recording (each one's temp-file size ÷ its own
+  elapsed time, summed - a recording under `minForecastSampleSeconds` (5s)
+  old is excluded since its rate isn't meaningful yet) and projects how many
+  hours of recording remain at that rate given the volume's current free
+  space. Exposed as a new `storageForecast` field on `/api/state`, shown as
+  a one-line summary under the Storage panel ("~14.3 MB/s across 2 active
+  recordings — about 6.2 hours of storage left"); blank when nothing is
+  actively recording, since there's no rate to extrapolate from. Tests in
+  `cmd/web/storage_test.go` cover no-active-recordings, the just-started
+  exclusion, a single-recording projection, and summing across multiple
+  concurrent recordings.
+- **Token-gated HTTP stream support** (`main.go`: `Source.HTTPHeaders`,
+  `parseHTTPHeaderLines`, `ffmpegHeadersArg`, `proxyLiveHTTP`). A live HTTP
+  stream that needs an `Authorization` header, a signed cookie, or any other
+  custom header now has somewhere to configure that: a new "HTTP headers"
+  textarea in the Source editor (one `Key: Value` per line, only relevant
+  for `http`-type sources), stored as `Source.HTTPHeaders []string`. Applied
+  everywhere this app talks to that URL, since all three had to agree or a
+  token-gated source would work in some places and silently fail in others:
+  - **Recording**: `ffmpegArgs` adds ffmpeg's `-headers` option before `-i`
+    when the input is an actual URL (not the streamlink `pipe:0` case, where
+    it would be meaningless).
+  - **Liveness pre-check**: `isSourceLive`'s HTTP HEAD probe now sends the
+    same headers - without this, a token-gated source would get a 401/403
+    on every liveness check and never be allowed to start recording at all,
+    even though the recording pipeline itself would have worked fine.
+  - **"Test Stream" button**: `handleSourceTest` gained the same
+    `httpHeaders` field so the editor's test button reflects reality instead
+    of reporting a false failure.
+  - **Live preview**: `handleLive`'s `http`-type branch used to just
+    `http.Redirect` the browser straight to the source URL - which can't
+    carry a server-held auth header, so a token-gated source's live preview
+    would fail even though recording worked. When headers are configured it
+    now proxies the request through the server instead (`proxyLiveHTTP`,
+    bound only by the client's own request context so it can stream for as
+    long as the tab stays open); the plain redirect is kept as the
+    zero-overhead default when no headers are set.
+  - Tests in `cmd/web/httpheaders_test.go`: header-line parsing (including
+    comments/blank lines/values containing a colon), the ffmpeg `-headers`
+    string format, `-headers` placement relative to `-i` and its omission
+    for `pipe:0` input or when nothing is configured, `isSourceLive`
+    succeeding/failing based on whether the header was actually sent (real
+    `httptest` server), and `proxyLiveHTTP` forwarding both the header and
+    the response body/content-type.
+  - Verified end-to-end against a running instance with a real token-gated
+    fake upstream (a small Python HTTP server requiring
+    `Authorization: Bearer secret-token`): source creation persists
+    `httpHeaders`, the "Test Stream" endpoint succeeds with the header and
+    fails with a real 401 without it, and `GET /api/live/<id>` returns the
+    upstream's actual `200` + body instead of a redirect the browser could
+    never have authenticated through on its own.
+
+## Done (this session, part 9)
+- **MilkDrop-style music visualizer** (Butterchurn, a WebGL port of the
+  Winamp MilkDrop plugin, replacing the previous plain frequency-bar
+  canvas). Vendored (not CDN) at
+  `cmd/web/static/vendor/butterchurn/{butterchurn.min.js,butterchurn-presets.min.js}`
+  and included via `<script>` tags in `index.html` — vendored rather than
+  loaded from unpkg like the other CDN scripts so the visualizer keeps
+  working on a fully offline/self-hosted install, consistent with the rest
+  of the app's no-external-dependency posture.
+  - `ensureVizGraph`/`startVisualizer`/`stopVisualizer` in `app.js` keep
+    their existing signatures (`startVisualizer(videoEl, canvasId)`,
+    `stopVisualizer(canvasId)`) so both existing call sites — the Watch
+    tab's live preview (`#watch-visualizer`) and the Recordings player's
+    audio-only playback (`#cp-visualizer`) — needed no changes beyond
+    wiring up a new "Next preset" button.
+  - The `AudioContext`/`MediaElementSourceNode` graph is unchanged
+    (`source.connect(audioCtx.destination)` for actual playback); Butterchurn
+    attaches via `visualizer.connectAudio(source)` and renders via
+    `visualizer.render()` each animation frame, replacing the old
+    `AnalyserNode` + 2D bar-drawing loop as the primary path. The old bar
+    visualizer is kept as an automatic fallback for any browser/context
+    where `butterchurn.createVisualizer` isn't available or throws (e.g. no
+    WebGL2) — built lazily so a working WebGL2 context always wins first.
+  - `nextVisualizerPreset(canvasId, random)` cycles or randomly jumps
+    presets with a 1.5s blend; wired to new "Next preset" buttons next to
+    the Watch tab's visualizer toggle and as an overlay button on the
+    Recordings player's audio stage. A preset is also chosen at random on
+    first start so every recording doesn't open on the same pattern.
+  - Canvas resizing is handled by a `ResizeObserver` that calls
+    `visualizer.setRendererSize(w, h)` — needed since Butterchurn's
+    internal WebGL viewport doesn't auto-track its canvas's CSS size the
+    way a 2D canvas redraw loop does.
+  - **Real bugs caught only by loading the actual page in a browser** (`go
+    vet`/`go test` don't touch frontend JS at all here since this feature
+    has no Go-side changes): (1) both vendored UMD builds nest their real
+    API under a non-enumerable `.default` property
+    (`window.butterchurn.default.createVisualizer`, not
+    `window.butterchurn.createVisualizer` directly) — `Object.keys()` on
+    the global shows nothing useful either way since the interop props
+    aren't enumerable, so this only surfaces by actually calling the
+    function and checking `typeof`. (2) A canvas element permanently locks
+    to whichever context type (`"webgl2"` vs `"2d"`) is first *successfully*
+    established — an early `canvas.getContext('webgl2')` feature-detection
+    probe (before deciding whether to try Butterchurn) silently poisoned
+    the canvas for its own 2D fallback path once Butterchurn failed to
+    initialize, crashing on `canvas.getContext('2d')` returning `null`. Fix
+    was to remove the standalone probe entirely and let
+    `butterchurn.createVisualizer`'s own internal `getContext('webgl2')`
+    call be the only attempt, falling back to 2D only if that throws.
+  - Verified with a Playwright script driving the real embedded page (login
+    → construct a dummy `<audio>` element with a silent data-URI WAV so
+    `createMediaElementSource` has something to attach to → call
+    `startVisualizer` directly → read back WebGL pixel data via
+    `gl.readPixels` to confirm non-blank output, not just "no exception
+    thrown") rather than trusting unit tests alone, since this is a
+    rendering bug class Go's test suite has no way to catch.
+
+## Done (this session, part 10)
+- **Live Cut Sessions - crowdsourced live transition marking** (new
+  `cmd/web/livecut.go`). Lets multiple MutiRec installs collaboratively flag
+  candidate transition points *while a source is still recording live*,
+  instead of one person re-listening to the whole thing alone afterward in
+  the Set Cutter.
+  - **Architecture reuses the existing P2P sharing shape almost exactly**
+    (`sharing.go`): a "host" instance ties a session to one of its own live
+    sources and exposes two public, token-authed endpoints -
+    `POST /api/livecut/host/mark` and `GET /api/livecut/host/feed` - the
+    same trust model as `/api/share/ping`/`/api/share/get/` (an unguessable
+    token is the only credential; no session/account needed by the caller).
+    A "guest" instance joins with a short code of the *exact same*
+    `{u: publicURL, t: token}` shape as a P2P share code -
+    `encodeShareCode`/`decodeShareCode` are reused as-is, no new encoding
+    invented.
+  - **One clock, not many**: the host stamps every mark's wall-clock
+    timestamp itself (`LiveCutSession.addEvent`), regardless of which
+    instance it came from, so cross-instance clock skew never enters the
+    picture. Each mark is tagged with the submitting instance's `InstanceID`
+    (new field on `AppConfig`, generated once via `shortToken()` and
+    persisted like everything else in `config.json`), its `UI.AppName`, and
+    the acting user's username.
+  - **Any authenticated role can mark, not just admins** - crowdsourcing the
+    button press across everyone watching is the point. `rbacAllowed`
+    (`auth.go`) special-cases any path ending in `/mark` under
+    `/api/livecut/sessions/` or `/api/livecut/joined/`; starting/closing/
+    joining/importing a session stays admin-only (checked in-handler, same
+    as the rest of this app's mutating admin-gated actions).
+  - **Guest side is a thin read/write-through proxy, not a mirror**: guest
+    endpoints (`/api/livecut/joined/{token}/mark`, `.../feed`) just forward
+    to whatever instance is actually hosting the session and relay the
+    response - no local caching or background job, since polling is already
+    cheap and this avoids a second place marks could get out of sync (one
+    fewer moving part than a `ShareJob`-style background job).
+  - **Import into the Set Cutter**: `handleLiveCutImport` converts a
+    session's collected wall-clock marks into `CutterMarker` offsets
+    (`(markTs - recording.startedAt) / 1000`) and merges them into that
+    recording's existing marker sidecar via the same
+    `sidecarMarkersPath`/`writeSidecarJSON` helpers `handleCutterMarkers`
+    already uses - so a crowdsourced session just pre-populates the normal
+    Set Cutter review flow rather than being a separate export path.
+  - Sessions are deliberately in-memory only (`App.liveCutSessions`/
+    `liveCutJoined`, both `map[string]*...` guarded by their own mutex, same
+    shape as `shareJobs`) - never persisted to `config.json`, cleared on
+    restart, consistent with the existing sessions/backoff/share-nonce
+    precedent.
+  - **Frontend** (`index.html`/`app.js`): new "Live Cut Session" panel in
+    the Watch tab, next to the source you're currently watching - matches
+    the chosen entry point since this is inherently about a source that's
+    actively recording. Shows host controls (code, "Mark Transition", live
+    feed, close, "Send to Set Cutter") when hosting a session for the
+    selected source, and an always-available "Join someone else's session"
+    box independent of the selected source (a guest instance may have no
+    matching local source at all). Feed updates via a plain ~1.5s
+    `setInterval` poll (same convention as this app's existing 5s dashboard
+    refresh and `ShareJob` progress polling) - no WebSocket/long-polling
+    added, since marks are already wall-clock-stamped so sub-second delivery
+    isn't needed.
+  - Tests in `cmd/web/livecut_test.go`: event sequencing/`since`-cursor
+    correctness, unknown/closed-token rejection on the public endpoints, the
+    rbac exception actually letting a viewer role mark, the offset-conversion
+    math plus the sidecar file it writes, and a full join→mark→feed round
+    trip against a real `httptest.Server` standing in for "the host" (two
+    independent `*App` instances talking over a real HTTP socket, not just
+    in-process function calls).
+  - Verified against two real, separately-running `mutirec` processes on
+    different ports (admin setup/login, config with a public URL, the
+    `POST /api/livecut/sessions` safeguard correctly returning 412 for a
+    source that isn't actively recording) and a real browser session driving
+    the new Watch tab panel (Start button correctly disabled until the
+    source is recording, an invalid join code surfacing a clear error) -
+    this sandbox has no `ffmpeg`, so a genuine live recording (and therefore
+    the full cross-instance mark/feed flow between two real OS processes)
+    couldn't be exercised end-to-end here; the `httptest`-backed Go test
+    above is the strongest available substitute; anyone bringing up two real
+    installs on their own machines gets full ffmpeg-backed verification for
+    free the first time they use it.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

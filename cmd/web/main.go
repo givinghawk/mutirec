@@ -53,6 +53,11 @@ type AppConfig struct {
 	Festivals       []Festival               `json:"festivals"`
 	Organisations   []Organisation           `json:"organisations"`
 	Shares          []Share                  `json:"shares,omitempty"`
+	// InstanceID identifies this install to *other* installs it collaborates
+	// with (currently: Live Cut Sessions) - generated once on first load and
+	// persisted, never user-editable. Distinct from any Share/session token,
+	// which are per-share/per-session rather than per-install.
+	InstanceID string `json:"instanceId,omitempty"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
@@ -202,6 +207,7 @@ type Source struct {
 	TimetableStage    string   `json:"timetableStage,omitempty"`
 	FestivalID        string   `json:"festivalId,omitempty"`
 	LoudnessNormalize bool     `json:"loudnessNormalize,omitempty"`
+	HTTPHeaders       []string `json:"httpHeaders,omitempty"`
 }
 
 // SourcePreset is one bundled, ready-to-add pack of sources - a DJ/streamer,
@@ -221,6 +227,7 @@ type SourcePreset struct {
 type StageSchedule struct {
 	Stage string        `json:"stage"`
 	URL   string        `json:"url"`
+	Color string        `json:"color,omitempty"`
 	Sets  []ScheduleSet `json:"sets"`
 }
 
@@ -244,16 +251,65 @@ type TimetableLink struct {
 }
 
 type State struct {
-	Version     string              `json:"version"`
-	StartedAt   time.Time           `json:"startedAt"`
-	Sources     []SourceStatus      `json:"sources"`
-	Events      []Event             `json:"events"`
-	Disk        disk.Usage          `json:"disk"`
-	Config      AppConfig           `json:"config"`
-	ActiveCount int                 `json:"activeCount"`
-	Warnings    []string            `json:"warnings"`
-	NowPlaying  map[string]*NowItem `json:"nowPlaying"`
-	Role        Role                `json:"role,omitempty"`
+	Version         string              `json:"version"`
+	StartedAt       time.Time           `json:"startedAt"`
+	Sources         []SourceStatus      `json:"sources"`
+	Events          []Event             `json:"events"`
+	Disk            disk.Usage          `json:"disk"`
+	Config          AppConfig           `json:"config"`
+	ActiveCount     int                 `json:"activeCount"`
+	Warnings        []string            `json:"warnings"`
+	NowPlaying      map[string]*NowItem `json:"nowPlaying"`
+	Role            Role                `json:"role,omitempty"`
+	StorageForecast StorageForecast     `json:"storageForecast"`
+}
+
+// StorageForecast projects how much recording time is left at the current
+// combined write rate of every active recording, so a large multi-stage
+// festival with several 4K streams going at once gets a meaningfully
+// different estimate than a single audio-only source. Not applicable (no
+// hours figure) when nothing is actively recording, since there's no
+// current rate to extrapolate from.
+type StorageForecast struct {
+	Applicable       bool    `json:"applicable"`
+	BytesPerSecond   float64 `json:"bytesPerSecond"`
+	ActiveRecordings int     `json:"activeRecordings"`
+	HoursRemaining   float64 `json:"hoursRemaining,omitempty"`
+}
+
+// minForecastSampleSeconds is how long a recording must have been running
+// before its size/elapsed-time ratio is trusted as a rate - a recording
+// that just started hasn't written enough yet for that ratio to mean much
+// (ffmpeg/streamlink startup overhead would dominate it).
+const minForecastSampleSeconds = 5.0
+
+// computeStorageForecast estimates the current aggregate write rate across
+// every active recording (each one's own size ÷ elapsed time, summed) and
+// projects how many hours of recording remain at that rate given the
+// volume's current free space.
+func computeStorageForecast(active map[string]*recording, freeBytes uint64) StorageForecast {
+	var totalBps float64
+	count := 0
+	now := time.Now()
+	for _, rec := range active {
+		elapsed := now.Sub(rec.startedAt).Seconds()
+		if elapsed < minForecastSampleSeconds {
+			continue
+		}
+		info, err := os.Stat(rec.tempPath)
+		if err != nil {
+			continue
+		}
+		totalBps += float64(info.Size()) / elapsed
+		count++
+	}
+	if count == 0 || totalBps <= 0 {
+		return StorageForecast{ActiveRecordings: count}
+	}
+	return StorageForecast{
+		Applicable: true, BytesPerSecond: totalBps, ActiveRecordings: count,
+		HoursRemaining: float64(freeBytes) / totalBps / 3600,
+	}
 }
 
 type SourceStatus struct {
@@ -305,18 +361,20 @@ type Event struct {
 }
 
 type recording struct {
-	source     Source
-	ctx        context.Context
-	cancel     context.CancelFunc
-	startedAt  time.Time
-	tempPath   string
-	finalPath  string
-	logPath    string
-	logFile    *os.File
-	lastErr    string
-	done       chan struct{}
-	hlsDir     string
-	manualStop atomic.Bool
+	source       Source
+	ctx          context.Context
+	cancel       context.CancelFunc
+	startedAt    time.Time
+	timeOffsetMs int64
+	timeSource   string
+	tempPath     string
+	finalPath    string
+	logPath      string
+	logFile      *os.File
+	lastErr      string
+	done         chan struct{}
+	hlsDir       string
+	manualStop   atomic.Bool
 }
 
 type App struct {
@@ -354,11 +412,26 @@ type App struct {
 	fetchJobsMu sync.Mutex
 	fetchJobs   map[string]*URLFetchJob
 
+	liveCutMu       sync.Mutex
+	liveCutSessions map[string]*LiveCutSession // token -> session this instance is hosting
+
+	liveCutJoinedMu sync.Mutex
+	liveCutJoined   map[string]*joinedLiveCut // token -> a session hosted elsewhere, joined by this instance
+
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
 	thumbGenMu      sync.Mutex
 	thumbGenerating map[string]chan struct{}
+
+	cutterJobsMu sync.Mutex
+	cutterJobs   map[string]*CutterJob
+
+	transcodeJobsMu sync.Mutex
+	transcodeJobs   map[string]*TranscodeJob
+
+	detectJobsMu sync.Mutex
+	detectJobs   map[string]*DetectJob
 
 	sourcePresets []SourcePreset
 }
@@ -417,19 +490,24 @@ func NewApp(configPath string) (*App, error) {
 		return nil, err
 	}
 	app := &App{
-		cfg:           cfg,
-		config:        configPath,
-		startedAt:     time.Now(),
-		active:        map[string]*recording{},
-		lastFinished:  map[string]string{},
-		remindersSent: map[string]time.Time{},
-		retry:         map[string]*retryState{},
-		sessions:      map[string]sessionInfo{},
-		oauthState:    map[string]pendingOAuth{},
-		shareNonces:   map[string]time.Time{},
-		shareJobs:     map[string]*ShareJob{},
-		fetchJobs:     map[string]*URLFetchJob{},
-		sourcePresets: loadSourcePresets(),
+		cfg:             cfg,
+		config:          configPath,
+		startedAt:       time.Now(),
+		active:          map[string]*recording{},
+		lastFinished:    map[string]string{},
+		remindersSent:   map[string]time.Time{},
+		retry:           map[string]*retryState{},
+		sessions:        map[string]sessionInfo{},
+		oauthState:      map[string]pendingOAuth{},
+		shareNonces:     map[string]time.Time{},
+		shareJobs:       map[string]*ShareJob{},
+		fetchJobs:       map[string]*URLFetchJob{},
+		liveCutSessions: map[string]*LiveCutSession{},
+		liveCutJoined:   map[string]*joinedLiveCut{},
+		cutterJobs:      map[string]*CutterJob{},
+		transcodeJobs:   map[string]*TranscodeJob{},
+		detectJobs:      map[string]*DetectJob{},
+		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -498,6 +576,17 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
 	mux.HandleFunc("/api/recordings/thumbnail", a.handleRecordingThumbnail)
 	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
+	mux.HandleFunc("/api/recordings/timecode", a.handleRecordingTimecode)
+	mux.HandleFunc("/api/recordings/waveform", a.handleRecordingWaveform)
+	mux.HandleFunc("/api/recordings/backfill-timecodes", a.handleBackfillTimecodes)
+	mux.HandleFunc("/api/cutter/markers", a.handleCutterMarkers)
+	mux.HandleFunc("/api/cutter/preview", a.handleCutterPreview)
+	mux.HandleFunc("/api/cutter/export", a.handleCutterExport)
+	mux.HandleFunc("/api/cutter/jobs/", a.handleCutterJobItem)
+	mux.HandleFunc("/api/cutter/detect", a.handleCutterDetect)
+	mux.HandleFunc("/api/cutter/detect/jobs/", a.handleCutterDetectJobItem)
+	mux.HandleFunc("/api/transcode/start", a.handleTranscodeStart)
+	mux.HandleFunc("/api/transcode/jobs/", a.handleTranscodeJobItem)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).
@@ -523,6 +612,17 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/share/get/", a.handleShareGet)
 	mux.HandleFunc("/api/shares", a.handleShares)
 	mux.HandleFunc("/api/shares/", a.handleShareItem)
+	// Live Cut Sessions (crowdsourced live transition marking). The two
+	// /host/ endpoints are public/token-authed like /api/share/ping and
+	// /api/share/get/ above - see isPublicPath - since a remote instance's
+	// backend, not a logged-in user of this one, calls them directly.
+	mux.HandleFunc("/api/livecut/host/mark", a.handleLiveCutHostMark)
+	mux.HandleFunc("/api/livecut/host/feed", a.handleLiveCutHostFeed)
+	mux.HandleFunc("/api/livecut/sessions", a.handleLiveCutSessions)
+	mux.HandleFunc("/api/livecut/sessions/", a.handleLiveCutSessionItem)
+	mux.HandleFunc("/api/livecut/join", a.handleLiveCutJoin)
+	mux.HandleFunc("/api/livecut/joined", a.handleLiveCutJoinedList)
+	mux.HandleFunc("/api/livecut/joined/", a.handleLiveCutJoinedItem)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
@@ -568,8 +668,66 @@ func (a *App) evaluate() {
 		if _, blocked := a.retryBlocked(src.ID); blocked {
 			continue
 		}
-		a.start(src)
+		go func() {
+			if !a.isSourceLive(src, cfg) {
+				a.recordFailure(src.Name, src.ID)
+				return
+			}
+			a.start(src)
+		}()
 	}
+}
+
+// liveCheckTimeout bounds how long the pre-flight liveness probe below is
+// allowed to run before treating a source as "not live yet" - well under any
+// reasonable CheckIntervalSeconds so a slow/hanging check on one source
+// can't back up the rest.
+const liveCheckTimeout = 15 * time.Second
+
+// isSourceLive does a lightweight pre-flight check for whether a source
+// actually has a live stream available right now, without spawning the full
+// streamlink|ffmpeg recording pipeline. This is deliberately a *different*
+// (cheaper) method than "just try to record it and see what happens": some
+// streamlink plugins return a few KB of a placeholder/offline stream before
+// erroring out, which used to be enough to clear minViableRecordingBytes and
+// get saved as a real (but junk) recording on every retry of a flaky or
+// offline channel. Checking first means an offline source never gets as far
+// as producing an output file at all.
+func (a *App) isSourceLive(src Source, cfg AppConfig) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), liveCheckTimeout)
+	defer cancel()
+
+	if src.Type == "http" {
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, src.URL, nil)
+		if err != nil {
+			return false
+		}
+		// A token-gated stream (Authorization header, a signed cookie, a
+		// custom auth header) needs the same headers the recording pipeline
+		// sends via ffmpeg's -headers, or this probe sees a 401/403 and
+		// wrongly reports the source as offline - see ffmpegArgs.
+		for _, p := range parseHTTPHeaderLines(src.HTTPHeaders) {
+			req.Header.Set(p[0], p[1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode < 400
+	}
+
+	quality := src.Quality
+	if quality == "" {
+		quality = cfg.Settings.DefaultQuality
+	}
+	if quality == "" {
+		quality = "best"
+	}
+	slArgs := append([]string{"--stream-url"}, src.StreamlinkArgs...)
+	slArgs = append(slArgs, src.URL, quality)
+	out, err := exec.CommandContext(ctx, "streamlink", slArgs...).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func (a *App) start(src Source) {
@@ -580,6 +738,11 @@ func (a *App) start(src Source) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	started := time.Now()
+	// One-shot wall-clock correction against worldtimeapi.org, used to anchor
+	// this recording's timecode sidecar - see cutter.go. Best-effort: falls
+	// back to the system clock silently if unreachable, bounded to a few
+	// seconds so it never meaningfully delays a source starting.
+	timeOffsetMs, timeSrc := timeCorrection()
 	stageDir := filepath.Join(a.cfg.Settings.FinishedDir, safeName(src.Name))
 	tempDir := filepath.Join(a.cfg.Settings.TempDir, safeName(src.Name))
 	_ = os.MkdirAll(stageDir, 0o755)
@@ -612,7 +775,7 @@ func (a *App) start(src Source) {
 			a.event("warn", fmt.Sprintf("[%s] could not create live rewind buffer: %s", src.Name, err))
 		}
 	}
-	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{}), hlsDir: hlsDir}
+	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, timeOffsetMs: timeOffsetMs, timeSource: timeSrc, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{}), hlsDir: hlsDir}
 	a.active[src.ID] = rec
 	a.mu.Unlock()
 
@@ -801,7 +964,9 @@ func (a *App) runRecording(rec *recording) {
 		if rel, relErr := filepath.Rel(a.snapshotConfig().Settings.FinishedDir, rec.finalPath); relErr == nil {
 			audioOnly := rec.source.AudioOnly
 			finalPath := rec.finalPath
-			go a.generateThumbnail(finalPath, filepath.ToSlash(rel), audioOnly)
+			relPath := filepath.ToSlash(rel)
+			go a.generateThumbnail(finalPath, relPath, audioOnly)
+			go a.finalizeRecordingSidecar(rec, finalPath, relPath, rec.timeOffsetMs, rec.timeSource)
 		}
 		if failed {
 			// Real content was captured before the error hit (e.g. a network
@@ -950,10 +1115,57 @@ const loudnormFilter = "loudnorm=I=-16:TP=-1.5:LRA=11"
 // bounded HLS output used for live-rewind DVR playback of the in-progress
 // recording. The HLS branch always transcodes to H.264/AAC since it must be
 // playable by hls.js/Safari regardless of what codec the archival copy uses.
+// parseHTTPHeaderLines turns a Source's HTTPHeaders (one "Key: Value" line
+// each, the same convention as a plain HTTP header block) into ordered
+// key/value pairs, silently skipping blank lines, "#" comments, and any
+// line without a colon rather than failing the whole source over one typo.
+func parseHTTPHeaderLines(lines []string) [][2]string {
+	var pairs [][2]string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if key == "" {
+			continue
+		}
+		pairs = append(pairs, [2]string{key, val})
+	}
+	return pairs
+}
+
+// ffmpegHeadersArg joins header pairs into the single CRLF-terminated
+// string ffmpeg's "-headers" input option expects.
+func ffmpegHeadersArg(pairs [][2]string) string {
+	var b strings.Builder
+	for _, p := range pairs {
+		b.WriteString(p[0])
+		b.WriteString(": ")
+		b.WriteString(p[1])
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
 func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) []string {
 	args := []string{"-hide_banner", "-y", "-nostdin"}
 	if src.HardwareAccel != "" && src.HardwareAccel != "none" {
 		args = append(args, "-hwaccel", src.HardwareAccel)
+	}
+	// -headers only means something when ffmpeg itself is opening a network
+	// URL (the "http" source type's direct -i src.URL) - it's meaningless
+	// (and harmless either way) for the streamlink pipe:0 case, so gate on
+	// the input actually looking like a URL rather than on src.Type.
+	if (strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://")) && len(src.HTTPHeaders) > 0 {
+		if headerArg := ffmpegHeadersArg(parseHTTPHeaderLines(src.HTTPHeaders)); headerArg != "" {
+			args = append(args, "-headers", headerArg)
+		}
 	}
 	args = append(args, src.FFmpegArgs...)
 	args = append(args, "-i", input)
@@ -1286,9 +1498,10 @@ func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Type    string `json:"type"`
-		URL     string `json:"url"`
-		Quality string `json:"quality"`
+		Type        string   `json:"type"`
+		URL         string   `json:"url"`
+		Quality     string   `json:"quality"`
+		HTTPHeaders []string `json:"httpHeaders"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1306,6 +1519,9 @@ func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
+		}
+		for _, p := range parseHTTPHeaderLines(req.HTTPHeaders) {
+			httpReq.Header.Set(p[0], p[1])
 		}
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
@@ -1344,7 +1560,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1450,7 +1666,7 @@ func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Req
 	}
 	out := []MatchFileEntry{}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1515,7 +1731,7 @@ func (a *App) handleRecordingsMatchfileImport(w http.ResponseWriter, r *http.Req
 	}
 	var matched []pendingMatch
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1883,7 +2099,7 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 	root := filepath.Clean(cfg.Settings.FinishedDir)
 	var suggestions []MatchSuggestion
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -2496,7 +2712,7 @@ func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		tt, err := parseStageTimetableJSON(body)
+		tt, err := parseAnyTimetableJSON(body)
 		if err != nil {
 			http.Error(w, "could not parse timetable JSON: "+err.Error(), http.StatusBadRequest)
 			return
@@ -2622,13 +2838,15 @@ func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, tt)
 }
 
-// parseAnyTimetableJSON accepts either timetable shape this app can produce or
-// consume: the RFC3339 StageSchedule array the app itself emits, or the
-// compact [year,month,day,hour,minute,name?] per-stage tuple format (the
-// shape the downloadable community timetables ship in). It tries the RFC3339
-// shape first - a compact file, whose sets are arrays not objects, fails that
-// decode and falls through to the compact parser.
+// parseAnyTimetableJSON accepts any timetable shape this app can produce or
+// consume, tried in order:
+//  1. RFC3339 StageSchedule array — the app's own export format.
+//  2. Planner JSON — the format used by timetable.lol and local JSON exports
+//     (object with "data": { day: { date, stages: { name: [[id,start,end,artist]] } } }).
+//  3. Compact [year,month,day,hour,minute,name?] per-stage tuple array — the
+//     shape hand-edited community timetables typically ship in.
 func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
+	// Try 1: RFC3339 StageSchedule array (app's own export).
 	var direct []StageSchedule
 	if err := json.Unmarshal(data, &direct); err == nil {
 		total := 0
@@ -2639,6 +2857,15 @@ func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
 			return direct, nil
 		}
 	}
+	// Try 2: Planner JSON (timetable.lol / local planner file format).
+	var planner timetableLolPlannerData
+	if err := json.Unmarshal(data, &planner); err == nil && len(planner.Data) > 0 {
+		tt, _, convErr := convertTimetableLolData(planner)
+		if convErr == nil && len(tt) > 0 {
+			return tt, nil
+		}
+	}
+	// Try 3: Compact [year,month,day,hour,minute,name?] per-stage tuple array.
 	return parseStageTimetableJSON(data)
 }
 
@@ -2753,12 +2980,20 @@ type timetableLolDay struct {
 	Stages map[string][]timetableLolSet `json:"stages"`
 }
 
+type timetableLolFestivalDay struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+	Date  string `json:"date"` // YYYY-MM-DD — more reliable than parsing day.Date label
+}
+
 type timetableLolPlannerData struct {
-	EventSlug string                     `json:"eventSlug"`
-	PlanType  string                     `json:"planType"`
-	Title     string                     `json:"title"`
-	TimeZone  string                     `json:"timeZone"`
-	Data      map[string]timetableLolDay `json:"data"`
+	EventSlug     string                             `json:"eventSlug"`
+	PlanType      string                             `json:"planType"`
+	Title         string                             `json:"title"`
+	TimeZone      string                             `json:"timeZone"`
+	Data          map[string]timetableLolDay         `json:"data"`
+	FestivalRange map[string]timetableLolFestivalDay `json:"festivalRange,omitempty"`
+	StageColors   map[string]string                  `json:"stageColors,omitempty"`
 }
 
 // handleTimetableLolEvents lists public events from timetable.lol so the
@@ -2914,7 +3149,15 @@ func convertTimetableLolData(payload timetableLolPlannerData) ([]StageSchedule, 
 
 	for _, dayKey := range dayKeys {
 		day := payload.Data[dayKey]
-		dateStr := day.Date
+		// Prefer festivalRange[dayKey].Date (clean YYYY-MM-DD) over the day
+		// label ("Friday 24.06.22") since it needs no regex parsing.
+		dateStr := ""
+		if fr, ok := payload.FestivalRange[dayKey]; ok && fr.Date != "" {
+			dateStr = fr.Date
+		}
+		if dateStr == "" {
+			dateStr = day.Date
+		}
 		if dateStr == "" {
 			dateStr = dayKey
 		}
@@ -2963,7 +3206,8 @@ func convertTimetableLolData(payload timetableLolPlannerData) ([]StageSchedule, 
 	for _, name := range stageNames {
 		sets := byStage[name]
 		sort.Slice(sets, func(i, j int) bool { return sets[i].Start < sets[j].Start })
-		out = append(out, StageSchedule{Stage: name, Sets: sets})
+		color := payload.StageColors[name]
+		out = append(out, StageSchedule{Stage: name, Color: color, Sets: sets})
 	}
 	assignScheduleIDs(out)
 	return out, warnings, nil
@@ -3073,6 +3317,14 @@ func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
 	cfg := a.snapshotConfig()
 	for _, src := range cfg.Sources {
 		if src.ID == id {
+			// A token-gated "http" source (custom auth header, signed
+			// cookie) needs its request proxied through this server rather
+			// than redirected to - a redirect only hands the browser a URL,
+			// never the server-held header the URL needs to actually work.
+			if src.Type == "http" && len(src.HTTPHeaders) > 0 {
+				a.proxyLiveHTTP(w, r, src)
+				return
+			}
 			liveURL := src.URL
 			if src.Type != "http" {
 				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -3096,6 +3348,34 @@ func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// proxyLiveHTTP streams a token-gated "http" source's live URL through this
+// server rather than redirecting the browser to it - the browser only ever
+// talks to this endpoint, and this endpoint (not the client) holds the
+// configured auth headers. Bound only by the client's own request context
+// (no extra timeout), since a live view is meant to keep streaming for as
+// long as the tab stays open.
+func (a *App) proxyLiveHTTP(w http.ResponseWriter, r *http.Request, src Source) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, src.URL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, p := range parseHTTPHeaderLines(src.HTTPHeaders) {
+		req.Header.Set(p[0], p[1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "could not reach the upstream stream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleLiveHLS serves the rolling HLS playlist/segments for a source that is
@@ -3251,7 +3531,9 @@ func (a *App) state() State {
 	warnings := freeWarnings(cfg)
 	events := make([]Event, len(a.events))
 	copy(events, a.events)
-	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: events, Disk: disk.Scan(cfg.Settings.FinishedDir), Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now}
+	diskUsage := disk.Scan(cfg.Settings.FinishedDir)
+	forecast := computeStorageForecast(a.active, diskUsage.VolumeFree)
+	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: events, Disk: diskUsage, Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now, StorageForecast: forecast}
 }
 
 func freeWarnings(cfg AppConfig) []string {
@@ -3511,6 +3793,9 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Organisations == nil {
 		cfg.Organisations = []Organisation{}
+	}
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = shortToken()
 	}
 	assignScheduleIDs(cfg.Timetable)
 	for i := range cfg.LibraryEvents {

@@ -308,6 +308,7 @@ function renderDashboard() {
   const free = state.disk.volumeFree || 0;
   const total = state.disk.volumeTotal || 0;
   $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
+  $('storage-forecast').textContent = forecastText(state.storageForecast);
   $('events').innerHTML = [...events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
   renderFavoritesPanel();
   renderDashboardCharts(sources);
@@ -654,6 +655,9 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
           <label class="inline-flex items-center gap-2" title="Normalizes recorded volume to a consistent loudness (EBU R128). Forces audio to be re-encoded even if video is stream-copied."><input class="src-loudnorm" type="checkbox" ${s.loudnessNormalize ? 'checked' : ''}> Loudness normalize</label>
         </div>
+        <label class="mt-2 block" title="Only relevant for 'http' type sources whose stream needs an auth token/cookie/custom header - sent with both the recording (ffmpeg) and the live-preview proxy. One 'Key: Value' per line.">HTTP headers <span class="text-xs text-zinc-500">(token-gated HTTP streams only, one "Key: Value" per line)</span>
+          <textarea class="input src-httpheaders codebox h-20" placeholder="Authorization: Bearer your-token-here">${escapeHtml((s.httpHeaders || []).join('\n'))}</textarea>
+        </label>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
           <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
@@ -704,7 +708,8 @@ function readSourceCard(el) {
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value,
-    festivalId: el.querySelector('.src-festival').value
+    festivalId: el.querySelector('.src-festival').value,
+    httpHeaders: el.querySelector('.src-httpheaders').value.split('\n').map(x => x.trim()).filter(Boolean)
   };
 }
 
@@ -784,7 +789,7 @@ async function testSource(i) {
     const result = await api('/api/sources/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: values.type, url: values.url, quality: values.quality })
+      body: JSON.stringify({ type: values.type, url: values.url, quality: values.quality, httpHeaders: values.httpHeaders })
     });
     label.textContent = result.ok ? `Resolved OK` : `Failed: ${result.error}`;
     label.className = `test-result text-sm ${result.ok ? 'text-emerald-300' : 'text-rose-300'}`;
@@ -818,9 +823,18 @@ async function deleteSource(i) {
   } catch { /* toast already shown */ }
 }
 
+// GB<->bytes for the free-space threshold settings - stored as bytes in the
+// config (unchanged, for backward compatibility with existing config.json
+// files), shown/edited as GB since nobody thinks in raw byte counts.
+const gbBytes = 1024 * 1024 * 1024;
+function bytesToGb(b) { return Math.round((b / gbBytes) * 100) / 100; }
+function gbToBytes(gb) { return Math.round(gb * gbBytes); }
+
 function fillSettings() {
   const s = config.settings, ui = config.ui;
-  ['finishedDir','tempDir','logDir','checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
+  ['finishedDir','tempDir','logDir','checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
+  $('minFreeGb').value = bytesToGb(s.minFreeBytes || 0);
+  $('warnFreeGb').value = bytesToGb(s.warnFreeBytes || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('fileExplorerRoot').value = s.fileExplorerRoot || '';
   $('uiAppName').value = ui.appName || '';
@@ -850,7 +864,9 @@ function fillSettings() {
 function readSettings() {
   const s = config.settings;
   ['finishedDir','tempDir','logDir'].forEach(k => s[k] = $(k).value);
-  ['checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
+  ['checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
+  s.minFreeBytes = gbToBytes(Number($('minFreeGb').value) || 0);
+  s.warnFreeBytes = gbToBytes(Number($('warnFreeGb').value) || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
   s.fileExplorerRoot = $('fileExplorerRoot').value.trim();
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
@@ -1080,6 +1096,9 @@ let watchSourceId = null;
 function initWatch() {
   populateWatchSourceDropdown();
   if (watchSourceId) watchSelectSource(watchSourceId);
+  else renderLivecutPanel();
+  livecutRefreshJoined();
+  startLivecutPoll();
 }
 
 function populateWatchSourceDropdown() {
@@ -1125,10 +1144,12 @@ function watchSelectSource(id) {
     $('watch-empty').classList.remove('hidden');
     $('watch-stats').classList.add('hidden');
     renderDashboard();
+    renderLivecutPanel();
     return;
   }
   const src = (state.sources || []).find(s => s.id === id);
   if (!src) return;
+  livecutRefreshHostSessions();
 
   const player = ensureWatchPlayer();
   $('watch-empty').classList.add('hidden');
@@ -1284,7 +1305,185 @@ function setupWatchPlayerControls(player) {
   };
   player.on('loadedmetadata', updateVisualizerVisibility);
   vizToggle.addEventListener('change', () => { if (!vizToggle.disabled) updateVisualizerVisibility(); });
+  $('watch-visualizer-next').addEventListener('click', () => nextVisualizerPreset('watch-visualizer', true));
 }
+
+// --- Live Cut Sessions: crowdsourced live transition marking ---
+//
+// A session hosted by this instance is tied to the currently-selected Watch
+// tab source (recomputed each poll tick from the full session list, so
+// switching sources just changes what livecutHostSession resolves to -
+// there's no separate "select a session" step for the host). Joined
+// sessions (hosted elsewhere) are independent of the selected source, since
+// a guest instance may have no matching local source at all - just a plain
+// list with its own mark button and feed per session.
+
+let livecutHostSession = null; // this instance's own session for the selected source, if any
+let livecutJoined = [];        // sessions hosted elsewhere that this instance has joined
+let livecutFeeds = {};         // token -> { events: [...], since: <seq>, closed: bool }
+let livecutPollTimer = null;
+
+function livecutFeedState(token) {
+  if (!livecutFeeds[token]) livecutFeeds[token] = { events: [], since: 0, closed: false };
+  return livecutFeeds[token];
+}
+
+async function livecutRefreshHostSessions() {
+  let sessions;
+  try { sessions = await api('/api/livecut/sessions'); } catch { return; }
+  livecutHostSession = sessions.find(s => s.sourceId === watchSourceId && !s.closed) || null;
+  renderLivecutPanel();
+}
+
+async function livecutRefreshJoined() {
+  try { livecutJoined = await api('/api/livecut/joined'); } catch { return; }
+  renderLivecutJoinedList();
+}
+
+async function livecutPollFeed(kind, token) {
+  const st = livecutFeedState(token);
+  if (st.closed) return;
+  const base = kind === 'host' ? `/api/livecut/sessions/${encodeURIComponent(token)}/feed` : `/api/livecut/joined/${encodeURIComponent(token)}/feed`;
+  let result;
+  try { result = await api(`${base}?since=${st.since}`); } catch { return; }
+  if (result.events && result.events.length) {
+    st.events = st.events.concat(result.events);
+    st.since = result.events[result.events.length - 1].seq;
+  }
+  st.closed = !!result.closed;
+  renderLivecutFeed(kind, token);
+}
+
+function livecutPollTick() {
+  livecutRefreshHostSessions();
+  if (livecutHostSession) livecutPollFeed('host', livecutHostSession.token);
+  livecutJoined.forEach(j => livecutPollFeed('joined', j.token));
+}
+
+function startLivecutPoll() {
+  stopLivecutPoll();
+  livecutPollTimer = setInterval(livecutPollTick, 1500);
+  livecutPollTick();
+}
+function stopLivecutPoll() {
+  if (livecutPollTimer) { clearInterval(livecutPollTimer); livecutPollTimer = null; }
+}
+
+function livecutFeedItemHtml(ev) {
+  const who = ev.instanceName || ev.instanceId;
+  const label = ev.username ? `${escapeHtml(who)} <span class="text-zinc-500">(${escapeHtml(ev.username)})</span>` : escapeHtml(who);
+  return `<div class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+    <span>${label}</span><span class="text-xs text-zinc-500">${new Date(ev.ts).toLocaleTimeString()}</span>
+  </div>`;
+}
+
+function livecutFeedHtml(token) {
+  const st = livecutFeedState(token);
+  return st.events.slice(-30).reverse().map(livecutFeedItemHtml).join('') || '<div class="text-xs text-zinc-500">No marks yet.</div>';
+}
+
+function renderLivecutFeed(kind, token) {
+  if (kind === 'host') {
+    $('livecut-host-feed').innerHTML = livecutFeedHtml(token);
+    return;
+  }
+  const el = document.querySelector(`.livecut-joined-feed[data-token="${token}"]`);
+  if (el) el.innerHTML = livecutFeedHtml(token);
+}
+
+function renderLivecutJoinedList() {
+  const box = $('livecut-joined-list');
+  if (!livecutJoined.length) { box.innerHTML = ''; return; }
+  box.innerHTML = livecutJoined.map(j => `
+    <div class="space-y-2 rounded border border-white/10 p-2">
+      <div class="flex items-center justify-between gap-2">
+        <div class="min-w-0 truncate font-medium">${escapeHtml(j.name || '(unnamed session)')}</div>
+        <button type="button" class="btn livecut-leave" data-token="${escapeAttr(j.token)}">Leave</button>
+      </div>
+      <button type="button" class="btn primary w-full livecut-joined-mark" data-token="${escapeAttr(j.token)}">Mark Transition</button>
+      <div class="livecut-joined-feed max-h-40 space-y-1 overflow-auto text-sm" data-token="${escapeAttr(j.token)}"></div>
+    </div>`).join('');
+  box.querySelectorAll('.livecut-leave').forEach(btn => btn.addEventListener('click', () => livecutLeave(btn.dataset.token)));
+  box.querySelectorAll('.livecut-joined-mark').forEach(btn => btn.addEventListener('click', () => livecutMark('joined', btn.dataset.token)));
+  livecutJoined.forEach(j => renderLivecutFeed('joined', j.token));
+}
+
+function renderLivecutPanel() {
+  const src = (state.sources || []).find(s => s.id === watchSourceId);
+  $('livecut-pick-source').classList.toggle('hidden', !!watchSourceId);
+  $('livecut-start').classList.add('hidden');
+  $('livecut-host').classList.add('hidden');
+  if (watchSourceId && src) {
+    if (livecutHostSession) {
+      $('livecut-host').classList.remove('hidden');
+      $('livecut-host-code').value = livecutHostSession.code;
+      renderLivecutFeed('host', livecutHostSession.token);
+    } else {
+      $('livecut-start').classList.remove('hidden');
+      const canStart = src.status === 'recording';
+      $('livecut-start-btn').disabled = !canStart;
+      $('livecut-start-btn').title = canStart ? '' : 'This source needs to be actively recording to start a session';
+    }
+  }
+}
+
+async function livecutStart() {
+  if (!watchSourceId) return;
+  let result;
+  try {
+    result = await api('/api/livecut/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceId: watchSourceId }) });
+  } catch { return; }
+  toast('Live Cut Session started', 'info');
+  livecutHostSession = result;
+  renderLivecutPanel();
+}
+
+async function livecutCloseHost() {
+  if (!livecutHostSession) return;
+  if (!confirm('Close this Live Cut Session? Anyone still connected will stop being able to mark.')) return;
+  try { await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}`, { method: 'DELETE' }); } catch { return; }
+  livecutHostSession = null;
+  renderLivecutPanel();
+}
+
+async function livecutImportHost() {
+  if (!livecutHostSession) return;
+  let result;
+  try { result = await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}/import`, { method: 'POST' }); } catch { return; }
+  toast(`Added ${result.added} marker(s) to ${result.path}`, 'info');
+}
+
+async function livecutMark(kind, token) {
+  const path = kind === 'host' ? `/api/livecut/sessions/${encodeURIComponent(token)}/mark` : `/api/livecut/joined/${encodeURIComponent(token)}/mark`;
+  try { await api(path, { method: 'POST' }); } catch { return; }
+  livecutPollFeed(kind, token);
+}
+
+async function livecutJoin() {
+  const code = $('livecut-join-code').value.trim();
+  if (!code) { toast('Paste a code first', 'error'); return; }
+  let result;
+  try {
+    result = await api('/api/livecut/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  } catch { return; }
+  if (!result.ok) { toast(result.error || 'Could not join that session', 'error'); return; }
+  $('livecut-join-code').value = '';
+  toast(`Joined "${result.session.name}"`, 'info');
+  await livecutRefreshJoined();
+}
+
+async function livecutLeave(token) {
+  try { await api(`/api/livecut/joined/${encodeURIComponent(token)}`, { method: 'DELETE' }); } catch { return; }
+  delete livecutFeeds[token];
+  await livecutRefreshJoined();
+}
+
+$('livecut-start-btn').onclick = livecutStart;
+$('livecut-host-close').onclick = livecutCloseHost;
+$('livecut-host-import').onclick = livecutImportHost;
+$('livecut-host-mark').onclick = () => livecutHostSession && livecutMark('host', livecutHostSession.token);
+$('livecut-host-copy').onclick = () => copyShareCode($('livecut-host-code').value);
+$('livecut-join-btn').onclick = livecutJoin;
 
 function switchToView(viewId) {
   document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
@@ -1303,6 +1502,7 @@ function goToView(viewId) {
 }
 
 document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
+  if (b.dataset.view !== 'watch') stopLivecutPoll();
   switchToView(b.dataset.view);
   // Each tab must pull fresh data on every open instead of showing stale state.
   $('source-editor').dataset.loaded = '';
@@ -1625,13 +1825,22 @@ function renderVisualTimetable() {
   }
 
   const favIds = new Set(config.settings.favoriteSetIds || []);
+  // endMinutes: returns the end time as minutes from midnight of selectedTimetableDay,
+  // rolling an end on the *next* calendar day forward by 24*60 so afterparties
+  // that run past midnight are displayed as extending beyond 24:00 on the
+  // current day's grid rather than snapping back to before the start time.
+  function endMinutes(sp, ep) {
+    if (!ep) return sp.minutes + 60;
+    if (ep.date > selectedTimetableDay) return ep.minutes + 24 * 60;
+    return ep.minutes;
+  }
   let minMin = 24 * 60, maxMin = 0, any = false;
   config.timetable.forEach(st => (st.sets || []).forEach(s => {
     const sp = parseIso(s.start), ep = parseIso(s.end);
     if (sp && sp.date === selectedTimetableDay) {
       any = true;
       minMin = Math.min(minMin, sp.minutes);
-      maxMin = Math.max(maxMin, (ep && ep.date === selectedTimetableDay ? ep.minutes : sp.minutes + 60));
+      maxMin = Math.max(maxMin, endMinutes(sp, ep));
     }
   }));
   if (!any) { minMin = 12 * 60; maxMin = 24 * 60; }
@@ -1643,7 +1852,7 @@ function renderVisualTimetable() {
       const sp = parseIso(set.start), ep = parseIso(set.end);
       if (!sp || sp.date !== selectedTimetableDay) return '';
       const left = ((sp.minutes - minMin) / span) * 100;
-      const width = Math.max(3, (((ep ? ep.minutes : sp.minutes + 60) - sp.minutes) / span) * 100);
+      const width = Math.max(3, ((endMinutes(sp, ep) - sp.minutes) / span) * 100);
       const starred = set.id && favIds.has(set.id);
       return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(set.name)}">
         <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id || ''}')">&#9733;</button>
@@ -1850,6 +2059,7 @@ async function openMatchView() {
   $('lib-search-results').classList.add('hidden');
   $('lib-share-view').classList.add('hidden');
   $('lib-receive-view').classList.add('hidden');
+  $('lib-transcode-view').classList.add('hidden');
   $('lib-back').classList.add('hidden');
   $('lib-match-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -1923,7 +2133,7 @@ $('lib-matchfile-input').addEventListener('change', async () => {
 let shareSelected = new Set(); // recording paths chosen to share
 
 function openShareView() {
-  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view']
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view', 'lib-transcode-view']
     .forEach(id => $(id) && $(id).classList.add('hidden'));
   $('lib-share-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -2042,7 +2252,7 @@ let receiveManifest = null;
 let receiveSelected = new Set();
 
 function openReceiveView() {
-  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view']
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view', 'lib-transcode-view']
     .forEach(id => $(id) && $(id).classList.add('hidden'));
   $('lib-receive-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -2249,7 +2459,7 @@ function libEventDates(e) {
 function renderLibrary() {
   // The Smart Match / Share / Receive overlays sit alongside the library views;
   // rendering the normal library always dismisses them.
-  ['lib-match-view', 'lib-share-view', 'lib-receive-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
+  ['lib-match-view', 'lib-share-view', 'lib-receive-view', 'lib-transcode-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
   const term = ($('lib-search').value || '').trim().toLowerCase();
   if (term) {
     renderLibrarySearch(term);
@@ -2383,6 +2593,7 @@ function renderLibraryEventView(id) {
     if (!r) return;
     card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(r.path, libDisplayTitle(r)));
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(r); });
+    card.querySelector('.lib-set-cut').addEventListener('click', (e) => { e.stopPropagation(); openCutterModal(r); });
   });
 }
 
@@ -2396,6 +2607,7 @@ function libSetCardHtml(r) {
       <div class="lib-set-thumb lib-set-play">
         <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
         <span class="lib-set-play-icon">&#9658;</span>
+        <button type="button" class="lib-set-cut" title="Set Cutter" aria-label="Set Cutter">&#9986;</button>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
       </div>
       <div class="lib-set-info">
@@ -2426,6 +2638,7 @@ function renderLibrarySearch(term) {
       </div>
       <div class="flex flex-shrink-0 items-center gap-2">
         <button type="button" class="btn primary lib-search-play" data-path="${escapeAttr(r.path)}">&#9658; Play</button>
+        <button type="button" class="btn lib-search-cut" data-path="${escapeAttr(r.path)}">Cut</button>
         <button type="button" class="btn lib-search-organize" data-path="${escapeAttr(r.path)}">Organize</button>
         <a class="btn" href="/media/${encodeMediaPath(r.path)}" download title="Download">&#8681;</a>
       </div>
@@ -2438,6 +2651,10 @@ function renderLibrarySearch(term) {
   document.querySelectorAll('.lib-search-organize').forEach(btn => btn.addEventListener('click', () => {
     const r = recordings.find(x => x.path === btn.dataset.path);
     if (r) openAssignModal(r);
+  }));
+  document.querySelectorAll('.lib-search-cut').forEach(btn => btn.addEventListener('click', () => {
+    const r = recordings.find(x => x.path === btn.dataset.path);
+    if (r) openCutterModal(r);
   }));
 }
 
@@ -2948,6 +3165,8 @@ function setupCustomPlayerControls(player) {
 
   speed.addEventListener('change', () => { player.playbackRate(parseFloat(speed.value)); });
 
+  $('cp-visualizer-next').addEventListener('click', () => nextVisualizerPreset('cp-visualizer', true));
+
   setupPiP($('cp-pip'), () => techVideoEl(player));
 
   fullscreenBtn.onclick = () => {
@@ -2998,6 +3217,24 @@ function setupWaveform(url, videoEl) {
 // and the Watch tab's #watch-visualizer, each bound to its own video element).
 const vizInstances = {};
 
+// Butterchurn (a WebGL port of the Winamp MilkDrop plugin) renders the real
+// thing; plain 2D canvas bars are only a fallback for browsers/contexts
+// without WebGL2 (e.g. software-only remote desktops). Presets are loaded
+// once, lazily, and shared read-only across every visualizer instance.
+let vizPresetNames = null;
+function vizPresets() {
+  if (vizPresetNames) return vizPresetNames;
+  // The UMD builds are webpack/babel output with esModuleInterop - depending
+  // on version the real API can land directly on the global or nested under
+  // `.default`, so probe both rather than assuming one shape.
+  const mod = window.butterchurnPresets;
+  const api = mod && (typeof mod.getPresets === 'function' ? mod : mod.default);
+  if (!api) return (vizPresetNames = []);
+  const presets = api.getPresets();
+  vizPresetNames = Object.keys(presets).map(name => ({ name, preset: presets[name] }));
+  return vizPresetNames;
+}
+
 function ensureVizGraph(videoEl, canvasId) {
   const existing = vizInstances[canvasId];
   if (existing && existing.sourceEl === videoEl) return existing;
@@ -3005,18 +3242,36 @@ function ensureVizGraph(videoEl, canvasId) {
   if (!AudioCtx) return null;
   try {
     const audioCtx = new AudioCtx();
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    const data = new Uint8Array(analyser.frequencyBinCount);
     const source = audioCtx.createMediaElementSource(videoEl);
-    source.connect(analyser);
-    analyser.connect(audioCtx.destination);
-    const inst = { audioCtx, analyser, data, raf: null, sourceEl: videoEl };
+    source.connect(audioCtx.destination);
+    const inst = {
+      audioCtx, source, raf: null, sourceEl: videoEl,
+      butterchurn: null, presetIndex: -1, resizeObserver: null,
+      analyser: null, data: null,
+    };
     vizInstances[canvasId] = inst;
     return inst;
   } catch {
     return null;
   }
+}
+
+function resizeVizCanvas(canvas, butterchurnViz) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width === w && canvas.height === h) return;
+  canvas.width = w;
+  canvas.height = h;
+  if (butterchurnViz) butterchurnViz.setRendererSize(w, h);
+}
+
+function nextVisualizerPreset(canvasId, random) {
+  const inst = vizInstances[canvasId || 'cp-visualizer'];
+  const presets = vizPresets();
+  if (!inst || !inst.butterchurn || !presets.length) return;
+  inst.presetIndex = random
+    ? Math.floor(Math.random() * presets.length)
+    : (inst.presetIndex + 1) % presets.length;
+  inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 1.5);
 }
 
 function startVisualizer(videoEl, canvasId) {
@@ -3025,9 +3280,51 @@ function startVisualizer(videoEl, canvasId) {
   if (!inst) return;
   if (inst.audioCtx.state === 'suspended') inst.audioCtx.resume().catch(() => {});
   const canvas = $(canvasId);
-  const ctx2d = canvas.getContext('2d');
   if (inst.raf) cancelAnimationFrame(inst.raf);
 
+  // Deliberately don't pre-probe WebGL2 support with our own getContext()
+  // call: a canvas permanently locks to whichever context type is first
+  // *successfully* created, so if butterchurn.createVisualizer below fails
+  // (or is never attempted) the 2D fallback path still needs a virgin
+  // canvas to call getContext('2d') on.
+  if (window.butterchurn && !inst.butterchurn) {
+    try {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      const Butterchurn = typeof window.butterchurn.createVisualizer === 'function' ? window.butterchurn : window.butterchurn.default;
+      inst.butterchurn = Butterchurn.createVisualizer(inst.audioCtx, canvas, {
+        width: canvas.width, height: canvas.height,
+      });
+      inst.butterchurn.connectAudio(inst.source);
+      const presets = vizPresets();
+      if (presets.length) {
+        inst.presetIndex = Math.floor(Math.random() * presets.length);
+        inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 0);
+      }
+      inst.resizeObserver = new ResizeObserver(() => resizeVizCanvas(canvas, inst.butterchurn));
+      inst.resizeObserver.observe(canvas);
+    } catch {
+      inst.butterchurn = null;
+    }
+  }
+
+  if (inst.butterchurn) {
+    const draw = () => {
+      inst.raf = requestAnimationFrame(draw);
+      inst.butterchurn.render();
+    };
+    draw();
+    return;
+  }
+
+  // Fallback: plain frequency-bar spectrum on a 2D canvas.
+  if (!inst.analyser) {
+    inst.analyser = inst.audioCtx.createAnalyser();
+    inst.analyser.fftSize = 128;
+    inst.data = new Uint8Array(inst.analyser.frequencyBinCount);
+    inst.source.connect(inst.analyser);
+  }
+  const ctx2d = canvas.getContext('2d');
   const draw = () => {
     inst.raf = requestAnimationFrame(draw);
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -3055,8 +3352,9 @@ function stopVisualizer(canvasId) {
   const inst = vizInstances[canvasId];
   if (inst && inst.raf) cancelAnimationFrame(inst.raf);
   if (inst) inst.raf = null;
+  if (inst && inst.resizeObserver) { inst.resizeObserver.disconnect(); inst.resizeObserver = null; }
   const canvas = $(canvasId);
-  if (canvas) {
+  if (canvas && !(inst && inst.butterchurn)) {
     const ctx2d = canvas.getContext('2d');
     if (ctx2d) ctx2d.clearRect(0, 0, canvas.width, canvas.height);
   }
@@ -3086,6 +3384,19 @@ function setupPiP(button, getVideoEl) {
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
+
+// forecastText turns a StorageForecast into a one-line summary of how much
+// recording time is left at the current combined write rate - blank when
+// nothing is actively recording, since there's no rate to project from.
+function forecastText(forecast) {
+  if (!forecast || !forecast.applicable) return '';
+  const rate = `${formatBytes(forecast.bytesPerSecond)}/s across ${forecast.activeRecordings} active recording${forecast.activeRecordings === 1 ? '' : 's'}`;
+  const hours = forecast.hoursRemaining;
+  let remaining;
+  if (hours >= 48) remaining = `${(hours / 24).toFixed(1)} days`;
+  else remaining = `${hours.toFixed(1)} hours`;
+  return `~${rate} — about ${remaining} of storage left at this rate`;
+}
 function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
@@ -3208,6 +3519,24 @@ $('applyCustomTheme').onclick = async () => {
   renderFestivalPresets();
   toast('Custom theme applied', 'info');
 };
+
+if ($('backfill-timecodes-btn')) {
+  $('backfill-timecodes-btn').onclick = async () => {
+    const btn = $('backfill-timecodes-btn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Scanning...';
+    try {
+      const result = await api('/api/recordings/backfill-timecodes', { method: 'POST' });
+      if (result) {
+        toast(`Backfilled ${result.written} of ${result.scanned} recordings (${result.skipped} already had one, ${result.failed} failed)`, 'info');
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  };
+}
 
 document.addEventListener('DOMContentLoaded', () => {
   ['colorPrimary', 'colorSecondary', 'colorBg', 'colorAccent', 'colorText', 'colorTextMuted'].forEach(id => {
@@ -3768,6 +4097,462 @@ function renderExplorerFetchJob(job) {
 // (not rebuilt by drawSourceEditor() or setDropdownOptions()) as soon as the
 // script runs - the source editor's per-row dropdowns get the same wiring
 // again after every render, safely, since already-bound elements are skipped.
+// ─── Set Cutter ──────────────────────────────────────────────────────────────
+// Splits a whole-day recording into individual set files. Video and
+// audio-only recordings share this same UI: markers are always placed
+// against the audio waveform, but a video recording also gets a <video>
+// element playing alongside it instead of a plain <audio> one.
+
+let cutterRecording = null;   // the RecordingFile being cut
+let cutterMarkers = [];       // array of CutterMarker
+let cutterSidecar = null;     // the .timecode.json sidecar, or null if none yet
+
+const cutterAudioExts = ['.mp3', '.m4a', '.aac', '.opus', '.flac', '.ogg', '.wav'];
+function cutterIsAudioOnly(path) {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+  return cutterAudioExts.includes(ext);
+}
+
+function cutterPlayerEl() {
+  return cutterRecording && cutterIsAudioOnly(cutterRecording.path) ? $('cutter-audio') : $('cutter-video');
+}
+
+function formatClock(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    : `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+async function openCutterModal(r) {
+  cutterRecording = r;
+  cutterMarkers = [];
+  cutterSidecar = null;
+  $('cutter-title').textContent = `Set Cutter: ${libDisplayTitle(r)}`;
+  $('cutter-error').classList.add('hidden');
+  $('cutter-precise').checked = false;
+  cutterDetectProposals = [];
+  $('cutter-proposals-box').classList.add('hidden');
+  $('cutter-detect-status').classList.add('hidden');
+  stopCutterDetectPoll();
+
+  const audioEl = $('cutter-audio'), videoEl = $('cutter-video');
+  const isAudio = cutterIsAudioOnly(r.path);
+  audioEl.classList.toggle('hidden', !isAudio);
+  videoEl.classList.toggle('hidden', isAudio);
+  const player = isAudio ? audioEl : videoEl;
+  player.src = `/media/${encodeMediaPath(r.path)}`;
+
+  $('cutter-waveform-img').src = `/api/recordings/waveform?path=${encodeURIComponent(r.path)}`;
+  $('cutter-waveform-status').textContent = 'Loading waveform...';
+  $('cutter-waveform-img').onload = () => { $('cutter-waveform-status').textContent = ''; };
+  $('cutter-waveform-img').onerror = () => { $('cutter-waveform-status').textContent = 'Waveform unavailable for this file.'; };
+
+  try {
+    const res = await fetch(`/api/recordings/timecode?path=${encodeURIComponent(r.path)}`);
+    if (res.ok) cutterSidecar = await res.json();
+  } catch (e) { /* no sidecar yet - fine, timetable seeding just won't be available */ }
+
+  try {
+    cutterMarkers = await api(`/api/cutter/markers?path=${encodeURIComponent(r.path)}`) || [];
+  } catch (e) {
+    cutterMarkers = [];
+  }
+  renderCutterMarkers();
+
+  $('cutter-overlay').classList.remove('hidden');
+}
+
+function closeCutterModal() {
+  $('cutter-overlay').classList.add('hidden');
+  $('cutter-audio').pause(); $('cutter-audio').removeAttribute('src');
+  $('cutter-video').pause(); $('cutter-video').removeAttribute('src');
+  cutterRecording = null;
+  stopCutterDetectPoll();
+}
+$('cutter-close').onclick = closeCutterModal;
+$('cutter-overlay').addEventListener('click', (e) => { if (e.target.id === 'cutter-overlay') closeCutterModal(); });
+
+function cutterDurationSeconds() {
+  const player = cutterPlayerEl();
+  if (player && player.duration && isFinite(player.duration)) return player.duration;
+  if (cutterSidecar && cutterSidecar.durationSec) return cutterSidecar.durationSec;
+  return 0;
+}
+
+function renderCutterMarkers() {
+  cutterMarkers.sort((a, b) => a.offsetSec - b.offsetSec);
+
+  // Ticks over the waveform.
+  const dur = cutterDurationSeconds();
+  $('cutter-timeline-markers').innerHTML = dur > 0 ? cutterMarkers.map(m => {
+    const pct = Math.min(100, Math.max(0, (m.offsetSec / dur) * 100));
+    return `<div class="cutter-marker-tick" style="left:${pct}%" data-offset="${m.offsetSec}"><span class="cutter-marker-tick-label">${escapeHtml(m.name || m.artist || '')}</span></div>`;
+  }).join('') : '';
+
+  // Editable marker rows.
+  $('cutter-markers-list').innerHTML = cutterMarkers.map((m, i) => `
+    <div class="cutter-marker-row" data-index="${i}">
+      <div class="cutter-marker-time">${formatClock(m.offsetSec)}</div>
+      <input class="input cutter-m-name" placeholder="Set / artist name" value="${escapeAttr(m.name || '')}">
+      <input class="input cutter-m-channel" placeholder="Channel" value="${escapeAttr(m.channel || '')}">
+      <input class="input cutter-m-tracklist" placeholder="Tracklist (optional)" value="${escapeAttr(m.tracklist || '')}">
+      <div class="flex gap-1">
+        <button type="button" class="btn cutter-m-seek" title="Jump playback here">&#9658;</button>
+        <button type="button" class="btn cutter-m-remove" style="color:#fda4af" title="Remove marker">&times;</button>
+      </div>
+    </div>`).join('') || '<p class="text-sm text-zinc-400">No markers yet - play the recording and click "Add marker at current time", or use "Load from timetable".</p>';
+
+  document.querySelectorAll('.cutter-marker-row').forEach(row => {
+    const i = Number(row.dataset.index);
+    row.querySelector('.cutter-m-name').addEventListener('change', (e) => { cutterMarkers[i].name = e.target.value; });
+    row.querySelector('.cutter-m-channel').addEventListener('change', (e) => { cutterMarkers[i].channel = e.target.value; });
+    row.querySelector('.cutter-m-tracklist').addEventListener('change', (e) => { cutterMarkers[i].tracklist = e.target.value; });
+    row.querySelector('.cutter-m-seek').addEventListener('click', () => {
+      const player = cutterPlayerEl();
+      if (player) { player.currentTime = cutterMarkers[i].offsetSec; player.play(); }
+    });
+    row.querySelector('.cutter-m-remove').addEventListener('click', () => {
+      cutterMarkers.splice(i, 1);
+      renderCutterMarkers();
+    });
+  });
+}
+
+$('cutter-add-marker').onclick = () => {
+  const player = cutterPlayerEl();
+  if (!player) return;
+  cutterMarkers.push({ id: `m${Date.now()}`, offsetSec: player.currentTime || 0, name: '', channel: cutterRecording ? (cutterRecording.channel || cutterRecording.source || '') : '' });
+  renderCutterMarkers();
+};
+
+// Clicking the waveform seeks playback to that position - the timeline is a
+// visual scrub bar, not a drag-to-place-marker surface (markers are added at
+// the current playback position instead, so "does this sound right" is
+// always one click away via the player's own controls).
+$('cutter-timeline').addEventListener('click', (e) => {
+  const img = $('cutter-waveform-img');
+  const rect = img.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const dur = cutterDurationSeconds();
+  const player = cutterPlayerEl();
+  if (player && dur > 0) player.currentTime = frac * dur;
+});
+
+// "Load from timetable": for the event this recording is assigned to, map
+// every archived timetable set that falls within the recording's wall-clock
+// span onto a file offset using the sidecar's startedAt, and seed one marker
+// per set. Requires both a timecode sidecar and an assigned event+channel -
+// without either there's nothing to map wall-clock time onto.
+$('cutter-load-timetable').onclick = () => {
+  if (!cutterRecording || !cutterSidecar || !cutterSidecar.startedAt) {
+    toast('This recording has no timecode sidecar yet - use "Backfill timecodes" in Settings first.', 'error');
+    return;
+  }
+  const ev = cutterRecording.eventId ? libEventById(cutterRecording.eventId) : null;
+  if (!ev) {
+    toast('Organize this recording (assign it to an event) before loading its timetable.', 'error');
+    return;
+  }
+  const channel = cutterRecording.channel || cutterRecording.source || '';
+  const stage = (ev.timetable || []).find(st => st.stage.toLowerCase() === channel.toLowerCase());
+  if (!stage || !stage.sets.length) {
+    toast(`No archived timetable found for channel "${channel}" on ${ev.name}.`, 'error');
+    return;
+  }
+  const startedAt = new Date(cutterSidecar.startedAt).getTime();
+  const dur = cutterDurationSeconds();
+  let added = 0;
+  stage.sets.forEach(s => {
+    const setStart = new Date(s.start).getTime();
+    const offsetSec = (setStart - startedAt) / 1000;
+    if (offsetSec < 0 || (dur > 0 && offsetSec > dur)) return; // outside this file's span
+    if (cutterMarkers.some(m => Math.abs(m.offsetSec - offsetSec) < 1)) return; // already have one here
+    cutterMarkers.push({
+      id: `tt-${s.id || added}`, offsetSec, name: s.name, channel,
+      eventId: ev.id, setId: s.id || '', artist: s.name, start: s.start, end: s.end,
+    });
+    added++;
+  });
+  renderCutterMarkers();
+  toast(added > 0 ? `Added ${added} marker(s) from the timetable` : 'No new sets fell within this recording\'s time span', 'info');
+};
+
+// Auto-detect cuts: proposes a refined cut point at every timetable set
+// boundary using silence detection (always) and Whisper (optional, only if
+// installed server-side). Proposals are reviewed here, never written
+// straight into cutterMarkers - "Accept" or "Accept all" does that.
+
+let cutterDetectProposals = [];
+let cutterDetectPollTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  const dbSlider = $('cutter-silence-db'), durSlider = $('cutter-silence-dur');
+  if (dbSlider) dbSlider.addEventListener('input', () => { $('cutter-silence-db-val').textContent = dbSlider.value; });
+  if (durSlider) durSlider.addEventListener('input', () => { $('cutter-silence-dur-val').textContent = parseFloat(durSlider.value).toFixed(1); });
+});
+
+$('cutter-auto-detect').onclick = async () => {
+  if (!cutterRecording) return;
+  const options = {
+    silenceThresholdDb: parseFloat($('cutter-silence-db').value) || -50,
+    silenceMinDurationSec: parseFloat($('cutter-silence-dur').value) || 2,
+    useWhisper: $('cutter-use-whisper').checked,
+    whisperLanguage: $('cutter-whisper-lang').value,
+  };
+  $('cutter-auto-detect').disabled = true;
+  $('cutter-detect-status').classList.remove('hidden');
+  $('cutter-detect-status').textContent = 'Analyzing timetable boundaries...';
+  let job;
+  try {
+    job = await api('/api/cutter/detect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: cutterRecording.path, options }),
+    });
+  } catch (e) { $('cutter-auto-detect').disabled = false; $('cutter-detect-status').classList.add('hidden'); return; }
+  pollCutterDetectJob(job.jobId);
+};
+
+function stopCutterDetectPoll() {
+  if (cutterDetectPollTimer) { clearTimeout(cutterDetectPollTimer); cutterDetectPollTimer = null; }
+}
+
+async function pollCutterDetectJob(jobId) {
+  stopCutterDetectPoll();
+  let job;
+  try {
+    job = await api(`/api/cutter/detect/jobs/${encodeURIComponent(jobId)}`);
+  } catch (e) {
+    cutterDetectPollTimer = setTimeout(() => pollCutterDetectJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('cutter-detect-status').textContent = `Analyzing... (${(job.log || []).length} boundaries checked so far)`;
+    cutterDetectPollTimer = setTimeout(() => pollCutterDetectJob(jobId), 1500);
+    return;
+  }
+  $('cutter-auto-detect').disabled = false;
+  $('cutter-detect-status').classList.add('hidden');
+  if (job.status === 'error') {
+    toast(`Auto-detect failed: ${job.error}`, 'error');
+    return;
+  }
+  cutterDetectProposals = job.proposals || [];
+  renderCutterProposals();
+  toast(`Auto-detect found ${cutterDetectProposals.length} candidate cut(s)`, 'info');
+}
+
+function renderCutterProposals() {
+  if (!cutterDetectProposals.length) {
+    $('cutter-proposals-box').classList.add('hidden');
+    return;
+  }
+  $('cutter-proposals-box').classList.remove('hidden');
+  const confColor = { high: '#4ade80', medium: '#fbbf24', low: '#94a3b8' };
+  $('cutter-proposals-list').innerHTML = cutterDetectProposals.map((p, i) => `
+    <div class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1 text-sm" data-index="${i}">
+      <span class="flex min-w-0 items-center gap-2">
+        <span class="cutter-marker-time">${formatClock(p.offsetSec)}</span>
+        <span class="truncate">${escapeHtml(p.name)}</span>
+        <span style="color:${confColor[p.confidence] || '#94a3b8'}" class="text-xs">${escapeHtml(p.confidence)} · ${escapeHtml(p.source)}</span>
+      </span>
+      <button type="button" class="btn cutter-proposal-accept flex-shrink-0" data-index="${i}">Accept</button>
+    </div>`).join('');
+  document.querySelectorAll('.cutter-proposal-accept').forEach(btn => btn.addEventListener('click', () => {
+    acceptCutterProposal(Number(btn.dataset.index));
+  }));
+}
+
+function acceptCutterProposal(i) {
+  const p = cutterDetectProposals[i];
+  if (!p) return;
+  cutterMarkers.push({
+    id: `detect-${Date.now()}-${i}`, offsetSec: p.offsetSec, name: p.name, artist: p.artist,
+    channel: p.channel, eventId: p.eventId, setId: p.setId, start: p.start, end: p.end,
+  });
+  cutterDetectProposals.splice(i, 1);
+  renderCutterMarkers();
+  renderCutterProposals();
+}
+
+$('cutter-proposals-accept-all').onclick = () => {
+  while (cutterDetectProposals.length) acceptCutterProposal(0);
+};
+
+$('cutter-save-markers').onclick = async () => {
+  if (!cutterRecording) return;
+  try {
+    await api(`/api/cutter/markers?path=${encodeURIComponent(cutterRecording.path)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cutterMarkers),
+    });
+    toast('Markers saved', 'info');
+  } catch (e) { /* api() already toasted the error */ }
+};
+
+let cutterExportPollTimer = null;
+
+$('cutter-export').onclick = async () => {
+  if (!cutterRecording) return;
+  if (cutterMarkers.length === 0) {
+    $('cutter-error').textContent = 'Add at least one marker before exporting.';
+    $('cutter-error').classList.remove('hidden');
+    return;
+  }
+  $('cutter-error').classList.add('hidden');
+  const precise = $('cutter-precise').checked;
+  let job;
+  try {
+    job = await api('/api/cutter/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: cutterRecording.path, markers: cutterMarkers, precise }),
+    });
+  } catch (e) { return; } // api() already toasted the error
+  toast('Export started - splitting in the background...', 'info');
+  if (cutterExportPollTimer) clearInterval(cutterExportPollTimer);
+  cutterExportPollTimer = setInterval(async () => {
+    let status;
+    try { status = await api(`/api/cutter/jobs/${job.jobId}`); } catch (e) { clearInterval(cutterExportPollTimer); return; }
+    if (status.status === 'done') {
+      clearInterval(cutterExportPollTimer);
+      toast(`Export complete: ${status.doneSegments} segment(s) saved to the library`, 'info');
+      await refresh();
+    } else if (status.status === 'error') {
+      clearInterval(cutterExportPollTimer);
+      toast(`Export failed: ${status.error}`, 'error');
+    }
+  }, 2000);
+};
+
+// ─── Mass Transcode ──────────────────────────────────────────────────────────
+// Bulk re-encode a batch of recordings in one background job. Mirrors the
+// Share Sets view's selection UI (group-by-channel checkboxes, filter,
+// select-all/clear) since it's the same "pick some recordings" interaction.
+
+let transcodeSelected = new Set();
+let transcodeJobPollTimer = null;
+
+function openTranscodeView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view', 'lib-receive-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-transcode-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  transcodeSelected = new Set();
+  $('lib-transcode-filter').value = '';
+  $('lib-transcode-job-box').classList.add('hidden');
+  if (transcodeJobPollTimer) { clearTimeout(transcodeJobPollTimer); transcodeJobPollTimer = null; }
+  renderTranscodeList();
+}
+function closeTranscodeView() { $('lib-transcode-view').classList.add('hidden'); reloadLibraryData(); }
+
+function updateTranscodeSelCount() { $('lib-transcode-selcount').textContent = `${transcodeSelected.size} selected`; }
+
+function transcodeFilteredRecordings() {
+  const q = $('lib-transcode-filter').value.trim().toLowerCase();
+  let list = recordings || [];
+  if (q) list = list.filter(r => `${r.name} ${r.channel || ''} ${r.artist || ''}`.toLowerCase().includes(q));
+  return list;
+}
+
+function renderTranscodeList() {
+  const list = transcodeFilteredRecordings();
+  if (!list.length) {
+    $('lib-transcode-list').innerHTML = '<p class="text-zinc-400">No recordings to transcode yet.</p>';
+    updateTranscodeSelCount();
+    return;
+  }
+  const groups = new Map();
+  list.forEach(r => { const ch = r.channel || 'Unsorted'; if (!groups.has(ch)) groups.set(ch, []); groups.get(ch).push(r); });
+  $('lib-transcode-list').innerHTML = [...groups.entries()].map(([ch, items]) => `
+    <div class="source-group open">
+      <div class="source-group-head">
+        <label class="flex items-center gap-2 font-semibold"><input type="checkbox" class="tc-group-check" data-ch="${escapeAttr(ch)}"> ${escapeHtml(ch)}</label>
+        <span class="pill">${items.length}</span>
+      </div>
+      <div class="source-group-body space-y-1">
+        ${items.map(r => `
+          <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+            <span class="flex min-w-0 items-center gap-2">
+              <input type="checkbox" class="tc-item-check" data-path="${escapeAttr(r.path)}" ${transcodeSelected.has(r.path) ? 'checked' : ''}>
+              <span class="truncate">${escapeHtml(libDisplayTitle(r))}</span>
+            </span>
+            <span class="flex-shrink-0 text-xs text-zinc-500">${formatBytes(r.size)}</span>
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+  $('lib-transcode-list').querySelectorAll('.tc-item-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) transcodeSelected.add(cb.dataset.path); else transcodeSelected.delete(cb.dataset.path);
+    updateTranscodeSelCount();
+  }));
+  $('lib-transcode-list').querySelectorAll('.tc-group-check').forEach(cb => cb.addEventListener('change', () => {
+    const ch = cb.dataset.ch;
+    (groups.get(ch) || []).forEach(r => { if (cb.checked) transcodeSelected.add(r.path); else transcodeSelected.delete(r.path); });
+    renderTranscodeList(); updateTranscodeSelCount();
+  }));
+  updateTranscodeSelCount();
+}
+
+$('lib-transcode-open').onclick = openTranscodeView;
+$('lib-transcode-close').onclick = closeTranscodeView;
+$('lib-transcode-filter').addEventListener('input', renderTranscodeList);
+$('lib-transcode-selectall').onclick = () => { transcodeFilteredRecordings().forEach(r => transcodeSelected.add(r.path)); renderTranscodeList(); };
+$('lib-transcode-clear').onclick = () => { transcodeSelected = new Set(); renderTranscodeList(); };
+
+$('lib-transcode-start').onclick = async () => {
+  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
+  const options = {
+    container: $('tc-container').value,
+    videoCodec: $('tc-video-codec').value,
+    audioCodec: $('tc-audio-codec').value,
+    crf: parseInt($('tc-crf').value, 10) || 0,
+    audioBitrateKbps: parseInt($('tc-bitrate').value, 10) || 0,
+    hardwareAccel: $('tc-hwaccel').value,
+    replace: $('tc-replace').checked,
+  };
+  $('lib-transcode-start').disabled = true;
+  let result;
+  try {
+    result = await api('/api/transcode/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [...transcodeSelected], options }),
+    });
+  } catch (e) { $('lib-transcode-start').disabled = false; return; }
+  $('lib-transcode-job-box').classList.remove('hidden');
+  pollTranscodeJob(result.jobId);
+};
+
+function stopTranscodeJobPoll() {
+  if (transcodeJobPollTimer) { clearTimeout(transcodeJobPollTimer); transcodeJobPollTimer = null; }
+}
+
+async function pollTranscodeJob(jobId) {
+  stopTranscodeJobPoll();
+  let job;
+  try {
+    job = await api(`/api/transcode/jobs/${encodeURIComponent(jobId)}`);
+  } catch (e) {
+    transcodeJobPollTimer = setTimeout(() => pollTranscodeJob(jobId), 2000);
+    return;
+  }
+  renderTranscodeJob(job);
+  if (job.status === 'running') {
+    transcodeJobPollTimer = setTimeout(() => pollTranscodeJob(jobId), 1500);
+  } else {
+    $('lib-transcode-start').disabled = false;
+    toast(`Transcode finished: ${job.done} done, ${job.failed} failed`, job.failed > 0 ? 'error' : 'info');
+    await refresh();
+  }
+}
+
+function renderTranscodeJob(job) {
+  const pct = job.totalFiles > 0 ? Math.min(100, Math.round((job.done + job.failed) / job.totalFiles * 100)) : 0;
+  $('lib-transcode-job-title').textContent = job.status === 'running' ? 'Transcoding...' : 'Transcode finished';
+  $('lib-transcode-job-stats').textContent = `${job.done + job.failed}/${job.totalFiles} files · ${job.done} done · ${job.failed} failed`;
+  $('lib-transcode-job-bar').style.width = `${pct}%`;
+  $('lib-transcode-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('lib-transcode-job-log').scrollTop = $('lib-transcode-job-log').scrollHeight;
+}
+
 setupCustomDropdowns();
 setupImageUploadFields();
 

@@ -44,6 +44,7 @@ add any source you like.
 - [Backups](#backups)
 - [Notifications](#notifications)
 - [Peer Sharing (P2P)](#peer-sharing-p2p)
+- [Live Cut Sessions](#live-cut-sessions)
 - [Hardware Transcoding](#hardware-transcoding)
 - [Development](#development)
 - [Authentication and Users](#authentication-and-users)
@@ -68,6 +69,7 @@ add any source you like.
 - Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
 - Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
+- Live Cut Sessions: while a source is still recording, host a crowdsourced transition-marking session and hand out a short code - anyone on another MutiRec instance who joins can press "Mark Transition" (not just admins), and the marks feed straight into that recording's Set Cutter once it's done.
 - Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; if a recording arrived some other way (File Explorer, a URL fetch, a P2P import) and has none yet, one is generated the first time it's viewed in the library. Audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
 - File Explorer: browse, upload, zip/unzip, rename, and delete files under a configurable root (the recordings library by default); a "Fetch from URL" action downloads a direct link or a public ownCloud/Nextcloud-style share link (TransIP Stack included) straight into it, in the background.
 
@@ -85,6 +87,7 @@ add any source you like.
 
 **Nice touches**
 
+- MilkDrop-style music visualizer (Butterchurn) for audio-only sources, in both the live Watch tab and the Recordings player, with a "Next preset" button to cycle through it.
 - Installable as a PWA for quick access to the dashboard and Watch tab from a phone or desktop.
 - Custom app name, logo, colour scheme, and CSS — logos and cover art (app, Organisation, Festival, Event) are uploaded as files rather than pasted in as external URLs.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
@@ -170,6 +173,12 @@ Each source can be configured with:
 - Extra Streamlink and FFmpeg arguments.
 - Optional hardware acceleration.
 - Optional NFO note.
+- Optional HTTP headers (`http` sources only) - one `Key: Value` per line, for a stream that
+  needs an `Authorization` header, a signed cookie, or any other custom header to authenticate.
+  Applied consistently everywhere this app talks to the URL: the recording itself, the
+  liveness pre-check before each reconnect attempt, the "Test Stream" button, and the live
+  preview (which proxies the request through the server instead of redirecting the browser
+  to it, since a redirect can't carry a server-held header).
 
 Finished files are written to:
 
@@ -299,6 +308,16 @@ it quietly goes back to silent background retries (a final "no reconnect
 within 10m0s" note is logged once) - by that point it's more likely the
 stream is over for now than that it's about to come back any second.
 Clicking Record on a source clears its backoff and retries immediately.
+
+Before every retry, a lightweight liveness probe runs first - `streamlink
+--stream-url` for streamlink-based sources, an HTTP HEAD for direct-URL
+sources - and the actual streamlink|ffmpeg recording pipeline only starts if
+that probe succeeds. This is deliberately a separate, cheaper check than
+"just start recording and see what happens": some streamlink plugins return a
+few KB of a placeholder/offline stream before erroring out, which used to be
+enough to count as a real (if tiny and useless) recording on every retry of a
+flaky or offline channel. A failed probe counts toward the same backoff as a
+failed recording attempt, so it doesn't get spammed either.
 
 ## Progressive Web App
 
@@ -476,6 +495,45 @@ supported for `http(s)`/`socks5`). It's used for every outbound sharing
 request this instance makes: the self-verification ping, previewing a
 share code, and downloading files during an import. It can be saved on its
 own with **Save proxy**, independently of enabling/disabling sharing.
+
+## Live Cut Sessions
+
+While a source is still recording live, one instance can host a crowdsourced
+session for tagging transition points — anyone on another MutiRec instance
+who joins can press **Mark Transition**, and by the time the recording
+finishes there's already a candidate marker list waiting in the Set Cutter,
+instead of one person re-listening to the whole thing alone.
+
+Uses the same public-URL setup as Peer Sharing above (**Settings → Peer
+Sharing**), and the same short-code shape (public URL + an unguessable
+token) — a Live Cut Session join code is not interchangeable with a share
+code, but works the same way.
+
+### Hosting
+
+In the **Watch** tab, pick the source you're recording and click **Start
+Live Cut Session** (only available while that source is actively recording).
+Share the code shown with other MutiRec admins. Your own **Mark Transition**
+button and the live feed of everyone's marks (who, and when) are right there
+too — you're just another participant, not a special case. **Close** ends
+the session; **Send to Set Cutter** converts every collected mark into a
+marker on that recording (offset from the recording's own start time, so
+marks stay accurate regardless of when someone joined) and merges them into
+its existing marker list.
+
+### Joining
+
+Also in the **Watch** tab, paste a code into **Join someone else's session**.
+Once joined, *any* authenticated user on your instance — not just admins —
+can press that session's **Mark Transition** button; only starting, closing,
+or joining a session is admin-only. Every mark is tagged with which instance
+it came from, so a host hosting for a big crowd can tell who's helping.
+Marks aren't timestamped by your own clock: the host stamps the moment a
+mark arrives, so it doesn't matter if your instance's clock is off.
+
+Sessions are intentionally ephemeral — nothing here is written to
+`config.json`, so a restart clears any sessions this instance is hosting or
+has joined, the same as its login sessions.
 
 ## Hardware Transcoding
 
