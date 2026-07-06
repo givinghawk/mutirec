@@ -65,7 +65,8 @@ add any source you like.
 - Recordings library with search/filter, plus Smart Match to suggest which archived set an unsorted recording belongs to.
 - Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
-- Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly.
+- Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
+- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
 
 **Accounts & security**
 
@@ -82,7 +83,7 @@ add any source you like.
 **Nice touches**
 
 - Installable as a PWA for quick access to the dashboard and Watch tab from a phone or desktop.
-- Custom app name, logo, colour scheme, and CSS.
+- Custom app name, logo, colour scheme, and CSS — logos and cover art (app, Organisation, Festival, Event) are uploaded as files rather than pasted in as external URLs.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
 - Optional `.nfo` files beside completed recordings; toast notifications surface API/server errors directly in the WebUI.
 
@@ -383,10 +384,16 @@ same panel and its code stops working immediately.
 
 In **Recordings → Receive**, paste the code and click **Preview** to see
 what's on offer (artist, stage, size, whether an `.nfo` sidecar is included).
-Pick what you want and **Import** — files download into your library under
-their stage folder, `.nfo` sidecars come along, and the event/festival
-grouping is recreated by name (the same content-addressed approach as Match
-Files). Files you already have are skipped rather than overwritten.
+Pick what you want and **Import** — the transfer runs as a background job on
+the server, so you don't need to keep the tab open for a large import; the
+page polls for progress (bytes transferred, current file, transfer speed, and
+a live log) and it's safe to navigate away or close the browser mid-transfer.
+Files download into your library under their stage folder, `.nfo` sidecars
+come along, and the event/festival grouping is recreated by name (the same
+content-addressed approach as Match Files). Each downloaded file's hash is
+verified against the sender's manifest before it's kept — a mismatch discards
+the file and marks it failed rather than silently keeping a corrupted
+download. Files you already have are skipped rather than overwritten.
 
 Sharing setup, share creation, and importing are all admin-only; share tokens
 are never exposed to viewer accounts.

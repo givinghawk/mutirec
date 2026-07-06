@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -612,10 +613,228 @@ func shareImportDest(root, channel, name string) (string, string, error) {
 	return abs, rel, nil
 }
 
-// handleShareImport downloads the selected items from a share into this
-// instance's library and applies their metadata (resolving/creating the
-// LibraryEvent/Festival by name, like matchfile import). Existing files are
-// left untouched.
+// ============================================================================
+// Import jobs: a share import runs as a background goroutine so a large
+// transfer doesn't need a browser tab left open for hours. The HTTP handler
+// only validates the code, fetches the manifest, and starts the job; progress
+// (current file, bytes transferred, transfer speed, a running log, and a
+// final done/error status) is polled from a separate endpoint and survives
+// the requesting page being closed or navigated away from - only an app
+// restart clears it, since jobs are kept in memory only.
+// ============================================================================
+
+// ShareJobLogLine is one timestamped line in a job's live log.
+type ShareJobLogLine struct {
+	Time string `json:"time"`
+	Text string `json:"text"`
+}
+
+// ShareJob tracks one in-progress or finished share import. All fields are
+// guarded by mu since the background goroutine writes them while HTTP
+// handlers read them concurrently; use view() to get a safe JSON-able copy.
+type ShareJob struct {
+	mu sync.Mutex
+
+	id         string
+	shareName  string
+	senderURL  string
+	status     string // "running" | "done" | "error"
+	startedAt  time.Time
+	finishedAt time.Time
+
+	totalFiles, doneFiles, skippedFiles, failedFiles int
+	totalBytes, transferredBytes                     int64
+	speedBps                                         float64
+	currentFile                                      string
+	currentFileBytes, currentFileTotal               int64
+	errMsg                                           string
+	log                                              []ShareJobLogLine
+
+	lastSampleAt    time.Time
+	lastSampleBytes int64
+}
+
+// ShareJobView is the JSON-safe snapshot of a ShareJob served to the client.
+type ShareJobView struct {
+	ID               string            `json:"id"`
+	ShareName        string            `json:"shareName,omitempty"`
+	SenderURL        string            `json:"senderUrl"`
+	Status           string            `json:"status"`
+	StartedAt        time.Time         `json:"startedAt"`
+	FinishedAt       *time.Time        `json:"finishedAt,omitempty"`
+	TotalFiles       int               `json:"totalFiles"`
+	DoneFiles        int               `json:"doneFiles"`
+	SkippedFiles     int               `json:"skippedFiles"`
+	FailedFiles      int               `json:"failedFiles"`
+	TotalBytes       int64             `json:"totalBytes"`
+	TransferredBytes int64             `json:"transferredBytes"`
+	SpeedBps         float64           `json:"speedBps"`
+	CurrentFile      string            `json:"currentFile,omitempty"`
+	CurrentFileBytes int64             `json:"currentFileBytes"`
+	CurrentFileTotal int64             `json:"currentFileTotal"`
+	Error            string            `json:"error,omitempty"`
+	Log              []ShareJobLogLine `json:"log"`
+}
+
+func (j *ShareJob) view() ShareJobView {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	v := ShareJobView{
+		ID: j.id, ShareName: j.shareName, SenderURL: j.senderURL, Status: j.status,
+		StartedAt: j.startedAt, TotalFiles: j.totalFiles, DoneFiles: j.doneFiles,
+		SkippedFiles: j.skippedFiles, FailedFiles: j.failedFiles,
+		TotalBytes: j.totalBytes, TransferredBytes: j.transferredBytes, SpeedBps: j.speedBps,
+		CurrentFile: j.currentFile, CurrentFileBytes: j.currentFileBytes, CurrentFileTotal: j.currentFileTotal,
+		Error: j.errMsg, Log: append([]ShareJobLogLine(nil), j.log...),
+	}
+	if !j.finishedAt.IsZero() {
+		f := j.finishedAt
+		v.FinishedAt = &f
+	}
+	return v
+}
+
+func (j *ShareJob) logf(format string, args ...any) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.log = append(j.log, ShareJobLogLine{Time: time.Now().Format(time.RFC3339), Text: fmt.Sprintf(format, args...)})
+	if len(j.log) > 500 {
+		j.log = j.log[len(j.log)-500:]
+	}
+}
+
+func (j *ShareJob) startFile(name string, total int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.currentFile = name
+	j.currentFileBytes = 0
+	j.currentFileTotal = total
+}
+
+// addBytes records transferred bytes for both the current file and the
+// running total, and re-samples transfer speed at most every ~250ms so the
+// reported rate reflects recent throughput rather than the cumulative
+// average from the very start (which reads misleadingly low after a slow
+// first file).
+func (j *ShareJob) addBytes(n int64) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.currentFileBytes += n
+	j.transferredBytes += n
+	now := time.Now()
+	if j.lastSampleAt.IsZero() {
+		j.lastSampleAt = now
+		j.lastSampleBytes = j.transferredBytes
+		return
+	}
+	if elapsed := now.Sub(j.lastSampleAt); elapsed >= 250*time.Millisecond {
+		j.speedBps = float64(j.transferredBytes-j.lastSampleBytes) / elapsed.Seconds()
+		j.lastSampleAt = now
+		j.lastSampleBytes = j.transferredBytes
+	}
+}
+
+func (j *ShareJob) finishFile(outcome string) {
+	j.mu.Lock()
+	switch outcome {
+	case "done":
+		j.doneFiles++
+	case "skipped":
+		j.skippedFiles++
+	case "failed":
+		j.failedFiles++
+	}
+	j.mu.Unlock()
+}
+
+func (j *ShareJob) finish(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.finishedAt = time.Now()
+	j.speedBps = 0
+	if err != nil {
+		j.status = "error"
+		j.errMsg = err.Error()
+	} else {
+		j.status = "done"
+	}
+}
+
+func (a *App) putShareJob(job *ShareJob) {
+	a.shareJobsMu.Lock()
+	defer a.shareJobsMu.Unlock()
+	// Cap retained job history so a long-running instance doesn't accumulate
+	// unbounded memory from years of transfers - keep the most recent 50.
+	if len(a.shareJobs) > 50 {
+		oldest, oldestID := time.Now(), ""
+		for id, j := range a.shareJobs {
+			j.mu.Lock()
+			t := j.startedAt
+			j.mu.Unlock()
+			if t.Before(oldest) {
+				oldest, oldestID = t, id
+			}
+		}
+		if oldestID != "" {
+			delete(a.shareJobs, oldestID)
+		}
+	}
+	a.shareJobs[job.id] = job
+}
+
+func (a *App) getShareJob(id string) (*ShareJob, bool) {
+	a.shareJobsMu.Lock()
+	defer a.shareJobsMu.Unlock()
+	j, ok := a.shareJobs[id]
+	return j, ok
+}
+
+// handleShareJobs lists all import jobs (running and finished) this instance
+// knows about, most recent first, so the Receive view can show live progress
+// and past transfer history without needing to keep the tab that started an
+// import open.
+func (a *App) handleShareJobs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminReq(r) {
+		http.Error(w, "admin only", http.StatusForbidden)
+		return
+	}
+	a.shareJobsMu.Lock()
+	views := make([]ShareJobView, 0, len(a.shareJobs))
+	for _, j := range a.shareJobs {
+		views = append(views, j.view())
+	}
+	a.shareJobsMu.Unlock()
+	sort.Slice(views, func(i, k int) bool { return views[i].StartedAt.After(views[k].StartedAt) })
+	writeJSON(w, views)
+}
+
+// handleShareJobItem returns one job's current status by ID, for polling.
+func (a *App) handleShareJobItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminReq(r) {
+		http.Error(w, "admin only", http.StatusForbidden)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/share/jobs/")
+	job, ok := a.getShareJob(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, job.view())
+}
+
+// handleShareImport validates the share code, fetches the manifest, and
+// starts a background job to download the selected items - returning
+// immediately with a job ID to poll rather than blocking the request for
+// however long the transfer takes.
 func (a *App) handleShareImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -644,43 +863,119 @@ func (a *App) handleShareImport(w http.ResponseWriter, r *http.Request) {
 	}
 	all := len(req.Indices) == 0
 
+	var items []ShareItem
+	var totalBytes int64
+	for _, item := range man.Items {
+		if all || want[item.Index] {
+			items = append(items, item)
+			totalBytes += item.Size
+		}
+	}
+	if len(items) == 0 {
+		writeJSON(w, map[string]any{"ok": false, "error": "nothing selected to import"})
+		return
+	}
+
+	job := &ShareJob{
+		id: newID(), shareName: man.Name, senderURL: payload.U, status: "running",
+		startedAt: time.Now(), totalFiles: len(items), totalBytes: totalBytes,
+	}
+	a.putShareJob(job)
+	job.logf("Starting import of %d item(s), %s total, from %s", len(items), formatBytesGo(totalBytes), payload.U)
+	a.event("info", fmt.Sprintf("Started peer import job %s (%d item(s) from %s)", job.id, len(items), payload.U))
+
+	go a.runShareImportJob(job, payload, items)
+
+	writeJSON(w, map[string]any{"ok": true, "jobId": job.id})
+}
+
+// formatBytesGo is a tiny human-readable byte formatter for log lines (the
+// frontend does its own formatting for the UI; this is just for /api event
+// log and job log text).
+func formatBytesGo(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// runShareImportJob is the background worker started by handleShareImport.
+// It downloads each selected item, verifies its content hash against the
+// manifest (discarding and failing the item on mismatch - a corrupted or
+// truncated transfer must never silently join the library), pulls the NFO
+// sidecar if present, and finally applies library metadata once for
+// everything that succeeded.
+func (a *App) runShareImportJob(job *ShareJob, payload shareCodePayload, items []ShareItem) {
 	cfg := a.snapshotConfig()
 	root := filepath.Clean(cfg.Settings.FinishedDir)
 	client := shareHTTPClient()
 
-	imported, skipped, failed := 0, 0, 0
 	type applied struct {
 		rel  string
 		item ShareItem
 	}
 	var toApply []applied
 
-	for _, item := range man.Items {
-		if !all && !want[item.Index] {
-			continue
-		}
+	for _, item := range items {
 		abs, rel, err := shareImportDest(root, item.Channel, item.Name)
 		if err != nil {
-			failed++
+			job.logf("Skipping %q: %s", item.Name, err)
+			job.finishFile("failed")
 			continue
 		}
 		if _, err := os.Stat(abs); err == nil {
-			skipped++ // don't clobber an existing local file
+			job.logf("Already have %q — skipped", item.Name)
+			job.finishFile("skipped")
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			failed++
+			job.logf("Could not create directory for %q: %s", item.Name, err)
+			job.finishFile("failed")
 			continue
 		}
-		if err := downloadTo(client, payload.U+"/api/share/get/"+url.PathEscape(payload.T)+"/f/"+strconv.Itoa(item.Index), abs); err != nil {
-			failed++
+
+		job.startFile(item.Name, item.Size)
+		job.logf("Downloading %q (%s)…", item.Name, formatBytesGo(item.Size))
+		fileURL := payload.U + "/api/share/get/" + url.PathEscape(payload.T) + "/f/" + strconv.Itoa(item.Index)
+		if err := downloadTo(client, fileURL, abs, job.addBytes); err != nil {
+			job.logf("Download failed for %q: %s", item.Name, err)
+			job.finishFile("failed")
 			continue
 		}
+
+		if item.Hash != "" {
+			info, statErr := os.Stat(abs)
+			var gotHash string
+			if statErr == nil {
+				gotHash, err = a.fileHash(abs, rel, info.Size(), info.ModTime())
+			} else {
+				err = statErr
+			}
+			if err != nil || gotHash != item.Hash {
+				job.logf("Hash mismatch for %q — discarding (expected %s, got %s)", item.Name, shortHash(item.Hash), shortHash(gotHash))
+				_ = os.Remove(abs)
+				job.finishFile("failed")
+				continue
+			}
+			job.logf("Verified %q (sha256 %s)", item.Name, shortHash(gotHash))
+		}
+
 		if item.HasNFO {
-			_ = downloadTo(client, payload.U+"/api/share/get/"+url.PathEscape(payload.T)+"/nfo/"+strconv.Itoa(item.Index), nfoPathFor(abs))
+			nfoURL := payload.U + "/api/share/get/" + url.PathEscape(payload.T) + "/nfo/" + strconv.Itoa(item.Index)
+			if err := downloadTo(client, nfoURL, nfoPathFor(abs), job.addBytes); err != nil {
+				job.logf("Note: could not fetch the .nfo sidecar for %q: %s", item.Name, err)
+			}
 		}
+
 		toApply = append(toApply, applied{rel: rel, item: item})
-		imported++
+		job.finishFile("done")
+		go func(finalPath, relPath string) { a.generateThumbnail(finalPath, relPath, false) }(abs, rel)
 	}
 
 	if len(toApply) > 0 {
@@ -706,13 +1001,25 @@ func (a *App) handleShareImport(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		_ = a.persist(newCfg)
 	}
-	a.event("info", fmt.Sprintf("Imported %d recording(s) from a peer share (%d skipped, %d failed)", imported, skipped, failed))
-	writeJSON(w, map[string]any{"ok": true, "imported": imported, "skipped": skipped, "failed": failed})
+
+	view := job.view()
+	job.logf("Done: %d imported, %d skipped, %d failed", view.DoneFiles, view.SkippedFiles, view.FailedFiles)
+	job.finish(nil)
+	a.event("info", fmt.Sprintf("Peer import job %s finished: %d imported, %d skipped, %d failed", job.id, view.DoneFiles, view.SkippedFiles, view.FailedFiles))
 }
 
-// downloadTo streams a URL to a file via a .part temp file renamed on success,
-// so a failed/partial transfer never leaves a truncated file in the library.
-func downloadTo(client *http.Client, url, dest string) error {
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
+}
+
+// downloadTo streams a URL to a file via a .part temp file renamed on
+// success, so a failed/partial transfer never leaves a truncated file in the
+// library. onBytes (may be nil) is called after every chunk written, for
+// live transfer-progress reporting.
+func downloadTo(client *http.Client, url, dest string, onBytes func(int64)) error {
 	resp, err := client.Get(url)
 	if err != nil {
 		return err
@@ -726,7 +1033,11 @@ func downloadTo(client *http.Client, url, dest string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	var w io.Writer = f
+	if onBytes != nil {
+		w = io.MultiWriter(f, progressWriter(onBytes))
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
 		f.Close()
 		_ = os.Remove(tmp)
 		return err
@@ -736,4 +1047,13 @@ func downloadTo(client *http.Client, url, dest string) error {
 		return err
 	}
 	return os.Rename(tmp, dest)
+}
+
+// progressWriter adapts a byte-count callback to an io.Writer so it can be
+// tee'd alongside the real destination file via io.MultiWriter.
+type progressWriter func(int64)
+
+func (p progressWriter) Write(b []byte) (int, error) {
+	p(int64(len(b)))
+	return len(b), nil
 }

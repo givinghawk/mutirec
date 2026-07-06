@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +87,77 @@ func TestShareImportDestSafety(t *testing.T) {
 	abs, _, err = shareImportDest(root, "", "file.mp3")
 	if err != nil || !strings.HasPrefix(abs, root+"/shared/") {
 		t.Errorf("empty channel should use shared/: abs=%q err=%v", abs, err)
+	}
+}
+
+func TestShareJobViewIsSafeCopy(t *testing.T) {
+	job := &ShareJob{id: "j1", shareName: "Test Share", status: "running", startedAt: time.Now(), totalFiles: 3, totalBytes: 300}
+	job.logf("hello %d", 1)
+	job.startFile("a.mkv", 100)
+	job.addBytes(50)
+	view := job.view()
+	if view.ID != "j1" || view.ShareName != "Test Share" || view.Status != "running" {
+		t.Fatalf("unexpected view: %+v", view)
+	}
+	if len(view.Log) != 1 || view.Log[0].Text != "hello 1" {
+		t.Fatalf("unexpected log: %+v", view.Log)
+	}
+	if view.CurrentFile != "a.mkv" || view.CurrentFileBytes != 50 || view.CurrentFileTotal != 100 {
+		t.Fatalf("unexpected current-file fields: %+v", view)
+	}
+	// Mutating the returned view must not affect the job's internal log slice.
+	view.Log[0].Text = "mutated"
+	if job.view().Log[0].Text != "hello 1" {
+		t.Fatal("view() log slice was not copied - mutation leaked back into the job")
+	}
+}
+
+func TestShareJobFinishFileOutcomes(t *testing.T) {
+	job := &ShareJob{id: "j1"}
+	job.finishFile("done")
+	job.finishFile("skipped")
+	job.finishFile("failed")
+	view := job.view()
+	if view.DoneFiles != 1 || view.SkippedFiles != 1 || view.FailedFiles != 1 {
+		t.Fatalf("unexpected file counters: %+v", view)
+	}
+}
+
+func TestShareJobFinish(t *testing.T) {
+	job := &ShareJob{id: "j1", status: "running"}
+	job.finish(nil)
+	if v := job.view(); v.Status != "done" || v.FinishedAt == nil {
+		t.Fatalf("expected a successful finish to mark done with a FinishedAt: %+v", v)
+	}
+	errJob := &ShareJob{id: "j2", status: "running"}
+	errJob.finish(errors.New("boom"))
+	if v := errJob.view(); v.Status != "error" || v.Error != "boom" {
+		t.Fatalf("expected a failing finish to mark error with the error's message: %+v", v)
+	}
+}
+
+func TestPutShareJobEvictsOldest(t *testing.T) {
+	a := &App{shareJobs: map[string]*ShareJob{}}
+	const n = 60
+	// Timestamps must all land in the past (eviction picks the minimum
+	// startedAt versus time.Now()), so count seconds backward from an
+	// already-past base rather than forward from it.
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < n; i++ {
+		a.putShareJob(&ShareJob{id: fmt.Sprintf("job-%02d", i), startedAt: base.Add(time.Duration(i) * time.Second)})
+	}
+	a.shareJobsMu.Lock()
+	got := len(a.shareJobs)
+	a.shareJobsMu.Unlock()
+	if got > 51 {
+		t.Fatalf("expected job history to stay bounded, got %d entries", got)
+	}
+	// The earliest jobs (lowest startedAt) should have been evicted first.
+	if _, ok := a.getShareJob("job-00"); ok {
+		t.Fatal("expected the oldest job to be evicted")
+	}
+	if _, ok := a.getShareJob(fmt.Sprintf("job-%02d", n-1)); !ok {
+		t.Fatal("expected the most recent job to still be present")
 	}
 }
 

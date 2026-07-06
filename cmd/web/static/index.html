@@ -415,6 +415,17 @@
             </div>
             <div id="lib-receive-list" class="space-y-2 text-sm"></div>
           </div>
+          <div id="lib-receive-job-box" class="mt-4 hidden">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span id="lib-receive-job-title" class="text-sm font-medium"></span>
+              <span id="lib-receive-job-stats" class="text-xs text-zinc-400"></span>
+            </div>
+            <div class="storage-bar-track">
+              <div id="lib-receive-job-bar" class="storage-bar-fill" style="width:0%"></div>
+            </div>
+            <p id="lib-receive-job-current" class="mt-1 text-xs text-zinc-500"></p>
+            <pre id="lib-receive-job-log" class="codebox mt-2 h-40 overflow-y-auto text-xs"></pre>
+          </div>
         </div>
 
         <div id="lib-home">
@@ -458,7 +469,17 @@
           </div>
           <div class="grid gap-2 md:grid-cols-2">
             <label>Color<input id="ev-color" type="color" class="input color-input" value="#ef4444"></label>
-            <label>Cover image URL<input id="ev-cover" class="input" placeholder="https://..."></label>
+            <label>Cover image
+              <div class="image-upload-field" data-image-field="ev-cover">
+                <input type="hidden" id="ev-cover" class="input">
+                <img id="ev-cover-preview" class="image-upload-preview hidden">
+                <div class="image-upload-actions">
+                  <button type="button" class="btn" data-upload-btn="ev-cover">Upload</button>
+                  <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="ev-cover">Remove</button>
+                  <input type="file" accept="image/*" class="hidden" data-file-input="ev-cover">
+                </div>
+              </div>
+            </label>
           </div>
           <label>Description<textarea id="ev-desc" class="input" rows="2"></textarea></label>
           <label class="mt-2">Event (franchise)
@@ -517,7 +538,17 @@
           <label>Name<input id="org-name" class="input" placeholder="e.g. Nightlife Collective"></label>
           <label class="mt-2">Description<input id="org-desc" class="input" placeholder="Optional"></label>
           <label class="mt-2">Color<input id="org-color" type="color" class="input color-input" value="#ef4444"></label>
-          <label class="mt-2">Logo URL<input id="org-logo" class="input" placeholder="https://…"></label>
+          <label class="mt-2">Logo
+            <div class="image-upload-field" data-image-field="org-logo">
+              <input type="hidden" id="org-logo" class="input">
+              <img id="org-logo-preview" class="image-upload-preview hidden">
+              <div class="image-upload-actions">
+                <button type="button" class="btn" data-upload-btn="org-logo">Upload</button>
+                <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="org-logo">Remove</button>
+                <input type="file" accept="image/*" class="hidden" data-file-input="org-logo">
+              </div>
+            </div>
+          </label>
           <p id="org-editor-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-end gap-2">
             <button type="button" class="btn" onclick="closeOrgEditor()">Cancel</button>
@@ -536,7 +567,17 @@
           <label>Name<input id="ev-fest-name" class="input" placeholder="e.g. Neonbeat"></label>
           <label class="mt-2">Description<input id="ev-fest-desc" class="input" placeholder="Optional"></label>
           <label class="mt-2">Color<input id="ev-fest-color" type="color" class="input color-input" value="#ef4444"></label>
-          <label class="mt-2">Logo URL<input id="ev-fest-logo" class="input" placeholder="https://…"></label>
+          <label class="mt-2">Logo
+            <div class="image-upload-field" data-image-field="ev-fest-logo">
+              <input type="hidden" id="ev-fest-logo" class="input">
+              <img id="ev-fest-logo-preview" class="image-upload-preview hidden">
+              <div class="image-upload-actions">
+                <button type="button" class="btn" data-upload-btn="ev-fest-logo">Upload</button>
+                <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="ev-fest-logo">Remove</button>
+                <input type="file" accept="image/*" class="hidden" data-file-input="ev-fest-logo">
+              </div>
+            </div>
+          </label>
           <label class="mt-2">Organisation
             <div class="custom-dropdown mt-1" id="ev-fest-org-dropdown"></div>
           </label>
@@ -554,6 +595,15 @@
           <div class="panel-head">
             <h2 id="assign-title" class="truncate">Organize recording</h2>
             <button type="button" id="assign-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <div class="thumb-editor-preview-wrap">
+            <img id="assign-thumb-preview" class="hidden">
+          </div>
+          <div class="thumb-editor-actions mb-3">
+            <button type="button" id="assign-thumb-upload-btn" class="btn">Upload thumbnail</button>
+            <button type="button" id="assign-thumb-regen-btn" class="btn hidden">Regenerate</button>
+            <button type="button" id="assign-thumb-remove-btn" class="btn hidden" style="color:#fda4af">Remove thumbnail</button>
+            <input type="file" id="assign-thumb-file" accept="image/*" class="hidden">
           </div>
           <label>Event<div class="custom-dropdown" id="assign-event-dropdown"></div></label>
           <label>Channel <span class="text-xs text-zinc-500">(optional display name override)</span><input id="assign-channel" class="input" placeholder="defaults to source folder name"></label>
@@ -670,7 +720,17 @@
           <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Branding</h2></div>
             <label>App name<input id="uiAppName" class="input"></label>
-            <label>Logo URL<input id="uiLogoUrl" class="input"></label>
+            <label>Logo
+              <div class="image-upload-field" data-image-field="uiLogoUrl">
+                <input type="hidden" id="uiLogoUrl" class="input">
+                <img id="uiLogoUrl-preview" class="image-upload-preview hidden">
+                <div class="image-upload-actions">
+                  <button type="button" class="btn" data-upload-btn="uiLogoUrl">Upload</button>
+                  <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="uiLogoUrl">Remove</button>
+                  <input type="file" accept="image/*" class="hidden" data-file-input="uiLogoUrl">
+                </div>
+              </div>
+            </label>
             <label>Custom CSS<textarea id="uiCustomCss" class="codebox h-40"></textarea></label>
           </div>
           <div class="panel" data-admin-only>

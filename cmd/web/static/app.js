@@ -45,6 +45,58 @@ async function api(path, opts) {
 
 function $(id) { return document.getElementById(id); }
 
+// Shows/hides the preview image and remove button for one image-upload-field
+// based on the current value of its hidden input - called whenever an editor
+// modal is (re)populated so re-opening it reflects what's actually saved.
+function syncImageUploadPreview(fieldId) {
+  const url = $(fieldId).value;
+  const preview = $(`${fieldId}-preview`);
+  const removeBtn = document.querySelector(`[data-remove-btn="${fieldId}"]`);
+  if (url) {
+    preview.src = url;
+    preview.classList.remove('hidden');
+    if (removeBtn) removeBtn.classList.remove('hidden');
+  } else {
+    preview.classList.add('hidden');
+    preview.removeAttribute('src');
+    if (removeBtn) removeBtn.classList.add('hidden');
+  }
+}
+
+// Wires every "image URL -> file upload" field on the page (app logo,
+// Organisation/Festival logo, Event cover): clicking Upload opens a file
+// picker, the chosen file is POSTed to /api/uploads/image, and the returned
+// content-addressed URL is stashed in the field's hidden input. Bound once at
+// load - the fields themselves are static parts of the page, not re-rendered.
+function setupImageUploadFields() {
+  document.querySelectorAll('[data-image-field]').forEach(container => {
+    const fieldId = container.dataset.imageField;
+    const fileInput = container.querySelector(`[data-file-input="${fieldId}"]`);
+    const uploadBtn = container.querySelector(`[data-upload-btn="${fieldId}"]`);
+    const removeBtn = container.querySelector(`[data-remove-btn="${fieldId}"]`);
+    uploadBtn.onclick = () => fileInput.click();
+    removeBtn.onclick = () => {
+      $(fieldId).value = '';
+      syncImageUploadPreview(fieldId);
+    };
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      const form = new FormData();
+      form.append('image', file);
+      let res;
+      try {
+        res = await api('/api/uploads/image', { method: 'POST', body: form });
+      } catch {
+        return;
+      }
+      $(fieldId).value = res.url;
+      syncImageUploadPreview(fieldId);
+    };
+  });
+}
+
 function toast(message, level) {
   const el = document.createElement('div');
   el.className = `toast toast-${level || 'info'}`;
@@ -772,6 +824,7 @@ function fillSettings() {
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
+  syncImageUploadPreview('uiLogoUrl');
   $('uiCustomCss').value = ui.customCss || '';
   $('discordWebhook').value = s.notifications.discordWebhook || '';
   $('smtpEnabled').checked = !!s.notifications.smtp.enabled;
@@ -1971,10 +2024,18 @@ function openReceiveView() {
   $('lib-receive-code').value = '';
   $('lib-receive-status').textContent = '';
   $('lib-receive-preview-box').classList.add('hidden');
+  $('lib-receive-job-box').classList.add('hidden');
+  stopReceiveJobPoll();
+  $('lib-receive-import').disabled = false;
   receiveManifest = null;
   receiveSelected = new Set();
 }
-function closeReceiveView() { $('lib-receive-view').classList.add('hidden'); reloadLibraryData(); }
+function closeReceiveView() {
+  $('lib-receive-view').classList.add('hidden');
+  stopReceiveJobPoll();
+  $('lib-receive-job-box').classList.add('hidden');
+  reloadLibraryData();
+}
 
 function updateReceiveSelCount() { $('lib-receive-selcount').textContent = `${receiveSelected.size} selected`; }
 
@@ -2017,19 +2078,61 @@ $('lib-receive-preview').onclick = async () => {
   $('lib-receive-preview-box').classList.remove('hidden');
   renderReceiveList();
 };
+let receiveJobPollTimer = null;
+
+// The import itself runs as a background job on the server (see
+// handleShareImport) so a large transfer doesn't need this tab left open -
+// this just starts it and polls for progress until it's done, but closing
+// the tab mid-import loses nothing since the job keeps running server-side.
 $('lib-receive-import').onclick = async () => {
   if (!receiveManifest) return;
   if (!receiveSelected.size) { toast('Select at least one recording to import', 'error'); return; }
   const code = $('lib-receive-code').value.trim();
-  $('lib-receive-status').textContent = 'Importing… (large files may take a while)';
+  $('lib-receive-import').disabled = true;
+  $('lib-receive-status').textContent = 'Starting import…';
   let result;
   try {
     result = await api('/api/share/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, indices: [...receiveSelected] }) });
-  } catch { $('lib-receive-status').textContent = 'Import failed.'; return; }
-  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Import failed.'; return; }
-  toast(`Imported ${result.imported} recording(s)${result.skipped ? `, ${result.skipped} already present` : ''}${result.failed ? `, ${result.failed} failed` : ''}`, 'info');
-  $('lib-receive-status').textContent = `Done: ${result.imported} imported, ${result.skipped} skipped, ${result.failed} failed.`;
+  } catch { $('lib-receive-status').textContent = 'Import failed to start.'; $('lib-receive-import').disabled = false; return; }
+  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Import failed to start.'; $('lib-receive-import').disabled = false; return; }
+  $('lib-receive-status').textContent = 'Import running in the background — you can navigate away, it will keep going.';
+  $('lib-receive-job-box').classList.remove('hidden');
+  pollReceiveJob(result.jobId);
 };
+
+function stopReceiveJobPoll() {
+  if (receiveJobPollTimer) { clearTimeout(receiveJobPollTimer); receiveJobPollTimer = null; }
+}
+
+async function pollReceiveJob(jobId) {
+  stopReceiveJobPoll();
+  let job;
+  try {
+    job = await api(`/api/share/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    receiveJobPollTimer = setTimeout(() => pollReceiveJob(jobId), 2000);
+    return;
+  }
+  renderReceiveJob(job);
+  if (job.status === 'running') {
+    receiveJobPollTimer = setTimeout(() => pollReceiveJob(jobId), 1000);
+  } else {
+    $('lib-receive-import').disabled = false;
+    toast(`Import ${job.status === 'error' ? 'failed' : 'finished'}: ${job.doneFiles} imported, ${job.skippedFiles} skipped, ${job.failedFiles} failed`, job.status === 'error' ? 'error' : 'info');
+  }
+}
+
+function renderReceiveJob(job) {
+  const pct = job.totalBytes > 0 ? Math.min(100, Math.round(job.transferredBytes / job.totalBytes * 100)) : 0;
+  $('lib-receive-job-title').textContent = job.status === 'running' ? 'Importing…' : (job.status === 'error' ? 'Import failed' : 'Import finished');
+  $('lib-receive-job-stats').textContent = `${formatBytes(job.transferredBytes)} / ${formatBytes(job.totalBytes)} · ${formatBytes(job.speedBps)}/s · ${job.doneFiles + job.skippedFiles + job.failedFiles}/${job.totalFiles} files`;
+  $('lib-receive-job-bar').style.width = `${pct}%`;
+  $('lib-receive-job-current').textContent = job.currentFile
+    ? `${job.currentFile} (${formatBytes(job.currentFileBytes)} / ${formatBytes(job.currentFileTotal)})`
+    : (job.error || '');
+  $('lib-receive-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('lib-receive-job-log').scrollTop = $('lib-receive-job-log').scrollHeight;
+}
 
 function renderMatchList() {
   $('lib-match-count').textContent = `${matchSuggestions.length} unsorted`;
@@ -2260,6 +2363,7 @@ function libSetCardHtml(r) {
   return `
     <div class="lib-set-card" data-path="${escapeAttr(r.path)}">
       <div class="lib-set-thumb lib-set-play">
+        <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
         <span class="lib-set-play-icon">&#9658;</span>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
       </div>
@@ -2317,6 +2421,7 @@ function openEventEditor(ev) {
   $('ev-end').value = ev ? (ev.endDate || '') : '';
   $('ev-color').value = (ev && ev.color) || '#ef4444';
   $('ev-cover').value = ev ? (ev.coverUrl || '') : '';
+  syncImageUploadPreview('ev-cover');
   $('ev-desc').value = ev ? (ev.description || '') : '';
   // Populate festival (franchise) dropdown; setDropdownOptions creates the hidden input inside the container
   const festOpts = [{ value: '', label: 'None' }, ...(config.festivals || []).map(f => ({ value: f.id, label: f.name }))];
@@ -2450,6 +2555,7 @@ function openAssignModal(r) {
   $('assign-tracklist').value = r.tracklist || '';
   $('assign-find-result').textContent = '';
   $('assign-error').classList.add('hidden');
+  refreshAssignThumbPreview();
 
   setDropdownOptions('assign-event',
     [{ value: '', label: 'Unsorted' }, ...libraryEvents().map(e => ({ value: e.id, label: e.name }))],
@@ -2462,6 +2568,49 @@ function openAssignModal(r) {
 function closeAssignModal() { $('assign-overlay').classList.add('hidden'); libAssignTarget = null; }
 $('assign-close').onclick = closeAssignModal;
 $('assign-overlay').addEventListener('click', (e) => { if (e.target.id === 'assign-overlay') closeAssignModal(); });
+
+// Reloads the Organize modal's thumbnail preview from scratch (bumping a
+// cache-busting query param since the URL is derived from the recording's
+// path, not its content, so the browser would otherwise keep showing a
+// stale/removed image after a regenerate or upload).
+function refreshAssignThumbPreview() {
+  if (!libAssignTarget) return;
+  const img = $('assign-thumb-preview');
+  img.classList.add('hidden');
+  img.onload = () => { img.classList.remove('hidden'); $('assign-thumb-remove-btn').classList.remove('hidden'); $('assign-thumb-regen-btn').classList.remove('hidden'); };
+  img.onerror = () => { img.classList.add('hidden'); $('assign-thumb-remove-btn').classList.add('hidden'); $('assign-thumb-regen-btn').classList.add('hidden'); };
+  img.src = `${thumbnailUrl(libAssignTarget.path)}&t=${Date.now()}`;
+}
+
+$('assign-thumb-upload-btn').onclick = () => $('assign-thumb-file').click();
+$('assign-thumb-file').onchange = async () => {
+  const file = $('assign-thumb-file').files[0];
+  $('assign-thumb-file').value = '';
+  if (!file || !libAssignTarget) return;
+  const form = new FormData();
+  form.append('image', file);
+  try {
+    await api(`/api/recordings/thumbnail?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'POST', body: form });
+    toast('Thumbnail updated', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
+$('assign-thumb-regen-btn').onclick = async () => {
+  if (!libAssignTarget) return;
+  try {
+    await api(`/api/recordings/thumbnail/regenerate?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'POST' });
+    toast('Thumbnail regenerated', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
+$('assign-thumb-remove-btn').onclick = async () => {
+  if (!libAssignTarget) return;
+  try {
+    await api(`/api/recordings/thumbnail?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'DELETE' });
+    toast('Thumbnail removed', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
 
 function setAssignMode(mode) {
   document.querySelectorAll('.assign-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
@@ -2906,6 +3055,7 @@ function setupPiP(button, getVideoEl) {
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
+function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 
@@ -3268,6 +3418,7 @@ function openOrgEditor(org) {
   $('org-desc').value = org ? (org.description || '') : '';
   $('org-color').value = (org && org.color) || '#ef4444';
   $('org-logo').value = org ? (org.logoUrl || '') : '';
+  syncImageUploadPreview('org-logo');
   $('org-editor-error').classList.add('hidden');
   $('org-editor-overlay').classList.remove('hidden');
 }
@@ -3311,6 +3462,7 @@ function openEvFestivalEditor(festival) {
   $('ev-fest-desc').value = festival ? (festival.description || '') : '';
   $('ev-fest-color').value = (festival && festival.color) || '#ef4444';
   $('ev-fest-logo').value = festival ? (festival.logoUrl || '') : '';
+  syncImageUploadPreview('ev-fest-logo');
   // Populate organisation dropdown; setDropdownOptions creates the hidden input inside the container
   const orgOpts = [{ value: '', label: 'None' }, ...(config.organisations || []).map(o => ({ value: o.id, label: o.name }))];
   setDropdownOptions('ev-fest-org', orgOpts, { value: festival ? (festival.organisationId || '') : '' });
@@ -3356,6 +3508,7 @@ async function deleteEvFestival(id) {
 // script runs - the source editor's per-row dropdowns get the same wiring
 // again after every render, safely, since already-bound elements are skipped.
 setupCustomDropdowns();
+setupImageUploadFields();
 
 refresh();
 setInterval(refresh, 5000);

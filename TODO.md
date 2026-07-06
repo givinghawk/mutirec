@@ -307,6 +307,66 @@
     `dq-timetable.json` seeds DEFQON.1 stages" language, and the disclaimer no longer names
     Q-dance/DEFQON.1 specifically.
 
+## Done (this session, part 2)
+- **P2P import: background jobs, hash verification, live progress/log** (`sharing.go`): the
+  synchronous `handleShareImport` (previous session) blocked the request for however long a
+  transfer took, so a large import needed a browser tab left open for hours. `handleShareImport`
+  now only validates the code, fetches the manifest, and starts a `ShareJob` goroutine
+  (`runShareImportJob`), returning a `jobId` immediately; the transfer itself continues
+  server-side regardless of whether the tab stays open. `ShareJob` (mutex-guarded fields, a
+  `view()` method producing a JSON-safe `ShareJobView` snapshot) tracks per-file and aggregate
+  progress (bytes transferred/total, current file, transfer speed sampled every ~250ms via
+  `addBytes`, a capped 500-line live log via `logf`), polled from `GET /api/share/jobs/{id}`
+  (`GET /api/share/jobs` lists all, most recent first). Job history is capped at ~50 entries
+  (`putShareJob` evicts the oldest by start time) so a long-running instance doesn't accumulate
+  unbounded memory. Each downloaded file's actual sha256 (via `fileHash`, using the real
+  post-download size/mtime - not the manifest's claimed size, which would poison the hash cache)
+  is checked against the manifest's declared hash before being kept; a mismatch discards the file
+  and marks it failed rather than silently keeping a corrupted download. `downloadTo` gained an
+  `onBytes` callback (an `io.MultiWriter` tee via a tiny `progressWriter` adapter) to report
+  progress without a custom reader/writer wrapper. Frontend (`app.js`): the Receive view's
+  Import button now starts the job and polls it (`pollReceiveJob`, 1s interval) instead of
+  blocking, rendering a progress bar (reusing the existing `.storage-bar-track`/`-fill` styling),
+  transferred/total/speed/file-count stats, the current file, and the scrolling live log; polling
+  and the disabled Import button state are reset on close/reopen so a stale poll can't leak.
+  Covered by new tests in `sharing_test.go` (`ShareJob.view()` returns an independent copy of its
+  log slice, `finishFile`/`finish` outcome bookkeeping, `putShareJob` eviction).
+- **Recording thumbnails** (`uploads.go`, new file): video recordings get a thumbnail
+  auto-generated the moment they finish (`runRecording` in `main.go` spawns
+  `go a.generateThumbnail(...)` right after `a.backup(rec)`, non-blocking) - a single frame
+  grabbed via `ffmpeg` from a random point between 10%-90% of the file's duration (avoiding a
+  black intro/outro or a stage's holding slate), skipped entirely for audio-only sources
+  (`generateThumbnail` returns `false` immediately). Thumbnails are stored content-independent,
+  keyed by a hash of the recording's *relative path* (`thumbKey`) rather than file content, so a
+  regenerated or manually-replaced thumbnail doesn't need any pointer elsewhere updated - the
+  frontend just requests `/api/recordings/thumbnail?path=...` and handles a 404 as "no
+  thumbnail yet" (`findThumbnail`/`removeThumbnail`). `POST`/`DELETE` on the same endpoint
+  upload/remove a thumbnail by hand (any recording, audio or video); a separate
+  `POST /api/recordings/thumbnail/regenerate` re-rolls a fresh random frame for an existing
+  video. Frontend: library set cards (`libSetCardHtml`) now try to load a thumbnail image over
+  the existing gradient/play-icon placeholder (hidden via `onerror` if none exists, so no extra
+  round-trip is needed to check existence first); the Organize modal gained an upload/
+  regenerate/remove thumbnail section wired to the same endpoints. Covered by new tests in
+  `uploads_test.go` (`thumbKey` determinism/uniqueness, find/remove round-trip,
+  `generateThumbnail` skipping audio-only and failing gracefully on a missing file).
+- **Image uploads replace "paste a URL" everywhere**: the four fields that previously asked for
+  an external image URL (app logo, Organisation logo, Festival logo, Event cover art) now upload
+  a file directly instead. New `POST /api/uploads/image` (`uploads.go`) sniffs the uploaded
+  bytes' real content type (`http.DetectContentType`, never trusting the client-supplied
+  Content-Type or filename extension; JPEG/PNG/WebP/GIF only, 12MB cap) and stores it
+  content-addressed by sha256 hash under a new `uploads/` directory next to the config file, so
+  re-uploading the same image is a no-op; the returned `/uploads/<hash>.<ext>` URL is what gets
+  saved in the same string fields (`logoUrl`/`coverUrl`) that used to hold an external URL - no
+  config schema change needed, only what populates the value changed. Frontend: a reusable
+  `data-image-field` component (`setupImageUploadFields()`/`syncImageUploadPreview()` in
+  `app.js`) replaces each text input with a hidden input (still read/written by the existing
+  save-payload code, unchanged) plus a preview thumbnail, an Upload button (opens a file picker,
+  POSTs to the endpoint, fills the hidden input), and a Remove button. `/uploads/` is served as
+  static files but deliberately *not* added to `isPublicPath` - unlike PWA icons, these images
+  are only ever shown inside the already-authenticated app, so the browser's session cookie
+  covers it. Covered by new tests in `uploads_test.go` (`readImageUpload` accepting a real PNG,
+  rejecting non-image content/empty uploads/a missing form field).
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

@@ -347,6 +347,9 @@ type App struct {
 	shareNonceMu sync.Mutex
 	shareNonces  map[string]time.Time
 
+	shareJobsMu sync.Mutex
+	shareJobs   map[string]*ShareJob
+
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
@@ -417,6 +420,7 @@ func NewApp(configPath string) (*App, error) {
 		sessions:      map[string]sessionInfo{},
 		oauthState:    map[string]pendingOAuth{},
 		shareNonces:   map[string]time.Time{},
+		shareJobs:     map[string]*ShareJob{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -484,6 +488,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/match-suggestions", a.handleRecordingMatchSuggestions)
 	mux.HandleFunc("/api/recordings/matchfile/export", a.handleRecordingsMatchfileExport)
 	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
+	mux.HandleFunc("/api/recordings/thumbnail", a.handleRecordingThumbnail)
+	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
+	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)
@@ -491,6 +499,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/share/config", a.handleShareConfig)
 	mux.HandleFunc("/api/share/preview", a.handleSharePreview)
 	mux.HandleFunc("/api/share/import", a.handleShareImport)
+	mux.HandleFunc("/api/share/jobs", a.handleShareJobs)
+	mux.HandleFunc("/api/share/jobs/", a.handleShareJobItem)
 	mux.HandleFunc("/api/share/get/", a.handleShareGet)
 	mux.HandleFunc("/api/shares", a.handleShares)
 	mux.HandleFunc("/api/shares/", a.handleShareItem)
@@ -769,6 +779,11 @@ func (a *App) runRecording(rec *recording) {
 		}
 		a.writeNFO(rec)
 		a.backup(rec)
+		if rel, relErr := filepath.Rel(a.snapshotConfig().Settings.FinishedDir, rec.finalPath); relErr == nil {
+			audioOnly := rec.source.AudioOnly
+			finalPath := rec.finalPath
+			go a.generateThumbnail(finalPath, filepath.ToSlash(rel), audioOnly)
+		}
 		if failed {
 			// Real content was captured before the error hit (e.g. a network
 			// drop partway through a long recording) - worth keeping, but
