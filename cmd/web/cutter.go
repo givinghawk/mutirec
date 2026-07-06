@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -504,4 +507,432 @@ func (a *App) handleBackfillTimecodes(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	writeJSON(w, result)
+}
+
+// ============================================================================
+// Set Cutter, part 2: markers, preview, and export.
+//
+// A marker is a cut point - "a new segment starts here" - placed against the
+// waveform generated in part 1. Markers for a recording are edited client
+// side and persisted to a ".markers.json" sidecar on save, so work survives
+// a page reload. Export splits the recording at every marker (stream-copy by
+// default; optional re-encode for a frame-precise cut) into standalone
+// segment files, each of which gets its own metadata entry so it shows up in
+// the library immediately.
+// ============================================================================
+
+// CutterMarker is one cut point in a recording's Set Cutter timeline.
+type CutterMarker struct {
+	ID        string  `json:"id"`
+	OffsetSec float64 `json:"offsetSec"`
+	Name      string  `json:"name,omitempty"`
+	Channel   string  `json:"channel,omitempty"`
+	EventID   string  `json:"eventId,omitempty"`
+	SetID     string  `json:"setId,omitempty"`
+	Artist    string  `json:"artist,omitempty"`
+	Start     string  `json:"start,omitempty"`
+	End       string  `json:"end,omitempty"`
+	Tracklist string  `json:"tracklist,omitempty"`
+}
+
+// handleCutterMarkers gets (GET) or saves (PUT) the marker list for one
+// recording, addressed the same way as the thumbnail/timecode endpoints.
+func (a *App) handleCutterMarkers(w http.ResponseWriter, r *http.Request) {
+	relPath := filepath.ToSlash(strings.TrimSpace(r.URL.Query().Get("path")))
+	if relPath == "" || strings.Contains(relPath, "..") {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	abs, ok := a.resolveRecordingPath(relPath)
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		data, err := os.ReadFile(sidecarMarkersPath(abs))
+		if err != nil {
+			writeJSON(w, []CutterMarker{})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	case http.MethodPut:
+		if !a.isAdminReq(r) {
+			http.Error(w, "admin only", http.StatusForbidden)
+			return
+		}
+		var markers []CutterMarker
+		if err := json.NewDecoder(r.Body).Decode(&markers); err != nil {
+			http.Error(w, "invalid marker list", http.StatusBadRequest)
+			return
+		}
+		if err := writeSidecarJSON(sidecarMarkersPath(abs), markers); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, markers)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// maxPreviewClipSeconds bounds how much of a recording a single preview
+// request can stream, so a mistyped duration can't turn the "quick 30s clip"
+// preview feature into a full-file download.
+const maxPreviewClipSeconds = 120
+
+// handleCutterPreview streams a short clip starting at offsetSec so the Set
+// Cutter can let a user confirm a candidate cut point sounds right without
+// downloading the whole (often multi-gigabyte) recording.
+func (a *App) handleCutterPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	relPath := filepath.ToSlash(strings.TrimSpace(r.URL.Query().Get("path")))
+	abs, ok := a.resolveRecordingPath(relPath)
+	if relPath == "" || strings.Contains(relPath, "..") || !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if _, err := os.Stat(abs); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	offsetSec, _ := strconv.ParseFloat(r.URL.Query().Get("offsetSec"), 64)
+	if offsetSec < 0 {
+		offsetSec = 0
+	}
+	durationSec, _ := strconv.ParseFloat(r.URL.Query().Get("durationSec"), 64)
+	if durationSec <= 0 {
+		durationSec = 30
+	}
+	if durationSec > maxPreviewClipSeconds {
+		durationSec = maxPreviewClipSeconds
+	}
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+		"-ss", strconv.FormatFloat(offsetSec, 'f', 2, 64), "-i", abs,
+		"-t", strconv.FormatFloat(durationSec, 'f', 2, 64),
+		"-c:a", "libopus", "-b:a", "96k", "-vn",
+		"-f", "webm", "pipe:1")
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = cmd.Wait() }()
+	w.Header().Set("Content-Type", "audio/webm")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = io.Copy(w, out)
+}
+
+// CutterJob tracks one in-progress or finished Set Cutter export. Follows
+// the same mutex-guarded-struct-plus-view() shape as URLFetchJob/ShareJob.
+type CutterJob struct {
+	mu sync.Mutex
+
+	id         string
+	sourcePath string
+	status     string // "running" | "done" | "error"
+	startedAt  time.Time
+	finishedAt time.Time
+
+	totalSegments int
+	doneSegments  int
+	outputs       []string
+	errMsg        string
+	log           []ShareJobLogLine
+}
+
+// CutterJobView is the JSON-safe snapshot of a CutterJob.
+type CutterJobView struct {
+	ID            string            `json:"id"`
+	SourcePath    string            `json:"sourcePath"`
+	Status        string            `json:"status"`
+	StartedAt     time.Time         `json:"startedAt"`
+	FinishedAt    *time.Time        `json:"finishedAt,omitempty"`
+	TotalSegments int               `json:"totalSegments"`
+	DoneSegments  int               `json:"doneSegments"`
+	Outputs       []string          `json:"outputs"`
+	Error         string            `json:"error,omitempty"`
+	Log           []ShareJobLogLine `json:"log"`
+}
+
+func (j *CutterJob) view() CutterJobView {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	v := CutterJobView{
+		ID: j.id, SourcePath: j.sourcePath, Status: j.status, StartedAt: j.startedAt,
+		TotalSegments: j.totalSegments, DoneSegments: j.doneSegments,
+		Outputs: append([]string(nil), j.outputs...), Error: j.errMsg,
+		Log: append([]ShareJobLogLine(nil), j.log...),
+	}
+	if !j.finishedAt.IsZero() {
+		v.FinishedAt = &j.finishedAt
+	}
+	return v
+}
+
+func (j *CutterJob) logf(format string, args ...any) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.log = append(j.log, ShareJobLogLine{Time: time.Now().Format("15:04:05"), Text: fmt.Sprintf(format, args...)})
+}
+
+func (j *CutterJob) progress(output string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.doneSegments++
+	j.outputs = append(j.outputs, output)
+}
+
+func (j *CutterJob) finish(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.finishedAt = time.Now()
+	if err != nil {
+		j.status = "error"
+		j.errMsg = err.Error()
+	} else {
+		j.status = "done"
+	}
+}
+
+func (a *App) putCutterJob(job *CutterJob) {
+	a.cutterJobsMu.Lock()
+	defer a.cutterJobsMu.Unlock()
+	if len(a.cutterJobs) > 50 {
+		oldest, oldestID := time.Now(), ""
+		for id, j := range a.cutterJobs {
+			j.mu.Lock()
+			t := j.startedAt
+			j.mu.Unlock()
+			if t.Before(oldest) {
+				oldest, oldestID = t, id
+			}
+		}
+		if oldestID != "" {
+			delete(a.cutterJobs, oldestID)
+		}
+	}
+	a.cutterJobs[job.id] = job
+}
+
+func (a *App) getCutterJob(id string) (*CutterJob, bool) {
+	a.cutterJobsMu.Lock()
+	defer a.cutterJobsMu.Unlock()
+	j, ok := a.cutterJobs[id]
+	return j, ok
+}
+
+// handleCutterJobItem returns one export job's current status by ID, for
+// polling from the Set Cutter's export progress toast.
+func (a *App) handleCutterJobItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/cutter/jobs/")
+	job, ok := a.getCutterJob(id)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, job.view())
+}
+
+// audioOnlyExts are containers that never carry a video stream, used to skip
+// the (otherwise pointless) thumbnail-generation attempt for an exported
+// audio segment.
+var audioOnlyExts = map[string]bool{".mp3": true, ".m4a": true, ".aac": true, ".opus": true, ".flac": true, ".ogg": true, ".wav": true}
+
+func isAudioOnlyExt(ext string) bool {
+	return audioOnlyExts[strings.ToLower(ext)]
+}
+
+// cutterExportPath builds the output path (relative to FinishedDir) for one
+// exported segment, following the fixed convention
+// <event>/<year>/<stage>/<Artist>_<Stage>_<date>.<ext> - falling back to
+// whatever event/stage info is available when a marker isn't linked to a
+// library event.
+func cutterExportPath(srcRelPath string, m CutterMarker, ev *LibraryEvent, ext string) string {
+	stage := m.Channel
+	if stage == "" {
+		stage = channelFromPath(srcRelPath)
+	}
+	stageSafe := safeName(stage)
+	if stageSafe == "" {
+		stageSafe = "unsorted"
+	}
+
+	artist := m.Artist
+	if artist == "" {
+		artist = m.Name
+	}
+	if artist == "" {
+		artist = "Untitled"
+	}
+	artistSafe := safeName(artist)
+
+	dateStr := ""
+	if m.Start != "" {
+		if t, err := time.Parse(time.RFC3339, m.Start); err == nil {
+			dateStr = t.Format("2006-01-02")
+		}
+	}
+	if dateStr == "" {
+		dateStr = time.Now().Format("2006-01-02")
+	}
+
+	var dirParts []string
+	if ev != nil {
+		if name := safeName(ev.Name); name != "" {
+			dirParts = append(dirParts, name)
+		}
+		if ev.Year > 0 {
+			dirParts = append(dirParts, strconv.Itoa(ev.Year))
+		}
+	}
+	dirParts = append(dirParts, stageSafe, "sets")
+
+	filename := fmt.Sprintf("%s_%s_%s%s", artistSafe, stageSafe, dateStr, ext)
+	return filepath.ToSlash(filepath.Join(append(dirParts, filename)...))
+}
+
+// cutterExportRequest is the POST /api/cutter/export body.
+type cutterExportRequest struct {
+	Path    string         `json:"path"`
+	Markers []CutterMarker `json:"markers"`
+	Precise bool           `json:"precise"` // re-encode audio for a frame-accurate cut instead of stream-copy
+}
+
+// handleCutterExport starts a background job that splits a recording at
+// every marker into standalone segment files (see runCutterExport), and
+// returns the job ID immediately for the client to poll.
+func (a *App) handleCutterExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminReq(r) {
+		http.Error(w, "admin only", http.StatusForbidden)
+		return
+	}
+	var req cutterExportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	relPath := filepath.ToSlash(strings.TrimSpace(req.Path))
+	if relPath == "" || strings.Contains(relPath, "..") {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	abs, ok := a.resolveRecordingPath(relPath)
+	if !ok {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	if _, err := os.Stat(abs); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if len(req.Markers) == 0 {
+		http.Error(w, "at least one marker is required", http.StatusBadRequest)
+		return
+	}
+
+	job := &CutterJob{id: newID(), sourcePath: relPath, status: "running", startedAt: time.Now(), totalSegments: len(req.Markers)}
+	a.putCutterJob(job)
+	go a.runCutterExport(job, abs, relPath, req)
+	writeJSON(w, map[string]string{"jobId": job.id})
+}
+
+// runCutterExport splits abs at every marker's offset using ffmpeg stream
+// copy (or, if req.Precise, a re-encode for a frame-accurate cut), naming
+// and placing each output via cutterExportPath, and registers a
+// RecordingMeta entry for each so the segment shows up in the library
+// immediately. Runs entirely in the background - the client polls
+// /api/cutter/jobs/<id> for progress.
+func (a *App) runCutterExport(job *CutterJob, abs, relPath string, req cutterExportRequest) {
+	markers := append([]CutterMarker(nil), req.Markers...)
+	sort.Slice(markers, func(i, j int) bool { return markers[i].OffsetSec < markers[j].OffsetSec })
+
+	dur, err := probeMediaDuration(abs)
+	if err != nil {
+		job.logf("could not probe source duration: %s", err)
+		job.finish(err)
+		return
+	}
+
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	ext := filepath.Ext(abs)
+
+	var eventByID map[string]LibraryEvent
+	a.mu.RLock()
+	eventByID = make(map[string]LibraryEvent, len(a.cfg.LibraryEvents))
+	for _, e := range a.cfg.LibraryEvents {
+		eventByID[e.ID] = e
+	}
+	a.mu.RUnlock()
+
+	for i, m := range markers {
+		start := m.OffsetSec
+		end := dur.Seconds()
+		if i+1 < len(markers) {
+			end = markers[i+1].OffsetSec
+		}
+		if end <= start {
+			job.logf("skipping marker %d: end offset is not after start offset", i)
+			continue
+		}
+
+		var ev *LibraryEvent
+		if e, ok := eventByID[m.EventID]; ok {
+			ev = &e
+		}
+		outRel := cutterExportPath(relPath, m, ev, ext)
+		outAbs := filepath.Join(root, filepath.FromSlash(outRel))
+		if err := os.MkdirAll(filepath.Dir(outAbs), 0o755); err != nil {
+			job.logf("segment %d: %s", i, err)
+			continue
+		}
+
+		args := []string{"-hide_banner", "-loglevel", "error", "-y",
+			"-ss", strconv.FormatFloat(start, 'f', 3, 64),
+			"-to", strconv.FormatFloat(end, 'f', 3, 64),
+			"-i", abs}
+		if req.Precise {
+			args = append(args, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k")
+		} else {
+			args = append(args, "-c", "copy")
+		}
+		args = append(args, outAbs)
+		cmd := exec.Command("ffmpeg", args...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			job.logf("segment %d (%s) failed: %s: %s", i, outRel, err, strings.TrimSpace(string(out)))
+			continue
+		}
+
+		meta := RecordingMeta{EventID: m.EventID, Channel: m.Channel, SetID: m.SetID, Artist: m.Artist, Start: m.Start, End: m.End, Tracklist: m.Tracklist}
+		a.mu.Lock()
+		if a.cfg.RecordingMeta == nil {
+			a.cfg.RecordingMeta = map[string]RecordingMeta{}
+		}
+		a.cfg.RecordingMeta[outRel] = meta
+		newCfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(newCfg)
+
+		go a.generateThumbnail(outAbs, outRel, isAudioOnlyExt(ext))
+		job.progress(outRel)
+		job.logf("exported %s", outRel)
+	}
+	job.finish(nil)
 }

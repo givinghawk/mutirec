@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -206,5 +207,101 @@ func TestHandleRecordingTimecodePostManualBackfill(t *testing.T) {
 	app.handleRecordingTimecode(getW, getReq)
 	if getW.Code != http.StatusOK {
 		t.Fatalf("expected 200 on GET after backfill, got %d", getW.Code)
+	}
+}
+
+func TestIsAudioOnlyExt(t *testing.T) {
+	for _, ext := range []string{".mp3", ".MP3", ".m4a", ".flac", ".opus"} {
+		if !isAudioOnlyExt(ext) {
+			t.Errorf("isAudioOnlyExt(%q) = false, want true", ext)
+		}
+	}
+	for _, ext := range []string{".mkv", ".mp4", ""} {
+		if isAudioOnlyExt(ext) {
+			t.Errorf("isAudioOnlyExt(%q) = true, want false", ext)
+		}
+	}
+}
+
+func TestCutterExportPathWithLibraryEvent(t *testing.T) {
+	ev := &LibraryEvent{Name: "Neon Beat", Year: 2026}
+	m := CutterMarker{Channel: "BLUE", Artist: "DJ Vertex", Start: "2026-06-25T19:00:00Z"}
+	got := cutterExportPath("BLUE/set.mkv", m, ev, ".mkv")
+	want := "NeonBeat/2026/BLUE/sets/DJVertex_BLUE_2026-06-25.mkv"
+	if got != want {
+		t.Errorf("cutterExportPath = %q, want %q", got, want)
+	}
+}
+
+func TestCutterExportPathWithoutLibraryEvent(t *testing.T) {
+	m := CutterMarker{Name: "Opening Set"}
+	got := cutterExportPath("SomeChannel/set.mp3", m, nil, ".mp3")
+	if !strings.HasPrefix(got, "SomeChannel/sets/OpeningSet_SomeChannel_") {
+		t.Errorf("cutterExportPath without an event = %q, want prefix SomeChannel/sets/OpeningSet_SomeChannel_", got)
+	}
+	if !strings.HasSuffix(got, ".mp3") {
+		t.Errorf("cutterExportPath should keep the source extension, got %q", got)
+	}
+}
+
+func TestHandleCutterMarkersRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	finishedDir := filepath.Join(dir, "finished")
+	if err := os.MkdirAll(filepath.Join(finishedDir, "BLUE"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	app := &App{config: filepath.Join(dir, "config.json"), cfg: AppConfig{Settings: Settings{FinishedDir: finishedDir}}}
+
+	// No markers saved yet - GET should return an empty array, not an error.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/cutter/markers?path=BLUE/set.mkv", nil)
+	getW := httptest.NewRecorder()
+	app.handleCutterMarkers(getW, getReq)
+	if getW.Code != http.StatusOK {
+		t.Fatalf("expected 200 for markers GET with nothing saved yet, got %d", getW.Code)
+	}
+	var empty []CutterMarker
+	if err := json.Unmarshal(getW.Body.Bytes(), &empty); err != nil || len(empty) != 0 {
+		t.Fatalf("expected an empty array, got %s (err %v)", getW.Body.String(), err)
+	}
+
+	markers := []CutterMarker{
+		{ID: "m1", OffsetSec: 0, Name: "First"},
+		{ID: "m2", OffsetSec: 1800, Name: "Second"},
+	}
+	body, _ := json.Marshal(markers)
+	putReq := httptest.NewRequest(http.MethodPut, "/api/cutter/markers?path=BLUE/set.mkv", bytes.NewReader(body))
+	putReq = withAdminUser(putReq)
+	putW := httptest.NewRecorder()
+	app.handleCutterMarkers(putW, putReq)
+	if putW.Code != http.StatusOK {
+		t.Fatalf("expected 200 on markers PUT, got %d: %s", putW.Code, putW.Body.String())
+	}
+
+	getReq2 := httptest.NewRequest(http.MethodGet, "/api/cutter/markers?path=BLUE/set.mkv", nil)
+	getW2 := httptest.NewRecorder()
+	app.handleCutterMarkers(getW2, getReq2)
+	var got []CutterMarker
+	if err := json.Unmarshal(getW2.Body.Bytes(), &got); err != nil {
+		t.Fatalf("GET after PUT wasn't valid JSON: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "First" || got[1].Name != "Second" {
+		t.Fatalf("markers didn't round-trip: %+v", got)
+	}
+}
+
+func TestHandleCutterMarkersPutRequiresAdmin(t *testing.T) {
+	dir := t.TempDir()
+	finishedDir := filepath.Join(dir, "finished")
+	if err := os.MkdirAll(finishedDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	app := &App{config: filepath.Join(dir, "config.json"), cfg: AppConfig{Settings: Settings{FinishedDir: finishedDir}}}
+
+	body, _ := json.Marshal([]CutterMarker{{ID: "m1"}})
+	req := httptest.NewRequest(http.MethodPut, "/api/cutter/markers?path=BLUE/set.mkv", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	app.handleCutterMarkers(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unauthenticated markers PUT, got %d", w.Code)
 	}
 }

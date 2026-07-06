@@ -363,6 +363,9 @@ type App struct {
 	thumbGenMu      sync.Mutex
 	thumbGenerating map[string]chan struct{}
 
+	cutterJobsMu sync.Mutex
+	cutterJobs   map[string]*CutterJob
+
 	sourcePresets []SourcePreset
 }
 
@@ -432,6 +435,7 @@ func NewApp(configPath string) (*App, error) {
 		shareNonces:   map[string]time.Time{},
 		shareJobs:     map[string]*ShareJob{},
 		fetchJobs:     map[string]*URLFetchJob{},
+		cutterJobs:    map[string]*CutterJob{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -504,6 +508,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/timecode", a.handleRecordingTimecode)
 	mux.HandleFunc("/api/recordings/waveform", a.handleRecordingWaveform)
 	mux.HandleFunc("/api/recordings/backfill-timecodes", a.handleBackfillTimecodes)
+	mux.HandleFunc("/api/cutter/markers", a.handleCutterMarkers)
+	mux.HandleFunc("/api/cutter/preview", a.handleCutterPreview)
+	mux.HandleFunc("/api/cutter/export", a.handleCutterExport)
+	mux.HandleFunc("/api/cutter/jobs/", a.handleCutterJobItem)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).

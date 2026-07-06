@@ -423,6 +423,8 @@ label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 
 .lib-set-play-icon { color: #fff; font-size: 26px; opacity: .85; transition: transform .15s var(--ease), opacity .15s var(--ease); filter: drop-shadow(0 2px 6px rgb(0 0 0 / .5)); }
 .lib-set-organize { position: absolute; top: 4px; right: 4px; border: none; background: rgb(0 0 0 / .45); color: #fff; border-radius: 6px; padding: 2px 6px; font-size: 14px; cursor: pointer; line-height: 1.4; transition: background .15s var(--ease); }
 .lib-set-organize:hover { background: rgb(0 0 0 / .72); }
+.lib-set-cut { position: absolute; top: 4px; left: 4px; border: none; background: rgb(0 0 0 / .45); color: #fff; border-radius: 6px; padding: 2px 6px; font-size: 13px; cursor: pointer; line-height: 1.4; transition: background .15s var(--ease); }
+.lib-set-cut:hover { background: rgb(0 0 0 / .72); }
 .lib-set-info { padding: 6px 2px 0; }
 .assign-mode-btn.active { background: var(--accent); border-color: transparent; color: #fff; }
 .assign-mode-panel.hidden { display: none; }
@@ -491,6 +493,23 @@ label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 
 .storage-bar-track { flex: 1; height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; }
 .storage-bar-fill { height: 100%; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 80%, #fff 20%), var(--accent)); border-radius: 4px; transition: width .4s var(--ease); }
 .storage-bar-value { flex-shrink: 0; width: 56px; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* ---- Set Cutter ------------------------------------------------------------ */
+
+.cutter-panel { max-width: 760px; }
+.cutter-player-wrap video { max-height: 240px; border-radius: var(--radius); background: #000; }
+.cutter-timeline-wrap { margin-top: 10px; }
+.cutter-timeline { position: relative; width: 100%; height: 120px; overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius); background: rgb(0 0 0 / .3); cursor: pointer; }
+.cutter-waveform-img { display: block; height: 120px; width: auto; max-width: none; pointer-events: none; }
+.cutter-timeline-markers { position: absolute; inset: 0; pointer-events: none; }
+.cutter-marker-tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); box-shadow: 0 0 4px var(--accent); }
+.cutter-marker-tick .cutter-marker-tick-label { position: absolute; top: 2px; left: 4px; font-size: 10px; white-space: nowrap; color: var(--accent); background: rgb(0 0 0 / .55); padding: 1px 4px; border-radius: 3px; }
+.cutter-marker-row { display: grid; grid-template-columns: 84px 1fr 1fr 1fr auto; gap: 6px; align-items: center; border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 6px 8px; background: var(--surface-1); }
+.cutter-marker-row input { min-width: 0; }
+.cutter-marker-row .cutter-marker-time { font-variant-numeric: tabular-nums; font-size: .8rem; color: var(--text-muted, #a1a1aa); }
+@media (max-width: 640px) {
+  .cutter-marker-row { grid-template-columns: 1fr 1fr; grid-auto-flow: row; }
+}
 
 /* ---- reduced motion ------------------------------------------------------ */
 

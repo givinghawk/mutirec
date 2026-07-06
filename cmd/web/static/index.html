@@ -662,6 +662,52 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
         </div>
       </div>
 
+      <!-- Set Cutter: split a whole-day recording into individual set files -->
+      <div id="cutter-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel cutter-panel">
+          <div class="panel-head">
+            <h2 id="cutter-title" class="truncate">Set Cutter</h2>
+            <button type="button" id="cutter-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+
+          <div class="cutter-player-wrap">
+            <audio id="cutter-audio" controls class="w-full hidden"></audio>
+            <video id="cutter-video" controls class="w-full hidden"></video>
+          </div>
+
+          <div class="cutter-timeline-wrap">
+            <div id="cutter-timeline" class="cutter-timeline">
+              <img id="cutter-waveform-img" class="cutter-waveform-img">
+              <div id="cutter-timeline-markers" class="cutter-timeline-markers"></div>
+            </div>
+            <p id="cutter-waveform-status" class="mt-1 text-xs text-zinc-500"></p>
+          </div>
+
+          <div class="mt-3 flex flex-wrap gap-2">
+            <button type="button" id="cutter-add-marker" class="btn primary">Add marker at current time</button>
+            <button type="button" id="cutter-load-timetable" class="btn">Load from timetable</button>
+            <button type="button" id="cutter-save-markers" class="btn">Save markers</button>
+          </div>
+
+          <div class="mt-3">
+            <div id="cutter-markers-list" class="space-y-2"></div>
+          </div>
+
+          <details class="cutter-advanced mt-3">
+            <summary class="cursor-pointer text-sm text-zinc-400">Advanced options</summary>
+            <div class="mt-2 space-y-2">
+              <label class="inline-flex items-center gap-2 text-sm"><input id="cutter-precise" type="checkbox" class="accent-red-500"> Precise cut (re-encodes audio, slower, frame-accurate)</label>
+            </div>
+          </details>
+
+          <p id="cutter-error" class="mt-2 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" onclick="closeCutterModal()">Close</button>
+            <button type="button" id="cutter-export" class="btn primary">Export segments</button>
+          </div>
+        </div>
+      </div>
+
       <section id="explorer" class="view hidden space-y-4">
         <div class="panel flex flex-wrap items-center justify-between gap-3">
           <div class="flex min-w-0 items-center gap-2">

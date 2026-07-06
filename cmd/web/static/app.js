@@ -2392,6 +2392,7 @@ function renderLibraryEventView(id) {
     if (!r) return;
     card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(r.path, libDisplayTitle(r)));
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(r); });
+    card.querySelector('.lib-set-cut').addEventListener('click', (e) => { e.stopPropagation(); openCutterModal(r); });
   });
 }
 
@@ -2405,6 +2406,7 @@ function libSetCardHtml(r) {
       <div class="lib-set-thumb lib-set-play">
         <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
         <span class="lib-set-play-icon">&#9658;</span>
+        <button type="button" class="lib-set-cut" title="Set Cutter" aria-label="Set Cutter">&#9986;</button>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
       </div>
       <div class="lib-set-info">
@@ -2435,6 +2437,7 @@ function renderLibrarySearch(term) {
       </div>
       <div class="flex flex-shrink-0 items-center gap-2">
         <button type="button" class="btn primary lib-search-play" data-path="${escapeAttr(r.path)}">&#9658; Play</button>
+        <button type="button" class="btn lib-search-cut" data-path="${escapeAttr(r.path)}">Cut</button>
         <button type="button" class="btn lib-search-organize" data-path="${escapeAttr(r.path)}">Organize</button>
         <a class="btn" href="/media/${encodeMediaPath(r.path)}" download title="Download">&#8681;</a>
       </div>
@@ -2447,6 +2450,10 @@ function renderLibrarySearch(term) {
   document.querySelectorAll('.lib-search-organize').forEach(btn => btn.addEventListener('click', () => {
     const r = recordings.find(x => x.path === btn.dataset.path);
     if (r) openAssignModal(r);
+  }));
+  document.querySelectorAll('.lib-search-cut').forEach(btn => btn.addEventListener('click', () => {
+    const r = recordings.find(x => x.path === btn.dataset.path);
+    if (r) openCutterModal(r);
   }));
 }
 
@@ -3795,6 +3802,227 @@ function renderExplorerFetchJob(job) {
 // (not rebuilt by drawSourceEditor() or setDropdownOptions()) as soon as the
 // script runs - the source editor's per-row dropdowns get the same wiring
 // again after every render, safely, since already-bound elements are skipped.
+// ─── Set Cutter ──────────────────────────────────────────────────────────────
+// Splits a whole-day recording into individual set files. Video and
+// audio-only recordings share this same UI: markers are always placed
+// against the audio waveform, but a video recording also gets a <video>
+// element playing alongside it instead of a plain <audio> one.
+
+let cutterRecording = null;   // the RecordingFile being cut
+let cutterMarkers = [];       // array of CutterMarker
+let cutterSidecar = null;     // the .timecode.json sidecar, or null if none yet
+
+const cutterAudioExts = ['.mp3', '.m4a', '.aac', '.opus', '.flac', '.ogg', '.wav'];
+function cutterIsAudioOnly(path) {
+  const ext = path.slice(path.lastIndexOf('.')).toLowerCase();
+  return cutterAudioExts.includes(ext);
+}
+
+function cutterPlayerEl() {
+  return cutterRecording && cutterIsAudioOnly(cutterRecording.path) ? $('cutter-audio') : $('cutter-video');
+}
+
+function formatClock(totalSeconds) {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    : `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+async function openCutterModal(r) {
+  cutterRecording = r;
+  cutterMarkers = [];
+  cutterSidecar = null;
+  $('cutter-title').textContent = `Set Cutter: ${libDisplayTitle(r)}`;
+  $('cutter-error').classList.add('hidden');
+  $('cutter-precise').checked = false;
+
+  const audioEl = $('cutter-audio'), videoEl = $('cutter-video');
+  const isAudio = cutterIsAudioOnly(r.path);
+  audioEl.classList.toggle('hidden', !isAudio);
+  videoEl.classList.toggle('hidden', isAudio);
+  const player = isAudio ? audioEl : videoEl;
+  player.src = `/media/${encodeMediaPath(r.path)}`;
+
+  $('cutter-waveform-img').src = `/api/recordings/waveform?path=${encodeURIComponent(r.path)}`;
+  $('cutter-waveform-status').textContent = 'Loading waveform...';
+  $('cutter-waveform-img').onload = () => { $('cutter-waveform-status').textContent = ''; };
+  $('cutter-waveform-img').onerror = () => { $('cutter-waveform-status').textContent = 'Waveform unavailable for this file.'; };
+
+  try {
+    const res = await fetch(`/api/recordings/timecode?path=${encodeURIComponent(r.path)}`);
+    if (res.ok) cutterSidecar = await res.json();
+  } catch (e) { /* no sidecar yet - fine, timetable seeding just won't be available */ }
+
+  try {
+    cutterMarkers = await api(`/api/cutter/markers?path=${encodeURIComponent(r.path)}`) || [];
+  } catch (e) {
+    cutterMarkers = [];
+  }
+  renderCutterMarkers();
+
+  $('cutter-overlay').classList.remove('hidden');
+}
+
+function closeCutterModal() {
+  $('cutter-overlay').classList.add('hidden');
+  $('cutter-audio').pause(); $('cutter-audio').removeAttribute('src');
+  $('cutter-video').pause(); $('cutter-video').removeAttribute('src');
+  cutterRecording = null;
+}
+$('cutter-close').onclick = closeCutterModal;
+$('cutter-overlay').addEventListener('click', (e) => { if (e.target.id === 'cutter-overlay') closeCutterModal(); });
+
+function cutterDurationSeconds() {
+  const player = cutterPlayerEl();
+  if (player && player.duration && isFinite(player.duration)) return player.duration;
+  if (cutterSidecar && cutterSidecar.durationSec) return cutterSidecar.durationSec;
+  return 0;
+}
+
+function renderCutterMarkers() {
+  cutterMarkers.sort((a, b) => a.offsetSec - b.offsetSec);
+
+  // Ticks over the waveform.
+  const dur = cutterDurationSeconds();
+  $('cutter-timeline-markers').innerHTML = dur > 0 ? cutterMarkers.map(m => {
+    const pct = Math.min(100, Math.max(0, (m.offsetSec / dur) * 100));
+    return `<div class="cutter-marker-tick" style="left:${pct}%" data-offset="${m.offsetSec}"><span class="cutter-marker-tick-label">${escapeHtml(m.name || m.artist || '')}</span></div>`;
+  }).join('') : '';
+
+  // Editable marker rows.
+  $('cutter-markers-list').innerHTML = cutterMarkers.map((m, i) => `
+    <div class="cutter-marker-row" data-index="${i}">
+      <div class="cutter-marker-time">${formatClock(m.offsetSec)}</div>
+      <input class="input cutter-m-name" placeholder="Set / artist name" value="${escapeAttr(m.name || '')}">
+      <input class="input cutter-m-channel" placeholder="Channel" value="${escapeAttr(m.channel || '')}">
+      <input class="input cutter-m-tracklist" placeholder="Tracklist (optional)" value="${escapeAttr(m.tracklist || '')}">
+      <div class="flex gap-1">
+        <button type="button" class="btn cutter-m-seek" title="Jump playback here">&#9658;</button>
+        <button type="button" class="btn cutter-m-remove" style="color:#fda4af" title="Remove marker">&times;</button>
+      </div>
+    </div>`).join('') || '<p class="text-sm text-zinc-400">No markers yet - play the recording and click "Add marker at current time", or use "Load from timetable".</p>';
+
+  document.querySelectorAll('.cutter-marker-row').forEach(row => {
+    const i = Number(row.dataset.index);
+    row.querySelector('.cutter-m-name').addEventListener('change', (e) => { cutterMarkers[i].name = e.target.value; });
+    row.querySelector('.cutter-m-channel').addEventListener('change', (e) => { cutterMarkers[i].channel = e.target.value; });
+    row.querySelector('.cutter-m-tracklist').addEventListener('change', (e) => { cutterMarkers[i].tracklist = e.target.value; });
+    row.querySelector('.cutter-m-seek').addEventListener('click', () => {
+      const player = cutterPlayerEl();
+      if (player) { player.currentTime = cutterMarkers[i].offsetSec; player.play(); }
+    });
+    row.querySelector('.cutter-m-remove').addEventListener('click', () => {
+      cutterMarkers.splice(i, 1);
+      renderCutterMarkers();
+    });
+  });
+}
+
+$('cutter-add-marker').onclick = () => {
+  const player = cutterPlayerEl();
+  if (!player) return;
+  cutterMarkers.push({ id: `m${Date.now()}`, offsetSec: player.currentTime || 0, name: '', channel: cutterRecording ? (cutterRecording.channel || cutterRecording.source || '') : '' });
+  renderCutterMarkers();
+};
+
+// Clicking the waveform seeks playback to that position - the timeline is a
+// visual scrub bar, not a drag-to-place-marker surface (markers are added at
+// the current playback position instead, so "does this sound right" is
+// always one click away via the player's own controls).
+$('cutter-timeline').addEventListener('click', (e) => {
+  const img = $('cutter-waveform-img');
+  const rect = img.getBoundingClientRect();
+  const frac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  const dur = cutterDurationSeconds();
+  const player = cutterPlayerEl();
+  if (player && dur > 0) player.currentTime = frac * dur;
+});
+
+// "Load from timetable": for the event this recording is assigned to, map
+// every archived timetable set that falls within the recording's wall-clock
+// span onto a file offset using the sidecar's startedAt, and seed one marker
+// per set. Requires both a timecode sidecar and an assigned event+channel -
+// without either there's nothing to map wall-clock time onto.
+$('cutter-load-timetable').onclick = () => {
+  if (!cutterRecording || !cutterSidecar || !cutterSidecar.startedAt) {
+    toast('This recording has no timecode sidecar yet - use "Backfill timecodes" in Settings first.', 'error');
+    return;
+  }
+  const ev = cutterRecording.eventId ? libEventById(cutterRecording.eventId) : null;
+  if (!ev) {
+    toast('Organize this recording (assign it to an event) before loading its timetable.', 'error');
+    return;
+  }
+  const channel = cutterRecording.channel || cutterRecording.source || '';
+  const stage = (ev.timetable || []).find(st => st.stage.toLowerCase() === channel.toLowerCase());
+  if (!stage || !stage.sets.length) {
+    toast(`No archived timetable found for channel "${channel}" on ${ev.name}.`, 'error');
+    return;
+  }
+  const startedAt = new Date(cutterSidecar.startedAt).getTime();
+  const dur = cutterDurationSeconds();
+  let added = 0;
+  stage.sets.forEach(s => {
+    const setStart = new Date(s.start).getTime();
+    const offsetSec = (setStart - startedAt) / 1000;
+    if (offsetSec < 0 || (dur > 0 && offsetSec > dur)) return; // outside this file's span
+    if (cutterMarkers.some(m => Math.abs(m.offsetSec - offsetSec) < 1)) return; // already have one here
+    cutterMarkers.push({
+      id: `tt-${s.id || added}`, offsetSec, name: s.name, channel,
+      eventId: ev.id, setId: s.id || '', artist: s.name, start: s.start, end: s.end,
+    });
+    added++;
+  });
+  renderCutterMarkers();
+  toast(added > 0 ? `Added ${added} marker(s) from the timetable` : 'No new sets fell within this recording\'s time span', 'info');
+};
+
+$('cutter-save-markers').onclick = async () => {
+  if (!cutterRecording) return;
+  try {
+    await api(`/api/cutter/markers?path=${encodeURIComponent(cutterRecording.path)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cutterMarkers),
+    });
+    toast('Markers saved', 'info');
+  } catch (e) { /* api() already toasted the error */ }
+};
+
+let cutterExportPollTimer = null;
+
+$('cutter-export').onclick = async () => {
+  if (!cutterRecording) return;
+  if (cutterMarkers.length === 0) {
+    $('cutter-error').textContent = 'Add at least one marker before exporting.';
+    $('cutter-error').classList.remove('hidden');
+    return;
+  }
+  $('cutter-error').classList.add('hidden');
+  const precise = $('cutter-precise').checked;
+  let job;
+  try {
+    job = await api('/api/cutter/export', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: cutterRecording.path, markers: cutterMarkers, precise }),
+    });
+  } catch (e) { return; } // api() already toasted the error
+  toast('Export started - splitting in the background...', 'info');
+  if (cutterExportPollTimer) clearInterval(cutterExportPollTimer);
+  cutterExportPollTimer = setInterval(async () => {
+    let status;
+    try { status = await api(`/api/cutter/jobs/${job.jobId}`); } catch (e) { clearInterval(cutterExportPollTimer); return; }
+    if (status.status === 'done') {
+      clearInterval(cutterExportPollTimer);
+      toast(`Export complete: ${status.doneSegments} segment(s) saved to the library`, 'info');
+      await refresh();
+    } else if (status.status === 'error') {
+      clearInterval(cutterExportPollTimer);
+      toast(`Export failed: ${status.error}`, 'error');
+    }
+  }, 2000);
+};
+
 setupCustomDropdowns();
 setupImageUploadFields();
 

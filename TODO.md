@@ -593,13 +593,61 @@
     and audio-only cases), waveform/thumbnail key non-collision, path-escape
     rejection, and the timecode GET/POST handlers end-to-end (including the
     manual-backfill round-trip).
-  - **Still to come** (tracked as separate phases, not yet built): the Set
-    Cutter UI itself (marker placement on the waveform, timetable-seeded
-    markers, preview clip, `-c copy` export with a "precise cut" re-encode
-    option under Advanced, same UI for video sources played alongside the
-    audio waveform), assisted mode (silence detection + optional Whisper,
-    both scoped to ≤20-minute windows around timetable slot boundaries), and
-    a general mass-transcode tool for bulk re-encoding recordings.
+- **Set Cutter, phase 2 - the Cutter UI itself** (`cmd/web/cutter.go` +
+  `cmd/web/static/{index.html,app.js,app.css}`). A "Cut" button (scissors
+  icon) on every library card and search result opens a modal that splits a
+  whole-day recording into individual set files.
+  - Markers (`CutterMarker`: offset, name, channel, optional
+    `eventId`/`setId`, artist, start/end, tracklist) are edited in the modal
+    and persisted to a `<recording>.markers.json` sidecar via
+    `GET`/`PUT /api/cutter/markers?path=` - the third and last sidecar kind
+    `isSidecarPath()` now excludes from the recordings scanner.
+  - The modal always plays the real file (`<audio>` for audio-only
+    containers, `<video>` for everything else - `cutterIsAudioOnly()` picks
+    by extension) alongside the waveform image from phase 1, so "video sets
+    are also cuttable, treated like audio but with the video running
+    alongside" per the request: markers are placed by ear/eye against the
+    same waveform in both cases, just with a video element instead of a bare
+    audio one. Clicking the waveform seeks the player; "Add marker at
+    current time" reads its `currentTime`.
+  - "Load from timetable" uses the recording's assigned `eventId` + channel
+    to find the matching `StageSchedule` in that event's archived timetable,
+    and the phase-1 sidecar's `startedAt` to convert each set's wall-clock
+    start into a file offset - only sets that actually fall within the
+    file's span become markers, and one already within 1s of an existing
+    marker is skipped rather than duplicated.
+  - Export (`POST /api/cutter/export`, admin only) runs as a background
+    `CutterJob` (same mutex-guarded-struct-plus-`view()` shape as
+    `URLFetchJob`/`ShareJob`) polled via `GET /api/cutter/jobs/<id>` - the
+    settings answer was "background job with a progress toast", so the
+    client shows one immediately and polls every 2s rather than blocking on
+    the request. Stream-copies (`-c copy`) by default for a near-instant,
+    lossless split; an "Advanced options" `<details>` panel (both the
+    silence-threshold sliders **and** this checkbox were asked to live under
+    Advanced, not inline) exposes "Precise cut" which re-encodes audio
+    (`-c:v copy -c:a aac`) for a frame-accurate boundary instead of only
+    keyframe-accurate.
+  - Each segment's output path follows the fixed convention settled on:
+    `<event>/<year>/<stage>/sets/<Artist>_<Stage>_<date>.<ext>`
+    (`cutterExportPath`), falling back to the recording's own folder/channel
+    when a marker isn't linked to a library event. A `RecordingMeta` entry
+    is written for every exported segment (same map `handleRecordingMeta`
+    already uses) so it shows up organized in the library immediately, and a
+    thumbnail is generated for any segment that isn't a known audio-only
+    container.
+  - Tests in `cmd/web/cutter_test.go`: export path building (with and
+    without a linked library event), audio-extension detection, and the
+    markers GET/PUT handlers (empty-array default, round-trip, admin-only
+    enforcement on PUT).
+  - Verified end-to-end against a running instance (no ffmpeg/ffprobe
+    installed in that sandbox, so waveform/export correctly report
+    unavailable/failed rather than silently succeeding) plus a Playwright
+    check that the audio/video element toggle picks the right element by
+    file extension.
+  - **Still to come**: assisted mode (silence detection + optional Whisper,
+    both scoped to ≤20-minute windows around timetable slot boundaries,
+    with silence-threshold sliders under Advanced options) and a general
+    mass-transcode tool for bulk re-encoding recordings.
 
 ## Remaining (in suggested order)
 
