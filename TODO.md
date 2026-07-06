@@ -692,6 +692,61 @@
     silently succeeding) plus a Playwright screenshot confirming the Mass
     Transcode view renders and its selection checkboxes wire up correctly.
 
+- **Set Cutter, phase 3 - assisted mode** (`cmd/web/assist.go`, new file).
+  "Auto-detect cuts" in the Set Cutter modal proposes a refined cut point at
+  every timetable set boundary, without ever processing more than a bounded
+  window per boundary.
+  - `POST /api/cutter/detect` validates the recording has a timecode sidecar
+    with a real `startedAt` and is assigned to a library event with an
+    archived timetable for its channel (all three are hard requirements -
+    without them there's nothing to map wall-clock boundaries onto), then
+    starts a background `DetectJob` and returns its ID; `GET
+    /api/cutter/detect/jobs/<id>` polls it, same shape as every other job
+    type in this app.
+  - For each boundary (one set's end = the next set's start) that falls
+    within the recording's own span, `runDetectJob` opens a ±10-minute
+    (20-minute total) window and runs **silence detection always**
+    (`detectSilenceNear`/`parseSilenceLog`/`pickClosestSilence` - parses
+    ffmpeg's `silencedetect` stderr output, picks the gap whose end lands
+    closest to the expected boundary, ties broken by the longer silence)
+    plus **Whisper optionally** (`detectWhisperNear`/`matchWhisperTranscript`
+    - extracts the window to a 16kHz mono WAV, runs whichever of
+      `whisper`/`whisper-cli`/`faster-whisper` is on `PATH`, and scans the
+      transcript for the next set's own artist name first, falling back to
+      a generic MC handoff phrase in English or Dutch).
+  - The two signals are combined into a confidence score: both agreeing
+    within 30s → `"high"`/`"combined"`; either alone → `"medium"`; neither →
+    `"low"`/`"timetable-only"` (falls back to the raw, un-refined timetable
+    time). Nothing is written automatically - the client reviews each
+    `DetectedMarker` proposal and accepts it (or all of them) into the
+    working marker list.
+  - Silence threshold (`-50dB` default) and minimum duration (`2s` default)
+    are exposed as sliders, and Whisper as a checkbox + language dropdown
+    (`"auto"` default, or a fixed language), both tucked under the Set
+    Cutter's existing "Advanced options" panel per the plan - some stages
+    have continuous crowd noise with no true silence, so these needed to be
+    adjustable rather than hardcoded.
+  - `syscheck.go` gained a `checkWhisper()` row (optional - a warning, not a
+    failure, when absent) so it's visible from Diagnostics whether
+    Whisper-assisted detection is available on this install.
+  - Tests in `cmd/web/assist_test.go`: silence-log parsing, closest-silence
+    selection (including the duration tie-break), Whisper transcript
+    matching (artist name, generic phrase fallback, no-match case), and the
+    detect handler's three-part validation (admin-only, requires a timecode
+    sidecar, requires an assigned event+timetable) plus a full
+    request→job-exists round trip.
+  - Verified end-to-end against a running instance: created a real library
+    event + archived timetable + timecode sidecar, confirmed the detect
+    endpoint's validation chain passes and the job starts, and (since ffmpeg
+    isn't installed in that sandbox) correctly records a probe error rather
+    than silently succeeding. Confirmed via direct JS-state assertions
+    (not just a screenshot, since the sandbox's Tailwind CDN load was
+    unreliable) that the proposals panel starts hidden, becomes visible
+    with rendered rows once a job returns proposals, and correctly
+    transfers an accepted proposal into the marker list.
+
+  This completes all three planned Set Cutter phases from this session.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

@@ -3838,6 +3838,10 @@ async function openCutterModal(r) {
   $('cutter-title').textContent = `Set Cutter: ${libDisplayTitle(r)}`;
   $('cutter-error').classList.add('hidden');
   $('cutter-precise').checked = false;
+  cutterDetectProposals = [];
+  $('cutter-proposals-box').classList.add('hidden');
+  $('cutter-detect-status').classList.add('hidden');
+  stopCutterDetectPoll();
 
   const audioEl = $('cutter-audio'), videoEl = $('cutter-video');
   const isAudio = cutterIsAudioOnly(r.path);
@@ -3871,6 +3875,7 @@ function closeCutterModal() {
   $('cutter-audio').pause(); $('cutter-audio').removeAttribute('src');
   $('cutter-video').pause(); $('cutter-video').removeAttribute('src');
   cutterRecording = null;
+  stopCutterDetectPoll();
 }
 $('cutter-close').onclick = closeCutterModal;
 $('cutter-overlay').addEventListener('click', (e) => { if (e.target.id === 'cutter-overlay') closeCutterModal(); });
@@ -3978,6 +3983,107 @@ $('cutter-load-timetable').onclick = () => {
   });
   renderCutterMarkers();
   toast(added > 0 ? `Added ${added} marker(s) from the timetable` : 'No new sets fell within this recording\'s time span', 'info');
+};
+
+// Auto-detect cuts: proposes a refined cut point at every timetable set
+// boundary using silence detection (always) and Whisper (optional, only if
+// installed server-side). Proposals are reviewed here, never written
+// straight into cutterMarkers - "Accept" or "Accept all" does that.
+
+let cutterDetectProposals = [];
+let cutterDetectPollTimer = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  const dbSlider = $('cutter-silence-db'), durSlider = $('cutter-silence-dur');
+  if (dbSlider) dbSlider.addEventListener('input', () => { $('cutter-silence-db-val').textContent = dbSlider.value; });
+  if (durSlider) durSlider.addEventListener('input', () => { $('cutter-silence-dur-val').textContent = parseFloat(durSlider.value).toFixed(1); });
+});
+
+$('cutter-auto-detect').onclick = async () => {
+  if (!cutterRecording) return;
+  const options = {
+    silenceThresholdDb: parseFloat($('cutter-silence-db').value) || -50,
+    silenceMinDurationSec: parseFloat($('cutter-silence-dur').value) || 2,
+    useWhisper: $('cutter-use-whisper').checked,
+    whisperLanguage: $('cutter-whisper-lang').value,
+  };
+  $('cutter-auto-detect').disabled = true;
+  $('cutter-detect-status').classList.remove('hidden');
+  $('cutter-detect-status').textContent = 'Analyzing timetable boundaries...';
+  let job;
+  try {
+    job = await api('/api/cutter/detect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: cutterRecording.path, options }),
+    });
+  } catch (e) { $('cutter-auto-detect').disabled = false; $('cutter-detect-status').classList.add('hidden'); return; }
+  pollCutterDetectJob(job.jobId);
+};
+
+function stopCutterDetectPoll() {
+  if (cutterDetectPollTimer) { clearTimeout(cutterDetectPollTimer); cutterDetectPollTimer = null; }
+}
+
+async function pollCutterDetectJob(jobId) {
+  stopCutterDetectPoll();
+  let job;
+  try {
+    job = await api(`/api/cutter/detect/jobs/${encodeURIComponent(jobId)}`);
+  } catch (e) {
+    cutterDetectPollTimer = setTimeout(() => pollCutterDetectJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('cutter-detect-status').textContent = `Analyzing... (${(job.log || []).length} boundaries checked so far)`;
+    cutterDetectPollTimer = setTimeout(() => pollCutterDetectJob(jobId), 1500);
+    return;
+  }
+  $('cutter-auto-detect').disabled = false;
+  $('cutter-detect-status').classList.add('hidden');
+  if (job.status === 'error') {
+    toast(`Auto-detect failed: ${job.error}`, 'error');
+    return;
+  }
+  cutterDetectProposals = job.proposals || [];
+  renderCutterProposals();
+  toast(`Auto-detect found ${cutterDetectProposals.length} candidate cut(s)`, 'info');
+}
+
+function renderCutterProposals() {
+  if (!cutterDetectProposals.length) {
+    $('cutter-proposals-box').classList.add('hidden');
+    return;
+  }
+  $('cutter-proposals-box').classList.remove('hidden');
+  const confColor = { high: '#4ade80', medium: '#fbbf24', low: '#94a3b8' };
+  $('cutter-proposals-list').innerHTML = cutterDetectProposals.map((p, i) => `
+    <div class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1 text-sm" data-index="${i}">
+      <span class="flex min-w-0 items-center gap-2">
+        <span class="cutter-marker-time">${formatClock(p.offsetSec)}</span>
+        <span class="truncate">${escapeHtml(p.name)}</span>
+        <span style="color:${confColor[p.confidence] || '#94a3b8'}" class="text-xs">${escapeHtml(p.confidence)} · ${escapeHtml(p.source)}</span>
+      </span>
+      <button type="button" class="btn cutter-proposal-accept flex-shrink-0" data-index="${i}">Accept</button>
+    </div>`).join('');
+  document.querySelectorAll('.cutter-proposal-accept').forEach(btn => btn.addEventListener('click', () => {
+    acceptCutterProposal(Number(btn.dataset.index));
+  }));
+}
+
+function acceptCutterProposal(i) {
+  const p = cutterDetectProposals[i];
+  if (!p) return;
+  cutterMarkers.push({
+    id: `detect-${Date.now()}-${i}`, offsetSec: p.offsetSec, name: p.name, artist: p.artist,
+    channel: p.channel, eventId: p.eventId, setId: p.setId, start: p.start, end: p.end,
+  });
+  cutterDetectProposals.splice(i, 1);
+  renderCutterMarkers();
+  renderCutterProposals();
+}
+
+$('cutter-proposals-accept-all').onclick = () => {
+  while (cutterDetectProposals.length) acceptCutterProposal(0);
 };
 
 $('cutter-save-markers').onclick = async () => {

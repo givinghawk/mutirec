@@ -751,7 +751,17 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
           <div class="mt-3 flex flex-wrap gap-2">
             <button type="button" id="cutter-add-marker" class="btn primary">Add marker at current time</button>
             <button type="button" id="cutter-load-timetable" class="btn">Load from timetable</button>
+            <button type="button" id="cutter-auto-detect" class="btn">Auto-detect cuts</button>
             <button type="button" id="cutter-save-markers" class="btn">Save markers</button>
+          </div>
+
+          <div id="cutter-detect-status" class="mt-2 hidden text-sm text-zinc-400"></div>
+          <div id="cutter-proposals-box" class="mt-2 hidden">
+            <div class="mb-2 flex items-center justify-between">
+              <span class="text-sm font-medium text-zinc-300">Proposed cuts - review before accepting</span>
+              <button type="button" id="cutter-proposals-accept-all" class="btn">Accept all</button>
+            </div>
+            <div id="cutter-proposals-list" class="space-y-1"></div>
           </div>
 
           <div class="mt-3">
@@ -762,6 +772,26 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <summary class="cursor-pointer text-sm text-zinc-400">Advanced options</summary>
             <div class="mt-2 space-y-2">
               <label class="inline-flex items-center gap-2 text-sm"><input id="cutter-precise" type="checkbox" class="accent-red-500"> Precise cut (re-encodes audio, slower, frame-accurate)</label>
+              <div class="border-t border-white/10 pt-2">
+                <p class="mb-1 text-xs text-zinc-500">Silence detection (used by Auto-detect cuts)</p>
+                <label class="block text-sm">Silence threshold: <span id="cutter-silence-db-val">-50</span> dB
+                  <input id="cutter-silence-db" type="range" min="-70" max="-20" step="1" value="-50" class="w-full">
+                </label>
+                <label class="block text-sm">Minimum silence duration: <span id="cutter-silence-dur-val">2.0</span>s
+                  <input id="cutter-silence-dur" type="range" min="0.5" max="5" step="0.5" value="2" class="w-full">
+                </label>
+              </div>
+              <div class="border-t border-white/10 pt-2">
+                <label class="inline-flex items-center gap-2 text-sm"><input id="cutter-use-whisper" type="checkbox" class="accent-red-500"> Also use Whisper speech recognition (if installed)</label>
+                <label class="mt-1 block text-sm">Whisper language<select id="cutter-whisper-lang" class="input">
+                  <option value="auto">Auto-detect</option>
+                  <option value="en">English</option>
+                  <option value="nl">Dutch</option>
+                  <option value="de">German</option>
+                  <option value="fr">French</option>
+                  <option value="es">Spanish</option>
+                </select></label>
+              </div>
             </div>
           </details>
 

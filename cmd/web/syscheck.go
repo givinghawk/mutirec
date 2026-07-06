@@ -75,6 +75,7 @@ func runSystemCheck(cfg AppConfig) SystemCheckReport {
 
 	checks = append(checks, checkInternet())
 	checks = append(checks, checkStorageDirs(cfg)...)
+	checks = append(checks, checkWhisper())
 
 	requirements := []Requirement{
 		cpuRequirement(),
@@ -117,6 +118,18 @@ func checkBinary(id, name, versionArg string, required bool) SystemCheckItem {
 	}
 	firstLine := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
 	return SystemCheckItem{ID: id, Label: label, Status: StatusPass, Detail: firstLine}
+}
+
+// checkWhisper looks for any of the common Whisper CLI binary names on
+// PATH - entirely optional, since silence detection alone still works for
+// the Set Cutter's assisted mode. Missing is a warning, not a failure.
+func checkWhisper() SystemCheckItem {
+	for _, name := range []string{"whisper", "whisper-cli", "faster-whisper"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return SystemCheckItem{ID: "whisper", Label: "Whisper", Status: StatusPass, Detail: fmt.Sprintf("Found at %s - the Set Cutter can use speech recognition to help detect MC handoffs.", path)}
+		}
+	}
+	return SystemCheckItem{ID: "whisper", Label: "Whisper", Status: StatusWarn, Detail: "Not found on PATH - optional; only needed for the Set Cutter's Whisper-assisted cut detection. Silence detection still works without it."}
 }
 
 // checkFFmpegCodecs confirms the two codecs every recording depends on are
