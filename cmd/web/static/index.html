@@ -131,6 +131,46 @@
           <p id="watch-empty" class="mt-3 text-sm text-zinc-400">Nothing selected — pick a source above.</p>
           <div id="watch-stats" class="mt-4 hidden grid gap-3 sm:grid-cols-2 md:grid-cols-4 text-sm"></div>
         </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Live Cut Session</h2><span class="text-xs text-zinc-400">Crowdsourced live transition marking</span></div>
+
+          <!-- No source picked yet: nothing to host, but still show the join box below. -->
+          <p id="livecut-pick-source" class="text-sm text-zinc-400">Pick a source above to host a session for it.</p>
+
+          <!-- Source picked, not currently hosting one: offer to start. -->
+          <div id="livecut-start" class="hidden space-y-2">
+            <p class="text-sm text-zinc-400">Start a session for this source so other MutiRec admins can join with a
+              code and their users can help flag transitions while it's still recording.</p>
+            <button type="button" id="livecut-start-btn" class="btn primary">Start Live Cut Session</button>
+          </div>
+
+          <!-- Source picked and this instance is hosting a session for it. -->
+          <div id="livecut-host" class="hidden space-y-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="text-sm text-zinc-400">Share this code with other MutiRec admins:</div>
+              <div class="flex flex-shrink-0 gap-2">
+                <button type="button" id="livecut-host-import" class="btn">Send to Set Cutter</button>
+                <button type="button" id="livecut-host-close" class="btn danger">Close session</button>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <input id="livecut-host-code" class="input flex-1" readonly>
+              <button type="button" id="livecut-host-copy" class="btn">Copy</button>
+            </div>
+            <button type="button" id="livecut-host-mark" class="btn primary w-full py-3 text-lg">Mark Transition</button>
+            <div id="livecut-host-feed" class="max-h-52 space-y-1 overflow-auto text-sm"></div>
+          </div>
+
+          <div class="mt-4 space-y-2 border-t border-white/10 pt-3">
+            <div class="text-sm font-medium text-zinc-300">Join someone else's session</div>
+            <div class="flex gap-2">
+              <input id="livecut-join-code" class="input flex-1" placeholder="Paste a Live Cut Session code">
+              <button type="button" id="livecut-join-btn" class="btn">Join</button>
+            </div>
+            <div id="livecut-joined-list" class="space-y-3"></div>
+          </div>
+        </div>
       </section>
 
       <section id="events-tab" class="view hidden space-y-4">

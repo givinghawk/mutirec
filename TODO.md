@@ -866,6 +866,85 @@
     thrown") rather than trusting unit tests alone, since this is a
     rendering bug class Go's test suite has no way to catch.
 
+## Done (this session, part 10)
+- **Live Cut Sessions - crowdsourced live transition marking** (new
+  `cmd/web/livecut.go`). Lets multiple MutiRec installs collaboratively flag
+  candidate transition points *while a source is still recording live*,
+  instead of one person re-listening to the whole thing alone afterward in
+  the Set Cutter.
+  - **Architecture reuses the existing P2P sharing shape almost exactly**
+    (`sharing.go`): a "host" instance ties a session to one of its own live
+    sources and exposes two public, token-authed endpoints -
+    `POST /api/livecut/host/mark` and `GET /api/livecut/host/feed` - the
+    same trust model as `/api/share/ping`/`/api/share/get/` (an unguessable
+    token is the only credential; no session/account needed by the caller).
+    A "guest" instance joins with a short code of the *exact same*
+    `{u: publicURL, t: token}` shape as a P2P share code -
+    `encodeShareCode`/`decodeShareCode` are reused as-is, no new encoding
+    invented.
+  - **One clock, not many**: the host stamps every mark's wall-clock
+    timestamp itself (`LiveCutSession.addEvent`), regardless of which
+    instance it came from, so cross-instance clock skew never enters the
+    picture. Each mark is tagged with the submitting instance's `InstanceID`
+    (new field on `AppConfig`, generated once via `shortToken()` and
+    persisted like everything else in `config.json`), its `UI.AppName`, and
+    the acting user's username.
+  - **Any authenticated role can mark, not just admins** - crowdsourcing the
+    button press across everyone watching is the point. `rbacAllowed`
+    (`auth.go`) special-cases any path ending in `/mark` under
+    `/api/livecut/sessions/` or `/api/livecut/joined/`; starting/closing/
+    joining/importing a session stays admin-only (checked in-handler, same
+    as the rest of this app's mutating admin-gated actions).
+  - **Guest side is a thin read/write-through proxy, not a mirror**: guest
+    endpoints (`/api/livecut/joined/{token}/mark`, `.../feed`) just forward
+    to whatever instance is actually hosting the session and relay the
+    response - no local caching or background job, since polling is already
+    cheap and this avoids a second place marks could get out of sync (one
+    fewer moving part than a `ShareJob`-style background job).
+  - **Import into the Set Cutter**: `handleLiveCutImport` converts a
+    session's collected wall-clock marks into `CutterMarker` offsets
+    (`(markTs - recording.startedAt) / 1000`) and merges them into that
+    recording's existing marker sidecar via the same
+    `sidecarMarkersPath`/`writeSidecarJSON` helpers `handleCutterMarkers`
+    already uses - so a crowdsourced session just pre-populates the normal
+    Set Cutter review flow rather than being a separate export path.
+  - Sessions are deliberately in-memory only (`App.liveCutSessions`/
+    `liveCutJoined`, both `map[string]*...` guarded by their own mutex, same
+    shape as `shareJobs`) - never persisted to `config.json`, cleared on
+    restart, consistent with the existing sessions/backoff/share-nonce
+    precedent.
+  - **Frontend** (`index.html`/`app.js`): new "Live Cut Session" panel in
+    the Watch tab, next to the source you're currently watching - matches
+    the chosen entry point since this is inherently about a source that's
+    actively recording. Shows host controls (code, "Mark Transition", live
+    feed, close, "Send to Set Cutter") when hosting a session for the
+    selected source, and an always-available "Join someone else's session"
+    box independent of the selected source (a guest instance may have no
+    matching local source at all). Feed updates via a plain ~1.5s
+    `setInterval` poll (same convention as this app's existing 5s dashboard
+    refresh and `ShareJob` progress polling) - no WebSocket/long-polling
+    added, since marks are already wall-clock-stamped so sub-second delivery
+    isn't needed.
+  - Tests in `cmd/web/livecut_test.go`: event sequencing/`since`-cursor
+    correctness, unknown/closed-token rejection on the public endpoints, the
+    rbac exception actually letting a viewer role mark, the offset-conversion
+    math plus the sidecar file it writes, and a full join→mark→feed round
+    trip against a real `httptest.Server` standing in for "the host" (two
+    independent `*App` instances talking over a real HTTP socket, not just
+    in-process function calls).
+  - Verified against two real, separately-running `mutirec` processes on
+    different ports (admin setup/login, config with a public URL, the
+    `POST /api/livecut/sessions` safeguard correctly returning 412 for a
+    source that isn't actively recording) and a real browser session driving
+    the new Watch tab panel (Start button correctly disabled until the
+    source is recording, an invalid join code surfacing a clear error) -
+    this sandbox has no `ffmpeg`, so a genuine live recording (and therefore
+    the full cross-instance mark/feed flow between two real OS processes)
+    couldn't be exercised end-to-end here; the `httptest`-backed Go test
+    above is the strongest available substitute; anyone bringing up two real
+    installs on their own machines gets full ffmpeg-backed verification for
+    free the first time they use it.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

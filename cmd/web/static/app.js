@@ -1096,6 +1096,9 @@ let watchSourceId = null;
 function initWatch() {
   populateWatchSourceDropdown();
   if (watchSourceId) watchSelectSource(watchSourceId);
+  else renderLivecutPanel();
+  livecutRefreshJoined();
+  startLivecutPoll();
 }
 
 function populateWatchSourceDropdown() {
@@ -1141,10 +1144,12 @@ function watchSelectSource(id) {
     $('watch-empty').classList.remove('hidden');
     $('watch-stats').classList.add('hidden');
     renderDashboard();
+    renderLivecutPanel();
     return;
   }
   const src = (state.sources || []).find(s => s.id === id);
   if (!src) return;
+  livecutRefreshHostSessions();
 
   const player = ensureWatchPlayer();
   $('watch-empty').classList.add('hidden');
@@ -1303,6 +1308,183 @@ function setupWatchPlayerControls(player) {
   $('watch-visualizer-next').addEventListener('click', () => nextVisualizerPreset('watch-visualizer', true));
 }
 
+// --- Live Cut Sessions: crowdsourced live transition marking ---
+//
+// A session hosted by this instance is tied to the currently-selected Watch
+// tab source (recomputed each poll tick from the full session list, so
+// switching sources just changes what livecutHostSession resolves to -
+// there's no separate "select a session" step for the host). Joined
+// sessions (hosted elsewhere) are independent of the selected source, since
+// a guest instance may have no matching local source at all - just a plain
+// list with its own mark button and feed per session.
+
+let livecutHostSession = null; // this instance's own session for the selected source, if any
+let livecutJoined = [];        // sessions hosted elsewhere that this instance has joined
+let livecutFeeds = {};         // token -> { events: [...], since: <seq>, closed: bool }
+let livecutPollTimer = null;
+
+function livecutFeedState(token) {
+  if (!livecutFeeds[token]) livecutFeeds[token] = { events: [], since: 0, closed: false };
+  return livecutFeeds[token];
+}
+
+async function livecutRefreshHostSessions() {
+  let sessions;
+  try { sessions = await api('/api/livecut/sessions'); } catch { return; }
+  livecutHostSession = sessions.find(s => s.sourceId === watchSourceId && !s.closed) || null;
+  renderLivecutPanel();
+}
+
+async function livecutRefreshJoined() {
+  try { livecutJoined = await api('/api/livecut/joined'); } catch { return; }
+  renderLivecutJoinedList();
+}
+
+async function livecutPollFeed(kind, token) {
+  const st = livecutFeedState(token);
+  if (st.closed) return;
+  const base = kind === 'host' ? `/api/livecut/sessions/${encodeURIComponent(token)}/feed` : `/api/livecut/joined/${encodeURIComponent(token)}/feed`;
+  let result;
+  try { result = await api(`${base}?since=${st.since}`); } catch { return; }
+  if (result.events && result.events.length) {
+    st.events = st.events.concat(result.events);
+    st.since = result.events[result.events.length - 1].seq;
+  }
+  st.closed = !!result.closed;
+  renderLivecutFeed(kind, token);
+}
+
+function livecutPollTick() {
+  livecutRefreshHostSessions();
+  if (livecutHostSession) livecutPollFeed('host', livecutHostSession.token);
+  livecutJoined.forEach(j => livecutPollFeed('joined', j.token));
+}
+
+function startLivecutPoll() {
+  stopLivecutPoll();
+  livecutPollTimer = setInterval(livecutPollTick, 1500);
+  livecutPollTick();
+}
+function stopLivecutPoll() {
+  if (livecutPollTimer) { clearInterval(livecutPollTimer); livecutPollTimer = null; }
+}
+
+function livecutFeedItemHtml(ev) {
+  const who = ev.instanceName || ev.instanceId;
+  const label = ev.username ? `${escapeHtml(who)} <span class="text-zinc-500">(${escapeHtml(ev.username)})</span>` : escapeHtml(who);
+  return `<div class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+    <span>${label}</span><span class="text-xs text-zinc-500">${new Date(ev.ts).toLocaleTimeString()}</span>
+  </div>`;
+}
+
+function livecutFeedHtml(token) {
+  const st = livecutFeedState(token);
+  return st.events.slice(-30).reverse().map(livecutFeedItemHtml).join('') || '<div class="text-xs text-zinc-500">No marks yet.</div>';
+}
+
+function renderLivecutFeed(kind, token) {
+  if (kind === 'host') {
+    $('livecut-host-feed').innerHTML = livecutFeedHtml(token);
+    return;
+  }
+  const el = document.querySelector(`.livecut-joined-feed[data-token="${token}"]`);
+  if (el) el.innerHTML = livecutFeedHtml(token);
+}
+
+function renderLivecutJoinedList() {
+  const box = $('livecut-joined-list');
+  if (!livecutJoined.length) { box.innerHTML = ''; return; }
+  box.innerHTML = livecutJoined.map(j => `
+    <div class="space-y-2 rounded border border-white/10 p-2">
+      <div class="flex items-center justify-between gap-2">
+        <div class="min-w-0 truncate font-medium">${escapeHtml(j.name || '(unnamed session)')}</div>
+        <button type="button" class="btn livecut-leave" data-token="${escapeAttr(j.token)}">Leave</button>
+      </div>
+      <button type="button" class="btn primary w-full livecut-joined-mark" data-token="${escapeAttr(j.token)}">Mark Transition</button>
+      <div class="livecut-joined-feed max-h-40 space-y-1 overflow-auto text-sm" data-token="${escapeAttr(j.token)}"></div>
+    </div>`).join('');
+  box.querySelectorAll('.livecut-leave').forEach(btn => btn.addEventListener('click', () => livecutLeave(btn.dataset.token)));
+  box.querySelectorAll('.livecut-joined-mark').forEach(btn => btn.addEventListener('click', () => livecutMark('joined', btn.dataset.token)));
+  livecutJoined.forEach(j => renderLivecutFeed('joined', j.token));
+}
+
+function renderLivecutPanel() {
+  const src = (state.sources || []).find(s => s.id === watchSourceId);
+  $('livecut-pick-source').classList.toggle('hidden', !!watchSourceId);
+  $('livecut-start').classList.add('hidden');
+  $('livecut-host').classList.add('hidden');
+  if (watchSourceId && src) {
+    if (livecutHostSession) {
+      $('livecut-host').classList.remove('hidden');
+      $('livecut-host-code').value = livecutHostSession.code;
+      renderLivecutFeed('host', livecutHostSession.token);
+    } else {
+      $('livecut-start').classList.remove('hidden');
+      const canStart = src.status === 'recording';
+      $('livecut-start-btn').disabled = !canStart;
+      $('livecut-start-btn').title = canStart ? '' : 'This source needs to be actively recording to start a session';
+    }
+  }
+}
+
+async function livecutStart() {
+  if (!watchSourceId) return;
+  let result;
+  try {
+    result = await api('/api/livecut/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sourceId: watchSourceId }) });
+  } catch { return; }
+  toast('Live Cut Session started', 'info');
+  livecutHostSession = result;
+  renderLivecutPanel();
+}
+
+async function livecutCloseHost() {
+  if (!livecutHostSession) return;
+  if (!confirm('Close this Live Cut Session? Anyone still connected will stop being able to mark.')) return;
+  try { await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}`, { method: 'DELETE' }); } catch { return; }
+  livecutHostSession = null;
+  renderLivecutPanel();
+}
+
+async function livecutImportHost() {
+  if (!livecutHostSession) return;
+  let result;
+  try { result = await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}/import`, { method: 'POST' }); } catch { return; }
+  toast(`Added ${result.added} marker(s) to ${result.path}`, 'info');
+}
+
+async function livecutMark(kind, token) {
+  const path = kind === 'host' ? `/api/livecut/sessions/${encodeURIComponent(token)}/mark` : `/api/livecut/joined/${encodeURIComponent(token)}/mark`;
+  try { await api(path, { method: 'POST' }); } catch { return; }
+  livecutPollFeed(kind, token);
+}
+
+async function livecutJoin() {
+  const code = $('livecut-join-code').value.trim();
+  if (!code) { toast('Paste a code first', 'error'); return; }
+  let result;
+  try {
+    result = await api('/api/livecut/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  } catch { return; }
+  if (!result.ok) { toast(result.error || 'Could not join that session', 'error'); return; }
+  $('livecut-join-code').value = '';
+  toast(`Joined "${result.session.name}"`, 'info');
+  await livecutRefreshJoined();
+}
+
+async function livecutLeave(token) {
+  try { await api(`/api/livecut/joined/${encodeURIComponent(token)}`, { method: 'DELETE' }); } catch { return; }
+  delete livecutFeeds[token];
+  await livecutRefreshJoined();
+}
+
+$('livecut-start-btn').onclick = livecutStart;
+$('livecut-host-close').onclick = livecutCloseHost;
+$('livecut-host-import').onclick = livecutImportHost;
+$('livecut-host-mark').onclick = () => livecutHostSession && livecutMark('host', livecutHostSession.token);
+$('livecut-host-copy').onclick = () => copyShareCode($('livecut-host-code').value);
+$('livecut-join-btn').onclick = livecutJoin;
+
 function switchToView(viewId) {
   document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
   document.querySelectorAll('.view').forEach(x => x.classList.add('hidden'));
@@ -1320,6 +1502,7 @@ function goToView(viewId) {
 }
 
 document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
+  if (b.dataset.view !== 'watch') stopLivecutPoll();
   switchToView(b.dataset.view);
   // Each tab must pull fresh data on every open instead of showing stale state.
   $('source-editor').dataset.loaded = '';

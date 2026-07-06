@@ -332,7 +332,7 @@ func isPublicPath(p string) bool {
 	switch p {
 	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js",
 		"/api/auth/discord/status", "/api/auth/discord/login/start", "/api/auth/discord/callback",
-		"/api/share/ping":
+		"/api/share/ping", "/api/livecut/host/mark", "/api/livecut/host/feed":
 		return true
 	}
 	// Icons are pure branding assets (no user data) and need to load
@@ -367,7 +367,19 @@ func rbacAllowed(method, path string, role Role) bool {
 	case "/api/account", "/api/logout", "/api/auth/discord/unlink":
 		return true
 	}
-	return strings.HasPrefix(path, "/api/auth/discord/link/")
+	if strings.HasPrefix(path, "/api/auth/discord/link/") {
+		return true
+	}
+	// Pressing "Mark Transition" in a Live Cut Session is deliberately open to
+	// any authenticated role, not just admins - crowdsourcing the button
+	// press across everyone watching is the whole point of the feature.
+	// Starting/closing/joining/importing a session stays admin-only (each
+	// handler checks that itself).
+	if strings.HasSuffix(path, "/mark") &&
+		(strings.HasPrefix(path, "/api/livecut/sessions/") || strings.HasPrefix(path, "/api/livecut/joined/")) {
+		return true
+	}
+	return false
 }
 
 // userContextKey is the request-context key requireAuth stashes the

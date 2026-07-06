@@ -53,6 +53,11 @@ type AppConfig struct {
 	Festivals       []Festival               `json:"festivals"`
 	Organisations   []Organisation           `json:"organisations"`
 	Shares          []Share                  `json:"shares,omitempty"`
+	// InstanceID identifies this install to *other* installs it collaborates
+	// with (currently: Live Cut Sessions) - generated once on first load and
+	// persisted, never user-editable. Distinct from any Share/session token,
+	// which are per-share/per-session rather than per-install.
+	InstanceID string `json:"instanceId,omitempty"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
@@ -407,6 +412,12 @@ type App struct {
 	fetchJobsMu sync.Mutex
 	fetchJobs   map[string]*URLFetchJob
 
+	liveCutMu       sync.Mutex
+	liveCutSessions map[string]*LiveCutSession // token -> session this instance is hosting
+
+	liveCutJoinedMu sync.Mutex
+	liveCutJoined   map[string]*joinedLiveCut // token -> a session hosted elsewhere, joined by this instance
+
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
@@ -479,22 +490,24 @@ func NewApp(configPath string) (*App, error) {
 		return nil, err
 	}
 	app := &App{
-		cfg:           cfg,
-		config:        configPath,
-		startedAt:     time.Now(),
-		active:        map[string]*recording{},
-		lastFinished:  map[string]string{},
-		remindersSent: map[string]time.Time{},
-		retry:         map[string]*retryState{},
-		sessions:      map[string]sessionInfo{},
-		oauthState:    map[string]pendingOAuth{},
-		shareNonces:   map[string]time.Time{},
-		shareJobs:     map[string]*ShareJob{},
-		fetchJobs:     map[string]*URLFetchJob{},
-		cutterJobs:    map[string]*CutterJob{},
-		transcodeJobs: map[string]*TranscodeJob{},
-		detectJobs:    map[string]*DetectJob{},
-		sourcePresets: loadSourcePresets(),
+		cfg:             cfg,
+		config:          configPath,
+		startedAt:       time.Now(),
+		active:          map[string]*recording{},
+		lastFinished:    map[string]string{},
+		remindersSent:   map[string]time.Time{},
+		retry:           map[string]*retryState{},
+		sessions:        map[string]sessionInfo{},
+		oauthState:      map[string]pendingOAuth{},
+		shareNonces:     map[string]time.Time{},
+		shareJobs:       map[string]*ShareJob{},
+		fetchJobs:       map[string]*URLFetchJob{},
+		liveCutSessions: map[string]*LiveCutSession{},
+		liveCutJoined:   map[string]*joinedLiveCut{},
+		cutterJobs:      map[string]*CutterJob{},
+		transcodeJobs:   map[string]*TranscodeJob{},
+		detectJobs:      map[string]*DetectJob{},
+		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -599,6 +612,17 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/share/get/", a.handleShareGet)
 	mux.HandleFunc("/api/shares", a.handleShares)
 	mux.HandleFunc("/api/shares/", a.handleShareItem)
+	// Live Cut Sessions (crowdsourced live transition marking). The two
+	// /host/ endpoints are public/token-authed like /api/share/ping and
+	// /api/share/get/ above - see isPublicPath - since a remote instance's
+	// backend, not a logged-in user of this one, calls them directly.
+	mux.HandleFunc("/api/livecut/host/mark", a.handleLiveCutHostMark)
+	mux.HandleFunc("/api/livecut/host/feed", a.handleLiveCutHostFeed)
+	mux.HandleFunc("/api/livecut/sessions", a.handleLiveCutSessions)
+	mux.HandleFunc("/api/livecut/sessions/", a.handleLiveCutSessionItem)
+	mux.HandleFunc("/api/livecut/join", a.handleLiveCutJoin)
+	mux.HandleFunc("/api/livecut/joined", a.handleLiveCutJoinedList)
+	mux.HandleFunc("/api/livecut/joined/", a.handleLiveCutJoinedItem)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
@@ -3769,6 +3793,9 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Organisations == nil {
 		cfg.Organisations = []Organisation{}
+	}
+	if cfg.InstanceID == "" {
+		cfg.InstanceID = shortToken()
 	}
 	assignScheduleIDs(cfg.Timetable)
 	for i := range cfg.LibraryEvents {
