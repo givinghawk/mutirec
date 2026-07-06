@@ -990,6 +990,7 @@ async function loadShareConfig() {
   let cfg;
   try { cfg = await api('/api/share/config'); } catch { return; }
   $('share-public-url').value = cfg.publicUrl || '';
+  $('share-proxy-url').value = cfg.proxyUrl || '';
   const pill = $('share-status-pill');
   if (cfg.enabled) {
     pill.textContent = cfg.public ? 'on' : 'on (LAN?)';
@@ -1000,7 +1001,9 @@ async function loadShareConfig() {
     pill.className = 'pill status-idle';
     $('share-disable').classList.add('hidden');
   }
-  if (cfg.enabled && !cfg.public) {
+  if (cfg.enabled && cfg.forced) {
+    $('share-verify-status').textContent = 'Enabled WITHOUT verification (forced) - double-check this URL is actually reachable from outside.';
+  } else if (cfg.enabled && !cfg.public) {
     $('share-verify-status').textContent = 'Verified, but the URL looks like a LAN/loopback address — other instances on the internet may not reach it.';
   } else if (cfg.verifiedAt) {
     $('share-verify-status').textContent = `Verified ${new Date(cfg.verifiedAt).toLocaleString()}.`;
@@ -1011,14 +1014,17 @@ async function loadShareConfig() {
 
 $('share-verify').onclick = async () => {
   const publicUrl = $('share-public-url').value.trim();
+  const proxyUrl = $('share-proxy-url').value.trim();
+  const force = $('share-force').checked;
   if (!publicUrl) { toast('Enter the public URL first', 'error'); return; }
-  $('share-verify-status').textContent = 'Checking reachability…';
+  $('share-verify-status').textContent = force ? 'Enabling without verification…' : 'Checking reachability…';
   let result;
   try {
-    result = await api('/api/share/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ publicUrl }) });
+    result = await api('/api/share/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ publicUrl, proxyUrl, force }) });
   } catch { $('share-verify-status').textContent = ''; return; }
   if (!result.ok) { $('share-verify-status').textContent = result.error || 'Verification failed.'; toast('Could not verify that URL', 'error'); return; }
-  toast(result.public ? 'Public URL verified — sharing enabled' : 'Verified, but the URL looks LAN-only', 'info');
+  if (result.forced) toast('Sharing enabled without verification', 'info');
+  else toast(result.public ? 'Public URL verified — sharing enabled' : 'Verified, but the URL looks LAN-only', 'info');
   await loadShareConfig();
 };
 
@@ -1026,6 +1032,16 @@ $('share-disable').onclick = async () => {
   try { await api('/api/share/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); } catch { return; }
   toast('Sharing disabled', 'info');
   await loadShareConfig();
+};
+
+$('share-proxy-save').onclick = async () => {
+  const proxyUrl = $('share-proxy-url').value.trim();
+  $('share-proxy-status').textContent = 'Saving…';
+  try {
+    await api('/api/share/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: $('share-status-pill').classList.contains('status-recording'), proxyUrl }) });
+  } catch { $('share-proxy-status').textContent = ''; return; }
+  $('share-proxy-status').textContent = proxyUrl ? 'Proxy saved.' : 'Proxy cleared - downloading/sharing directly again.';
+  toast('Proxy settings saved', 'info');
 };
 
 async function start(id) { try { await api(`/api/record/${id}`, { method: 'POST' }); } catch { return; } await refresh(); }

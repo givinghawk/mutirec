@@ -371,6 +371,14 @@ actually routes to this instance (catching typos and misconfigured proxies);
 it also warns if the URL looks like a LAN/loopback address that outside
 instances won't reach. Sharing stays disabled until a URL verifies.
 
+If the check fails but you've already confirmed the URL works from outside,
+tick **Skip verification (enable anyway)** before clicking Verify & enable.
+This matters because the check only proves *this instance* can reach its own
+URL — on some network setups (e.g. a VPN-gated firewall) that succeeds even
+though real outside clients hit a different path and can't connect at all, so
+the check can't actually catch that class of problem. Sharing enabled this
+way is flagged as unverified in the event log and in the Settings panel.
+
 ### Sending
 
 In **Recordings → Share Sets**, tick the recordings you want (individually, or
@@ -397,6 +405,17 @@ download. Files you already have are skipped rather than overwritten.
 
 Sharing setup, share creation, and importing are all admin-only; share tokens
 are never exposed to viewer accounts.
+
+### Outbound proxy
+
+If this instance's network can only reach other MutiRec instances through a
+proxy (a SOCKS tunnel, a corporate/VPN-only egress path, etc.), set
+**Settings → Peer Sharing → Outbound proxy** to an `http://`, `https://`,
+`socks5://`, `socks4://`, or `socks4a://` URL (`user:pass@` credentials are
+supported for `http(s)`/`socks5`). It's used for every outbound sharing
+request this instance makes: the self-verification ping, previewing a
+share code, and downloading files during an import. It can be saved on its
+own with **Save proxy**, independently of enabling/disabling sharing.
 
 ## Hardware Transcoding
 

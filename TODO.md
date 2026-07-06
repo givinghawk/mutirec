@@ -367,6 +367,46 @@
   covers it. Covered by new tests in `uploads_test.go` (`readImageUpload` accepting a real PNG,
   rejecting non-image content/empty uploads/a missing form field).
 
+## Done (this session, part 3)
+- **Peer Sharing: manual override for the self-verification check + outbound
+  proxy support** (`sharing.go`, new `proxy.go`): a real user's setup had the
+  sender's self-check pass (it can reach its own public URL just fine, e.g.
+  routed internally by a VPN-gated firewall) while actual outside clients
+  hitting the same URL over the public internet couldn't connect at all -
+  the reachability check has no way to distinguish "I can reach myself" from
+  "the internet can reach me," so an override was needed for cases where the
+  admin has already confirmed reachability some other way. `handleShareVerify`
+  now accepts `force: true` to skip the nonce round-trip entirely and just
+  save+enable (still validates the URL is well-formed); `SharingConfig`
+  gained a `Forced` flag so this state is visible in Settings and logged as a
+  `warn`-level event rather than silently indistinguishable from a real
+  verification. UI: a "Skip verification (enable anyway)" checkbox next to
+  Verify & enable.
+  - **Outbound proxy**: new `SharingConfig.ProxyURL`, applied to every
+    sharing-related outbound request (`shareHTTPClient`, used by the
+    self-verify ping, `fetchShareManifest`'s preview/import fetch, and
+    `runShareImportJob`'s downloads) via a new `proxy.go`. Supports
+    `http`/`https` (standard `net/http` proxying via `http.ProxyURL`),
+    `socks5`/`socks5h` (via `golang.org/x/net/proxy` - the only new external
+    dependency added), and `socks4`/`socks4a` (hand-rolled - `x/net/proxy`
+    doesn't implement SOCKS4 at all, so `proxy.go` implements the CONNECT
+    handshake directly per the SOCKS4/4a spec). The proxy can be saved
+    independently of enabling/disabling sharing (`handleShareConfig`'s POST
+    now takes an optional `proxyUrl` alongside `enabled`, using a `*string`
+    so an omitted field doesn't clobber a previously-saved proxy - the
+    frontend's Disable button only ever sends `{enabled:false}`). Proxy URLs
+    can carry embedded credentials (`user:pass@host`), so `ProxyURL` is
+    blanked by `redactSecrets` before a non-admin ever sees `/api/state` or
+    `/api/config`, same as SMTP/Discord/rclone secrets.
+  - Covered by `proxy_test.go` (transport construction for every scheme,
+    malformed/unsupported-scheme rejection, a fake SOCKS4 TCP listener
+    exercising both IP-mode and SOCKS4a hostname-mode wire format, and a
+    rejection-response case) and new cases in `sharing_test.go`
+    (`handleShareVerify`'s force path skips the network check entirely while
+    the normal path still fails against an unreachable address, a bad proxy
+    URL is rejected even with force, and `handleShareConfig`'s proxy-only
+    update doesn't clobber the enabled flag or vice versa).
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab
