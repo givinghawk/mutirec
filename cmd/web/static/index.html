@@ -67,6 +67,7 @@
           <div class="panel">
             <div class="panel-head"><h2>Storage</h2></div>
             <div id="storage" class="space-y-2 text-sm text-zinc-300"></div>
+            <p id="storage-forecast" class="mt-2 text-xs text-zinc-500"></p>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Recording status</h2></div>
@@ -935,8 +936,8 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>Temporary directory<input id="tempDir" class="input"></label>
             <label>Log directory<input id="logDir" class="input"></label>
             <label>Check interval seconds<input id="checkIntervalSeconds" type="number" class="input"></label>
-            <label>Minimum free bytes<input id="minFreeBytes" type="number" class="input"></label>
-            <label>Warning free bytes<input id="warnFreeBytes" type="number" class="input"></label>
+            <label>Minimum free space (GB) <span class="text-xs text-zinc-500">recording pauses below this</span><input id="minFreeGb" type="number" step="0.1" min="0" class="input"></label>
+            <label>Warning free space (GB) <span class="text-xs text-zinc-500">shows a warning below this</span><input id="warnFreeGb" type="number" step="0.1" min="0" class="input"></label>
             <label>Live rewind window (seconds)<input id="liveRewindWindowSeconds" type="number" class="input"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">How far back viewers can scrub on a live, in-progress recording. Only applies to sources with "Live rewind" enabled below.</p>
             <label>File explorer root <span class="text-xs text-zinc-500">(optional)</span><input id="fileExplorerRoot" class="input" placeholder="defaults to the Finished directory above"></label>

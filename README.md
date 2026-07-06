@@ -170,6 +170,12 @@ Each source can be configured with:
 - Extra Streamlink and FFmpeg arguments.
 - Optional hardware acceleration.
 - Optional NFO note.
+- Optional HTTP headers (`http` sources only) - one `Key: Value` per line, for a stream that
+  needs an `Authorization` header, a signed cookie, or any other custom header to authenticate.
+  Applied consistently everywhere this app talks to the URL: the recording itself, the
+  liveness pre-check before each reconnect attempt, the "Test Stream" button, and the live
+  preview (which proxies the request through the server instead of redirecting the browser
+  to it, since a redirect can't carry a server-held header).
 
 Finished files are written to:
 

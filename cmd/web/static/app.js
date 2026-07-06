@@ -308,6 +308,7 @@ function renderDashboard() {
   const free = state.disk.volumeFree || 0;
   const total = state.disk.volumeTotal || 0;
   $('storage').innerHTML = `<div>Free: ${formatBytes(free)}</div><div>Total: ${formatBytes(total)}</div><div>Recorded: ${formatBytes(state.disk.total || 0)}</div>`;
+  $('storage-forecast').textContent = forecastText(state.storageForecast);
   $('events').innerHTML = [...events].reverse().slice(0, 80).map(e => `<div class="event-${e.level}"><span class="text-zinc-500">${new Date(e.time).toLocaleTimeString()}</span> ${escapeHtml(e.text)}</div>`).join('');
   renderFavoritesPanel();
   renderDashboardCharts(sources);
@@ -654,6 +655,9 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
           <label class="inline-flex items-center gap-2" title="Normalizes recorded volume to a consistent loudness (EBU R128). Forces audio to be re-encoded even if video is stream-copied."><input class="src-loudnorm" type="checkbox" ${s.loudnessNormalize ? 'checked' : ''}> Loudness normalize</label>
         </div>
+        <label class="mt-2 block" title="Only relevant for 'http' type sources whose stream needs an auth token/cookie/custom header - sent with both the recording (ffmpeg) and the live-preview proxy. One 'Key: Value' per line.">HTTP headers <span class="text-xs text-zinc-500">(token-gated HTTP streams only, one "Key: Value" per line)</span>
+          <textarea class="input src-httpheaders codebox h-20" placeholder="Authorization: Bearer your-token-here">${escapeHtml((s.httpHeaders || []).join('\n'))}</textarea>
+        </label>
         <div class="flex flex-wrap items-center gap-2 pt-2">
           <button type="button" class="btn primary" onclick="saveSourceCard(${i})">Save</button>
           <button type="button" class="btn" onclick="testSource(${i})">Test Stream</button>
@@ -704,7 +708,8 @@ function readSourceCard(el) {
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     timetableStage: el.querySelector('.src-ttstage').value,
-    festivalId: el.querySelector('.src-festival').value
+    festivalId: el.querySelector('.src-festival').value,
+    httpHeaders: el.querySelector('.src-httpheaders').value.split('\n').map(x => x.trim()).filter(Boolean)
   };
 }
 
@@ -784,7 +789,7 @@ async function testSource(i) {
     const result = await api('/api/sources/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: values.type, url: values.url, quality: values.quality })
+      body: JSON.stringify({ type: values.type, url: values.url, quality: values.quality, httpHeaders: values.httpHeaders })
     });
     label.textContent = result.ok ? `Resolved OK` : `Failed: ${result.error}`;
     label.className = `test-result text-sm ${result.ok ? 'text-emerald-300' : 'text-rose-300'}`;
@@ -818,9 +823,18 @@ async function deleteSource(i) {
   } catch { /* toast already shown */ }
 }
 
+// GB<->bytes for the free-space threshold settings - stored as bytes in the
+// config (unchanged, for backward compatibility with existing config.json
+// files), shown/edited as GB since nobody thinks in raw byte counts.
+const gbBytes = 1024 * 1024 * 1024;
+function bytesToGb(b) { return Math.round((b / gbBytes) * 100) / 100; }
+function gbToBytes(gb) { return Math.round(gb * gbBytes); }
+
 function fillSettings() {
   const s = config.settings, ui = config.ui;
-  ['finishedDir','tempDir','logDir','checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
+  ['finishedDir','tempDir','logDir','checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
+  $('minFreeGb').value = bytesToGb(s.minFreeBytes || 0);
+  $('warnFreeGb').value = bytesToGb(s.warnFreeBytes || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('fileExplorerRoot').value = s.fileExplorerRoot || '';
   $('uiAppName').value = ui.appName || '';
@@ -850,7 +864,9 @@ function fillSettings() {
 function readSettings() {
   const s = config.settings;
   ['finishedDir','tempDir','logDir'].forEach(k => s[k] = $(k).value);
-  ['checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
+  ['checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
+  s.minFreeBytes = gbToBytes(Number($('minFreeGb').value) || 0);
+  s.warnFreeBytes = gbToBytes(Number($('warnFreeGb').value) || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
   s.fileExplorerRoot = $('fileExplorerRoot').value.trim();
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
@@ -3103,6 +3119,19 @@ function setupPiP(button, getVideoEl) {
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
+
+// forecastText turns a StorageForecast into a one-line summary of how much
+// recording time is left at the current combined write rate - blank when
+// nothing is actively recording, since there's no rate to project from.
+function forecastText(forecast) {
+  if (!forecast || !forecast.applicable) return '';
+  const rate = `${formatBytes(forecast.bytesPerSecond)}/s across ${forecast.activeRecordings} active recording${forecast.activeRecordings === 1 ? '' : 's'}`;
+  const hours = forecast.hoursRemaining;
+  let remaining;
+  if (hours >= 48) remaining = `${(hours / 24).toFixed(1)} days`;
+  else remaining = `${hours.toFixed(1)} hours`;
+  return `~${rate} — about ${remaining} of storage left at this rate`;
+}
 function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }

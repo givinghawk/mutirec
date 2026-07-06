@@ -202,6 +202,7 @@ type Source struct {
 	TimetableStage    string   `json:"timetableStage,omitempty"`
 	FestivalID        string   `json:"festivalId,omitempty"`
 	LoudnessNormalize bool     `json:"loudnessNormalize,omitempty"`
+	HTTPHeaders       []string `json:"httpHeaders,omitempty"`
 }
 
 // SourcePreset is one bundled, ready-to-add pack of sources - a DJ/streamer,
@@ -245,16 +246,65 @@ type TimetableLink struct {
 }
 
 type State struct {
-	Version     string              `json:"version"`
-	StartedAt   time.Time           `json:"startedAt"`
-	Sources     []SourceStatus      `json:"sources"`
-	Events      []Event             `json:"events"`
-	Disk        disk.Usage          `json:"disk"`
-	Config      AppConfig           `json:"config"`
-	ActiveCount int                 `json:"activeCount"`
-	Warnings    []string            `json:"warnings"`
-	NowPlaying  map[string]*NowItem `json:"nowPlaying"`
-	Role        Role                `json:"role,omitempty"`
+	Version         string              `json:"version"`
+	StartedAt       time.Time           `json:"startedAt"`
+	Sources         []SourceStatus      `json:"sources"`
+	Events          []Event             `json:"events"`
+	Disk            disk.Usage          `json:"disk"`
+	Config          AppConfig           `json:"config"`
+	ActiveCount     int                 `json:"activeCount"`
+	Warnings        []string            `json:"warnings"`
+	NowPlaying      map[string]*NowItem `json:"nowPlaying"`
+	Role            Role                `json:"role,omitempty"`
+	StorageForecast StorageForecast     `json:"storageForecast"`
+}
+
+// StorageForecast projects how much recording time is left at the current
+// combined write rate of every active recording, so a large multi-stage
+// festival with several 4K streams going at once gets a meaningfully
+// different estimate than a single audio-only source. Not applicable (no
+// hours figure) when nothing is actively recording, since there's no
+// current rate to extrapolate from.
+type StorageForecast struct {
+	Applicable       bool    `json:"applicable"`
+	BytesPerSecond   float64 `json:"bytesPerSecond"`
+	ActiveRecordings int     `json:"activeRecordings"`
+	HoursRemaining   float64 `json:"hoursRemaining,omitempty"`
+}
+
+// minForecastSampleSeconds is how long a recording must have been running
+// before its size/elapsed-time ratio is trusted as a rate - a recording
+// that just started hasn't written enough yet for that ratio to mean much
+// (ffmpeg/streamlink startup overhead would dominate it).
+const minForecastSampleSeconds = 5.0
+
+// computeStorageForecast estimates the current aggregate write rate across
+// every active recording (each one's own size ÷ elapsed time, summed) and
+// projects how many hours of recording remain at that rate given the
+// volume's current free space.
+func computeStorageForecast(active map[string]*recording, freeBytes uint64) StorageForecast {
+	var totalBps float64
+	count := 0
+	now := time.Now()
+	for _, rec := range active {
+		elapsed := now.Sub(rec.startedAt).Seconds()
+		if elapsed < minForecastSampleSeconds {
+			continue
+		}
+		info, err := os.Stat(rec.tempPath)
+		if err != nil {
+			continue
+		}
+		totalBps += float64(info.Size()) / elapsed
+		count++
+	}
+	if count == 0 || totalBps <= 0 {
+		return StorageForecast{ActiveRecordings: count}
+	}
+	return StorageForecast{
+		Applicable: true, BytesPerSecond: totalBps, ActiveRecordings: count,
+		HoursRemaining: float64(freeBytes) / totalBps / 3600,
+	}
 }
 
 type SourceStatus struct {
@@ -627,6 +677,13 @@ func (a *App) isSourceLive(src Source, cfg AppConfig) bool {
 		req, err := http.NewRequestWithContext(ctx, http.MethodHead, src.URL, nil)
 		if err != nil {
 			return false
+		}
+		// A token-gated stream (Authorization header, a signed cookie, a
+		// custom auth header) needs the same headers the recording pipeline
+		// sends via ffmpeg's -headers, or this probe sees a 401/403 and
+		// wrongly reports the source as offline - see ffmpegArgs.
+		for _, p := range parseHTTPHeaderLines(src.HTTPHeaders) {
+			req.Header.Set(p[0], p[1])
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -1034,10 +1091,57 @@ const loudnormFilter = "loudnorm=I=-16:TP=-1.5:LRA=11"
 // bounded HLS output used for live-rewind DVR playback of the in-progress
 // recording. The HLS branch always transcodes to H.264/AAC since it must be
 // playable by hls.js/Safari regardless of what codec the archival copy uses.
+// parseHTTPHeaderLines turns a Source's HTTPHeaders (one "Key: Value" line
+// each, the same convention as a plain HTTP header block) into ordered
+// key/value pairs, silently skipping blank lines, "#" comments, and any
+// line without a colon rather than failing the whole source over one typo.
+func parseHTTPHeaderLines(lines []string) [][2]string {
+	var pairs [][2]string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		idx := strings.Index(line, ":")
+		if idx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:idx])
+		val := strings.TrimSpace(line[idx+1:])
+		if key == "" {
+			continue
+		}
+		pairs = append(pairs, [2]string{key, val})
+	}
+	return pairs
+}
+
+// ffmpegHeadersArg joins header pairs into the single CRLF-terminated
+// string ffmpeg's "-headers" input option expects.
+func ffmpegHeadersArg(pairs [][2]string) string {
+	var b strings.Builder
+	for _, p := range pairs {
+		b.WriteString(p[0])
+		b.WriteString(": ")
+		b.WriteString(p[1])
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
 func ffmpegArgs(src Source, input, output, hlsDir string, hlsWindowSeconds int) []string {
 	args := []string{"-hide_banner", "-y", "-nostdin"}
 	if src.HardwareAccel != "" && src.HardwareAccel != "none" {
 		args = append(args, "-hwaccel", src.HardwareAccel)
+	}
+	// -headers only means something when ffmpeg itself is opening a network
+	// URL (the "http" source type's direct -i src.URL) - it's meaningless
+	// (and harmless either way) for the streamlink pipe:0 case, so gate on
+	// the input actually looking like a URL rather than on src.Type.
+	if (strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://")) && len(src.HTTPHeaders) > 0 {
+		if headerArg := ffmpegHeadersArg(parseHTTPHeaderLines(src.HTTPHeaders)); headerArg != "" {
+			args = append(args, "-headers", headerArg)
+		}
 	}
 	args = append(args, src.FFmpegArgs...)
 	args = append(args, "-i", input)
@@ -1370,9 +1474,10 @@ func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Type    string `json:"type"`
-		URL     string `json:"url"`
-		Quality string `json:"quality"`
+		Type        string   `json:"type"`
+		URL         string   `json:"url"`
+		Quality     string   `json:"quality"`
+		HTTPHeaders []string `json:"httpHeaders"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1390,6 +1495,9 @@ func (a *App) handleSourceTest(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
+		}
+		for _, p := range parseHTTPHeaderLines(req.HTTPHeaders) {
+			httpReq.Header.Set(p[0], p[1])
 		}
 		resp, err := http.DefaultClient.Do(httpReq)
 		if err != nil {
@@ -3185,6 +3293,14 @@ func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
 	cfg := a.snapshotConfig()
 	for _, src := range cfg.Sources {
 		if src.ID == id {
+			// A token-gated "http" source (custom auth header, signed
+			// cookie) needs its request proxied through this server rather
+			// than redirected to - a redirect only hands the browser a URL,
+			// never the server-held header the URL needs to actually work.
+			if src.Type == "http" && len(src.HTTPHeaders) > 0 {
+				a.proxyLiveHTTP(w, r, src)
+				return
+			}
 			liveURL := src.URL
 			if src.Type != "http" {
 				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -3208,6 +3324,34 @@ func (a *App) handleLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+// proxyLiveHTTP streams a token-gated "http" source's live URL through this
+// server rather than redirecting the browser to it - the browser only ever
+// talks to this endpoint, and this endpoint (not the client) holds the
+// configured auth headers. Bound only by the client's own request context
+// (no extra timeout), since a live view is meant to keep streaming for as
+// long as the tab stays open.
+func (a *App) proxyLiveHTTP(w http.ResponseWriter, r *http.Request, src Source) {
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, src.URL, nil)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, p := range parseHTTPHeaderLines(src.HTTPHeaders) {
+		req.Header.Set(p[0], p[1])
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "could not reach the upstream stream", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // handleLiveHLS serves the rolling HLS playlist/segments for a source that is
@@ -3363,7 +3507,9 @@ func (a *App) state() State {
 	warnings := freeWarnings(cfg)
 	events := make([]Event, len(a.events))
 	copy(events, a.events)
-	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: events, Disk: disk.Scan(cfg.Settings.FinishedDir), Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now}
+	diskUsage := disk.Scan(cfg.Settings.FinishedDir)
+	forecast := computeStorageForecast(a.active, diskUsage.VolumeFree)
+	return State{Version: version, StartedAt: a.startedAt, Sources: statuses, Events: events, Disk: diskUsage, Config: cfg, ActiveCount: len(a.active), Warnings: warnings, NowPlaying: now, StorageForecast: forecast}
 }
 
 func freeWarnings(cfg AppConfig) []string {

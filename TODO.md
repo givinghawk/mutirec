@@ -747,6 +747,68 @@
 
   This completes all three planned Set Cutter phases from this session.
 
+## Done (this session, part 8)
+- **Free-space settings shown in GB, not raw bytes**
+  (`cmd/web/static/{index.html,app.js}`). Settings → Recorder's minimum/
+  warning free-space fields now take/display GB (`minFreeGb`/`warnFreeGb`
+  inputs, one decimal place); `config.settings.minFreeBytes`/`warnFreeBytes`
+  are unchanged on disk (still bytes, for backward compatibility with
+  existing `config.json` files) - `fillSettings`/`readSettings` convert at
+  the UI boundary via new `bytesToGb`/`gbToBytes` helpers.
+- **Storage forecasting on the Dashboard** (`main.go`: `StorageForecast`,
+  `computeStorageForecast`). Estimates the current combined write rate
+  across every active recording (each one's temp-file size ÷ its own
+  elapsed time, summed - a recording under `minForecastSampleSeconds` (5s)
+  old is excluded since its rate isn't meaningful yet) and projects how many
+  hours of recording remain at that rate given the volume's current free
+  space. Exposed as a new `storageForecast` field on `/api/state`, shown as
+  a one-line summary under the Storage panel ("~14.3 MB/s across 2 active
+  recordings — about 6.2 hours of storage left"); blank when nothing is
+  actively recording, since there's no rate to extrapolate from. Tests in
+  `cmd/web/storage_test.go` cover no-active-recordings, the just-started
+  exclusion, a single-recording projection, and summing across multiple
+  concurrent recordings.
+- **Token-gated HTTP stream support** (`main.go`: `Source.HTTPHeaders`,
+  `parseHTTPHeaderLines`, `ffmpegHeadersArg`, `proxyLiveHTTP`). A live HTTP
+  stream that needs an `Authorization` header, a signed cookie, or any other
+  custom header now has somewhere to configure that: a new "HTTP headers"
+  textarea in the Source editor (one `Key: Value` per line, only relevant
+  for `http`-type sources), stored as `Source.HTTPHeaders []string`. Applied
+  everywhere this app talks to that URL, since all three had to agree or a
+  token-gated source would work in some places and silently fail in others:
+  - **Recording**: `ffmpegArgs` adds ffmpeg's `-headers` option before `-i`
+    when the input is an actual URL (not the streamlink `pipe:0` case, where
+    it would be meaningless).
+  - **Liveness pre-check**: `isSourceLive`'s HTTP HEAD probe now sends the
+    same headers - without this, a token-gated source would get a 401/403
+    on every liveness check and never be allowed to start recording at all,
+    even though the recording pipeline itself would have worked fine.
+  - **"Test Stream" button**: `handleSourceTest` gained the same
+    `httpHeaders` field so the editor's test button reflects reality instead
+    of reporting a false failure.
+  - **Live preview**: `handleLive`'s `http`-type branch used to just
+    `http.Redirect` the browser straight to the source URL - which can't
+    carry a server-held auth header, so a token-gated source's live preview
+    would fail even though recording worked. When headers are configured it
+    now proxies the request through the server instead (`proxyLiveHTTP`,
+    bound only by the client's own request context so it can stream for as
+    long as the tab stays open); the plain redirect is kept as the
+    zero-overhead default when no headers are set.
+  - Tests in `cmd/web/httpheaders_test.go`: header-line parsing (including
+    comments/blank lines/values containing a colon), the ffmpeg `-headers`
+    string format, `-headers` placement relative to `-i` and its omission
+    for `pipe:0` input or when nothing is configured, `isSourceLive`
+    succeeding/failing based on whether the header was actually sent (real
+    `httptest` server), and `proxyLiveHTTP` forwarding both the header and
+    the response body/content-type.
+  - Verified end-to-end against a running instance with a real token-gated
+    fake upstream (a small Python HTTP server requiring
+    `Authorization: Bearer secret-token`): source creation persists
+    `httpHeaders`, the "Test Stream" endpoint succeeds with the header and
+    fails with a real 401 without it, and `GET /api/live/<id>` returns the
+    upstream's actual `200` + body instead of a redirect the browser could
+    never have authenticated through on its own.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab
