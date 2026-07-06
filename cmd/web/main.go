@@ -306,18 +306,20 @@ type Event struct {
 }
 
 type recording struct {
-	source     Source
-	ctx        context.Context
-	cancel     context.CancelFunc
-	startedAt  time.Time
-	tempPath   string
-	finalPath  string
-	logPath    string
-	logFile    *os.File
-	lastErr    string
-	done       chan struct{}
-	hlsDir     string
-	manualStop atomic.Bool
+	source       Source
+	ctx          context.Context
+	cancel       context.CancelFunc
+	startedAt    time.Time
+	timeOffsetMs int64
+	timeSource   string
+	tempPath     string
+	finalPath    string
+	logPath      string
+	logFile      *os.File
+	lastErr      string
+	done         chan struct{}
+	hlsDir       string
+	manualStop   atomic.Bool
 }
 
 type App struct {
@@ -499,6 +501,9 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
 	mux.HandleFunc("/api/recordings/thumbnail", a.handleRecordingThumbnail)
 	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
+	mux.HandleFunc("/api/recordings/timecode", a.handleRecordingTimecode)
+	mux.HandleFunc("/api/recordings/waveform", a.handleRecordingWaveform)
+	mux.HandleFunc("/api/recordings/backfill-timecodes", a.handleBackfillTimecodes)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).
@@ -632,6 +637,11 @@ func (a *App) start(src Source) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	started := time.Now()
+	// One-shot wall-clock correction against worldtimeapi.org, used to anchor
+	// this recording's timecode sidecar - see cutter.go. Best-effort: falls
+	// back to the system clock silently if unreachable, bounded to a few
+	// seconds so it never meaningfully delays a source starting.
+	timeOffsetMs, timeSrc := timeCorrection()
 	stageDir := filepath.Join(a.cfg.Settings.FinishedDir, safeName(src.Name))
 	tempDir := filepath.Join(a.cfg.Settings.TempDir, safeName(src.Name))
 	_ = os.MkdirAll(stageDir, 0o755)
@@ -664,7 +674,7 @@ func (a *App) start(src Source) {
 			a.event("warn", fmt.Sprintf("[%s] could not create live rewind buffer: %s", src.Name, err))
 		}
 	}
-	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{}), hlsDir: hlsDir}
+	rec := &recording{source: src, ctx: ctx, cancel: cancel, startedAt: started, timeOffsetMs: timeOffsetMs, timeSource: timeSrc, tempPath: tempPath, finalPath: finalPath, logPath: logPath, logFile: logFile, done: make(chan struct{}), hlsDir: hlsDir}
 	a.active[src.ID] = rec
 	a.mu.Unlock()
 
@@ -853,7 +863,9 @@ func (a *App) runRecording(rec *recording) {
 		if rel, relErr := filepath.Rel(a.snapshotConfig().Settings.FinishedDir, rec.finalPath); relErr == nil {
 			audioOnly := rec.source.AudioOnly
 			finalPath := rec.finalPath
-			go a.generateThumbnail(finalPath, filepath.ToSlash(rel), audioOnly)
+			relPath := filepath.ToSlash(rel)
+			go a.generateThumbnail(finalPath, relPath, audioOnly)
+			go a.finalizeRecordingSidecar(rec, finalPath, relPath, rec.timeOffsetMs, rec.timeSource)
 		}
 		if failed {
 			// Real content was captured before the error hit (e.g. a network
@@ -1396,7 +1408,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		if err != nil || d.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1502,7 +1514,7 @@ func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Req
 	}
 	out := []MatchFileEntry{}
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1567,7 +1579,7 @@ func (a *App) handleRecordingsMatchfileImport(w http.ResponseWriter, r *http.Req
 	}
 	var matched []pendingMatch
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1935,7 +1947,7 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 	root := filepath.Clean(cfg.Settings.FinishedDir)
 	var suggestions []MatchSuggestion
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || strings.HasSuffix(strings.ToLower(p), ".nfo") {
+		if err != nil || d.IsDir() || isSidecarPath(p) {
 			return nil
 		}
 		info, err := d.Info()

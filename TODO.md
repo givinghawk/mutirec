@@ -550,6 +550,57 @@
   httptest server, `TestIsSourceLiveStreamlinkTypeWhenLive`/`WhenOffline`
   against a stub `streamlink` script substituted onto `PATH`).
 
+## Done (this session, part 7)
+- **Set Cutter, phase 1 - sidecar timecode + rich metadata + waveform**
+  (`cmd/web/cutter.go`, new file). Every finished recording now gets a
+  `<recording>.timecode.json` sidecar (deliberately separate from the
+  human-readable `.nfo`) written right after the atomic rename in
+  `runRecording`, plus a cached waveform PNG under `thumbnails/` (same
+  content-addressed-by-relative-path convention as recording thumbnails, just
+  a different hash namespace so the two never collide) - generated for every
+  recording, audio-only or video, since the eventual Set Cutter cuts by audio
+  waveform either way.
+  - `RecordingSidecar` carries as much metadata as a single `ffprobe` pass
+    can produce - duration, size, bitrate, video/audio codec, resolution,
+    frame rate, channels, sample rate - plus the recording's wall-clock
+    anchor (`startedAt`, `offsetMs`, `timeSource`) and the source it came
+    from (id/name/type/url/quality/container/flags).
+  - Wall-clock accuracy: `timeCorrection()` does a one-shot, 3s-timeout
+    `GET https://worldtimeapi.org/api/ip` at `a.start(src)` and stores the
+    correction (`offsetMs`) against the system clock; any failure (offline,
+    blocked, rate-limited) falls back to the system clock silently with
+    `timeSource: "system-ntp"` - never blocks or fails the recording.
+  - `GET /api/recordings/timecode?path=` serves the sidecar (404 if none
+    yet); `POST` (admin only) writes/overwrites one - either from a supplied
+    RFC3339 `startedAt` (manual correction) or, if none is given, falls back
+    to `file mtime - probed duration` (`timeSource: "file-mtime-fallback"`)
+    for recordings that predate this feature or arrived outside the live
+    recording pipeline (File Explorer, URL fetch, P2P import).
+  - `GET /api/recordings/waveform?path=` serves the cached PNG, generating
+    it on first request if missing (same on-demand + cache pattern as
+    thumbnails).
+  - `POST /api/recordings/backfill-timecodes` (admin only) walks the whole
+    `FinishedDir` tree and writes a sidecar + waveform for anything missing
+    one - wired to a new "Backfill timecodes & waveforms" button in
+    Settings → Recorder, with a toast summarizing scanned/written/skipped/
+    failed counts.
+  - The recordings scanner's old `strings.HasSuffix(p, ".nfo")` exclusion
+    (four call sites) is now the shared `isSidecarPath()` helper, extended to
+    also skip `.timecode.json` and the upcoming `.markers.json` (Set Cutter
+    phase 2) so neither is ever mistaken for a recording in its own right.
+  - Tests in `cmd/web/cutter_test.go`: sidecar path derivation, frame-rate
+    parsing, `ffprobe` JSON → `RecordingSidecar` field mapping (video+audio
+    and audio-only cases), waveform/thumbnail key non-collision, path-escape
+    rejection, and the timecode GET/POST handlers end-to-end (including the
+    manual-backfill round-trip).
+  - **Still to come** (tracked as separate phases, not yet built): the Set
+    Cutter UI itself (marker placement on the waveform, timetable-seeded
+    markers, preview clip, `-c copy` export with a "precise cut" re-encode
+    option under Advanced, same UI for video sources played alongside the
+    audio waveform), assisted mode (silence detection + optional Whisper,
+    both scoped to ≤20-minute windows around timetable slot boundaries), and
+    a general mass-transcode tool for bulk re-encoding recordings.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

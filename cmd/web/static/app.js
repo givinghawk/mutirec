@@ -3218,6 +3218,24 @@ $('applyCustomTheme').onclick = async () => {
   toast('Custom theme applied', 'info');
 };
 
+if ($('backfill-timecodes-btn')) {
+  $('backfill-timecodes-btn').onclick = async () => {
+    const btn = $('backfill-timecodes-btn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = 'Scanning...';
+    try {
+      const result = await api('/api/recordings/backfill-timecodes', { method: 'POST' });
+      if (result) {
+        toast(`Backfilled ${result.written} of ${result.scanned} recordings (${result.skipped} already had one, ${result.failed} failed)`, 'info');
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
+  };
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   ['colorPrimary', 'colorSecondary', 'colorBg', 'colorAccent', 'colorText', 'colorTextMuted'].forEach(id => {
     const el = $(id);
