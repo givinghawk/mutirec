@@ -560,6 +560,16 @@
         </div>
 
         <div class="panel">
+          <div class="panel-head"><h2>Import from file</h2></div>
+          <p class="mb-3 text-sm text-zinc-400">Load a timetable JSON file — both the app's own export format and the compact community format are accepted. Ready-made timetables are attached to each <a href="https://github.com/givinghawk/mutirec/releases" target="_blank" rel="noopener">GitHub release</a>. Existing per-stage stream URLs are kept, matched by stage name.</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" id="tt-file-import" class="btn primary">Choose file…</button>
+            <input type="file" id="tt-file-input" accept="application/json,.json" class="hidden">
+            <span id="tt-file-status" class="text-sm text-zinc-400"></span>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="panel-head">
             <h2>Timetable</h2>
             <div class="flex items-center gap-2">

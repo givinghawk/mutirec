@@ -1,0 +1,43 @@
+name: release
+
+# On a version tag, publish a GitHub Release and attach the ready-to-import
+# community timetables so users can grab one and load it via
+# Timetable -> Import from file (they are not bundled into the app image).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package timetables
+        run: |
+          mkdir -p dist
+          cp timetables/*.json dist/
+          (cd timetables && zip -j ../dist/mutirec-timetables.zip *.json)
+          ls -la dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.json
+            dist/mutirec-timetables.zip
+          generate_release_notes: true
+          body: |
+            ## MutiRec ${{ github.ref_name }}
+
+            Container image: `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
+
+            ### Timetables
+            The attached timetable JSON files can be loaded from the app via
+            **Timetable → Import from file** (both the app's own export format and
+            the compact community format are accepted). They are distributed here
+            only — they are not bundled into the application or the container image.

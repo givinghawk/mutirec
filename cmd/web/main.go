@@ -466,6 +466,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
 	mux.HandleFunc("/api/timetable", a.handleTimetable)
+	mux.HandleFunc("/api/timetable/import", a.handleTimetableImport)
 	mux.HandleFunc("/api/timetable/favorites", a.handleTimetableFavorites)
 	mux.HandleFunc("/api/timetable/lol-events", a.handleTimetableLolEvents)
 	mux.HandleFunc("/api/timetable/lol-import", a.handleTimetableLolImport)
@@ -2458,6 +2459,79 @@ func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, tt)
 }
 
+// parseAnyTimetableJSON accepts either timetable shape this app can produce or
+// consume: the RFC3339 StageSchedule array the app itself emits, or the
+// compact [year,month,day,hour,minute,name?] per-stage tuple format (the
+// shape the downloadable community timetables ship in). It tries the RFC3339
+// shape first - a compact file, whose sets are arrays not objects, fails that
+// decode and falls through to the compact parser.
+func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
+	var direct []StageSchedule
+	if err := json.Unmarshal(data, &direct); err == nil {
+		total := 0
+		for _, s := range direct {
+			total += len(s.Sets)
+		}
+		if total > 0 {
+			return direct, nil
+		}
+	}
+	return parseStageTimetableJSON(data)
+}
+
+// handleTimetableImport replaces the whole timetable from an uploaded file,
+// accepting either supported JSON shape (see parseAnyTimetableJSON) so a
+// downloaded community timetable can be applied in one click instead of
+// hand-pasting it into the raw JSON editor.
+func (a *App) handleTimetableImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	tt, err := parseAnyTimetableJSON(body)
+	if err != nil {
+		http.Error(w, "could not parse that timetable file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(tt) == 0 {
+		http.Error(w, "no stages or sets found in that file", http.StatusBadRequest)
+		return
+	}
+	assignScheduleIDs(tt)
+	a.mu.Lock()
+	// Preserve any per-stage stream URLs already configured, matched by stage
+	// name, since community timetables usually don't carry playable URLs.
+	existingURL := map[string]string{}
+	for _, s := range a.cfg.Timetable {
+		if s.URL != "" {
+			existingURL[strings.ToLower(s.Stage)] = s.URL
+		}
+	}
+	for i := range tt {
+		if tt[i].URL == "" {
+			if u, ok := existingURL[strings.ToLower(tt[i].Stage)]; ok {
+				tt[i].URL = u
+			}
+		}
+	}
+	a.cfg.Timetable = tt
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	stageCount := len(tt)
+	setCount := 0
+	for _, s := range tt {
+		setCount += len(s.Sets)
+	}
+	a.event("info", fmt.Sprintf("Imported timetable from file: %d stage(s), %d set(s)", stageCount, setCount))
+	writeJSON(w, map[string]any{"timetable": tt, "stages": stageCount, "sets": setCount})
+}
+
 // handleTimetableFavorites replaces the list of favorited/starred set IDs
 // that reminders are sent for.
 func (a *App) handleTimetableFavorites(w http.ResponseWriter, r *http.Request) {
@@ -2756,10 +2830,23 @@ func parseFlexibleDate(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized date %q", s)
 }
 
-// combineDateTime combines a day's date with an "HH:MM" wall-clock time in
-// the event's timezone. Hours >= 24 (a common festival-timetable convention
-// for after-midnight sets) roll over into the next calendar day automatically
-// via time.Date's normalization.
+// festivalDayRolloverHour is the wall-clock hour before which a set listed
+// under a given festival "day" is treated as belonging to the *next*
+// calendar day. Festival timetables group a program that runs from the
+// afternoon/evening into the small hours of the following morning all under
+// one day label, so a set listed under "Thursday" at 01:00 is really Friday
+// 01:00. There's a wide, reliable gap between when an after-party ends (~6am)
+// and when the next day's program opens (late morning at the earliest), so
+// any time from midnight up to this hour is unambiguously "after midnight,
+// belongs to the next day". 8 is comfortably inside that gap.
+const festivalDayRolloverHour = 8
+
+// combineDateTime combines a festival day's date with an "HH:MM" wall-clock
+// time in the event's timezone, rolling early-morning times over to the next
+// calendar day per the festival-day convention (see festivalDayRolloverHour).
+// An "HH:MM" with hour >= 24 (another common after-midnight convention, e.g.
+// "25:00") is normalized by time.Date the same way. A value that's already a
+// full RFC3339 timestamp is absolute and used as-is with no rollover.
 func combineDateTime(base time.Time, hm string, loc *time.Location) (time.Time, bool) {
 	hm = strings.TrimSpace(hm)
 	if hm == "" {
@@ -2777,7 +2864,11 @@ func combineDateTime(base time.Time, hm string, loc *time.Location) (time.Time, 
 	if err1 != nil || err2 != nil {
 		return time.Time{}, false
 	}
-	return time.Date(base.Year(), base.Month(), base.Day(), h, m, 0, 0, loc), true
+	dayOffset := 0
+	if h < festivalDayRolloverHour {
+		dayOffset = 1
+	}
+	return time.Date(base.Year(), base.Month(), base.Day()+dayOffset, h, m, 0, 0, loc), true
 }
 
 func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
@@ -3308,6 +3399,11 @@ func parseStageTimetableJSON(data []byte) ([]StageSchedule, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
+	// Compact timetables carry explicit calendar days per row, but still use
+	// the after-midnight hour convention (e.g. an hour of 25, or a 1am set
+	// authored on the previous day's row); time.Date normalizes both into a
+	// valid instant rather than emitting an out-of-range "T25:00:00" string.
+	cest := time.FixedZone("CEST", 2*60*60)
 	var out []StageSchedule
 	for _, stage := range raw {
 		var sets []ScheduleSet
@@ -3316,7 +3412,7 @@ func parseStageTimetableJSON(data []byte) ([]StageSchedule, error) {
 			if len(row) < 5 {
 				continue
 			}
-			start := fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:00+02:00", toInt(row[0]), toInt(row[1]), toInt(row[2]), toInt(row[3]), toInt(row[4]))
+			start := time.Date(toInt(row[0]), time.Month(toInt(row[1])), toInt(row[2]), toInt(row[3]), toInt(row[4]), 0, 0, cest).Format(time.RFC3339)
 			name := ""
 			if len(row) > 5 {
 				var parts []string

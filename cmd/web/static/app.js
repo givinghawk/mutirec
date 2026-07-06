@@ -190,9 +190,19 @@ function sourceCardHtml(src) {
         ${src.orphaned ? '' : `<button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>`}
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
         ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
-        ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
+        ${src.mediaPath ? `<button class="btn" onclick="openSourceLatest('${src.id}')">Open latest</button>` : ''}
       </div>
     </article>`;
+}
+
+// openSourceLatest plays a source's most recent finished file through the
+// same in-app Video.js recordings player as everything else, rather than
+// dumping the raw file into a new browser tab (which used the browser's
+// native player and left the app). Looks the path up from live state at
+// click time so no file path has to be escaped into the markup.
+function openSourceLatest(id) {
+  const src = (state.sources || []).find(s => s.id === id);
+  if (src && src.mediaPath) openRecordingPlayer(src.mediaPath, src.name);
 }
 
 function toggleSourceGroup(id) {
@@ -208,7 +218,7 @@ function renderDashboard() {
   $('warnings').innerHTML = warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
 
   if (!sources.length) {
-    $('source-grid').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one from the Sources tab.</p>';
+    $('source-grid').innerHTML = '<div class="empty-state md:col-span-2"><div class="empty-icon">📡</div><div>No sources yet</div><button class="btn primary" onclick="goToView(\'sources\')">Add your first source</button></div>';
   } else {
     const festivals = config.festivals || [];
     const groups = new Map(); // festivalId ("" = ungrouped) -> { name, color, sources }
@@ -1168,6 +1178,13 @@ function switchToView(viewId) {
   if (section) section.classList.remove('hidden');
 }
 
+// goToView clicks a nav tab by name (runs its full open/refresh handler),
+// used by in-content shortcuts like empty-state call-to-action buttons.
+function goToView(viewId) {
+  const btn = document.querySelector(`.nav[data-view="${viewId}"]`);
+  if (btn) btn.click();
+}
+
 document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   switchToView(b.dataset.view);
   // Each tab must pull fresh data on every open instead of showing stale state.
@@ -1620,6 +1637,30 @@ async function importFromLol(slug) {
     $('tt-lol-status').textContent = 'Import failed.';
   }
 }
+// Import a timetable from a local JSON file (app export format or the compact
+// community format - the server accepts either). Paired with the timetables
+// attached to each GitHub release.
+$('tt-file-import').onclick = () => $('tt-file-input').click();
+$('tt-file-input').addEventListener('change', async () => {
+  const file = $('tt-file-input').files[0];
+  $('tt-file-input').value = '';
+  if (!file) return;
+  if (config.timetable && config.timetable.length && !confirm(`Replace your current timetable with "${file.name}"?`)) return;
+  $('tt-file-status').textContent = `Importing "${file.name}"…`;
+  let text;
+  try { text = await file.text(); } catch { $('tt-file-status').textContent = 'Could not read that file.'; return; }
+  let result;
+  try {
+    result = await api('/api/timetable/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+  } catch {
+    $('tt-file-status').textContent = 'Import failed — is it a valid timetable JSON file?';
+    return;
+  }
+  $('tt-file-status').textContent = `Imported ${result.stages} stage(s), ${result.sets} set(s).`;
+  toast(`Imported ${result.stages} stage(s), ${result.sets} set(s) from "${file.name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+});
 $('tt-lol-import').onclick = () => importFromLol($('tt-lol-event').value);
 $('tt-lol-resync').onclick = () => { if (config.timetableSource) importFromLol(config.timetableSource.eventSlug); };
 $('tt-lol-unlink').onclick = async () => {
@@ -2685,6 +2726,11 @@ function readCustomTheme() {
 }
 
 function applyThemeColors(colors) {
+  // Drive the design-token layer (app.css keys everything off these), so a
+  // custom theme recolours the whole polished UI without per-component
+  // overrides. A few legacy helper rules are kept for anything still
+  // referencing the older --color-* names.
+  const bgRgb = hexToRgb(colors.bg).join(' ');
   const css = `
     :root {
       --color-primary: ${colors.primary};
@@ -2693,20 +2739,24 @@ function applyThemeColors(colors) {
       --color-accent: ${colors.accent};
       --color-text: ${colors.text};
       --color-text-muted: ${colors.textMuted};
+      --accent: ${colors.accent};
+      --bg: ${colors.bg};
+      --text: ${colors.text};
+      --text-muted: ${colors.textMuted};
     }
     body { background: var(--color-bg); color: var(--color-text); }
-    .panel { background: rgb(${hexToRgb(colors.bg).join(' ')} / .72); }
+    .panel { background: linear-gradient(180deg, rgb(255 255 255 / .035), rgb(255 255 255 / 0) 120px), rgb(${bgRgb} / .72); }
     .accent-color { color: var(--color-accent); }
-    .btn.primary, .nav.active { background: var(--color-accent); }
-    .source-card { border-left-color: var(--color-accent); }
-    .nav { color: var(--color-text-muted); }
-    label { color: var(--color-text-muted); }
   `;
   const styleEl = document.getElementById('custom-css');
   if (styleEl) {
     styleEl.textContent = config.ui.customCss + '\n' + css;
   }
-  document.documentElement.style.setProperty('--accent', colors.accent);
+  const root = document.documentElement.style;
+  root.setProperty('--accent', colors.accent);
+  root.setProperty('--bg', colors.bg);
+  root.setProperty('--text', colors.text);
+  root.setProperty('--text-muted', colors.textMuted);
 }
 
 function rgbToHex(rgb) {

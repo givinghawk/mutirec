@@ -114,10 +114,11 @@ data/
 ```
 
 There are no sources or timetable entries yet - add your first source from
-the Sources tab (or a Preset Pack) and build a timetable by hand or by
-importing one from [timetable.lol](https://timetable.lol). Auto-recording
-starts disabled by default so you can review sources, storage, and backup
-settings before recording.
+the Sources tab (or a Preset Pack) and build a timetable by hand, by importing
+one from [timetable.lol](https://timetable.lol), or by loading a ready-made
+timetable file (attached to each [release](https://github.com/givinghawk/mutirec/releases))
+via **Timetable → Import from file**. Auto-recording starts disabled by default
+so you can review sources, storage, and backup settings before recording.
 
 ## Docker Compose
 
@@ -223,6 +224,18 @@ URLs are preserved by matching on stage name across a re-sync.
 If a recording source's name doesn't match the stage name from an imported
 (or hand-built) timetable, set "Timetable stage" on that source in the
 Source Manager to point it at the right stage for Now/Next lookups.
+
+### Importing from a file (optional)
+
+**Timetable → Import from file** loads a timetable JSON file directly.
+Ready-made timetables are attached to each
+[GitHub release](https://github.com/givinghawk/mutirec/releases) (they are not
+bundled into the app itself), and the [`timetables/`](timetables/) directory in
+the repo documents the format. Both the app's own export format and the compact
+`[year, month, day, hour, minute, name]` format are accepted, and any per-stage
+stream URLs you've already configured are kept, matched by stage name.
+After-midnight sets roll to the correct next calendar day automatically — a set
+listed under Thursday at 01:00 is stored as Friday 01:00.
 
 ### Reminders
 

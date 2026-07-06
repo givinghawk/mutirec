@@ -29,6 +29,49 @@
 - **Dev server portability fix**: the app previously only listened on `HTTP_ADDR` (default `:8080`) with no way to run on an arbitrary port; added `PORT` env var support (`main.go`) and switched `.claude/launch.json` to `autoPort: true` so the preview tooling can run alongside other things already bound to 8080.
 
 ## Done (this session)
+- **UI polish pass** (`app.css` rewritten around a design-token layer): introduced `:root`
+  tokens (`--surface-1/2/3`, `--border`/`--border-strong`, `--radius*`, `--shadow-1/2/3`,
+  `--ring`, `--ease`) that everything keys off, all still driven by the runtime `--accent`.
+  Refinements across panels (subtle top-sheen gradient + depth shadow), buttons (primary now a
+  glowing accent gradient, hover lift, active press), nav (accent-gradient active state), source
+  cards (accent-glow when now-playing, lift on hover), status pills/dots, inputs (accent focus
+  ring, `:focus-visible` rings globally for a11y), dropdowns, toasts (accent left-bar +
+  backdrop blur), timetable blocks, library cards, charts (gradient fills, animated widths),
+  plus new helpers (`.empty-state`, `.spinner`, `.skeleton`), custom scrollbars, a faint fixed
+  accent "aurora" behind the page top, a gradient wordmark on `#app-name`, and a
+  `prefers-reduced-motion` guard. `applyThemeColors` now feeds the token layer (`--accent`,
+  `--bg`, `--text`, `--text-muted`) instead of hard-overriding individual component rules, so
+  custom themes recolour the whole polished UI. Dashboard/source-editor empty states upgraded to
+  the `.empty-state` component with a call-to-action (new `goToView(id)` helper). Verified by
+  rendering a component gallery (real `app.css`, no Tailwind needed) in a headless browser -
+  Tailwind/video.js CDN are blocked by the sandbox proxy so full-page shots aren't possible
+  here, but no layout markup changed, only custom-class styling.
+- **After-midnight timetable rollover fix**: a set listed under a festival "day" at an
+  early-morning wall-clock time (e.g. an after-party at 01:00 under Thursday) was being combined
+  with the label day's date, landing ~23h too early on the same day instead of the next morning.
+  `combineDateTime` now rolls any time before `festivalDayRolloverHour` (08:00) to the next
+  calendar day (and still normalizes the ">=24:00" convention via `time.Date`); the compact
+  parser builds its timestamps through `time.Date` too so a `25:00`-style hour can't produce an
+  unparseable string. Covered by `timetable_test.go` (boundary cases, an absolute-timestamp
+  passthrough, an end-to-end timetable.lol import, and a compact hour-overflow case); verified
+  against the real recovered timetable that "Encore with Rebelion" 23:30 ends 01:00 on the *next*
+  day.
+- **Video.js everywhere**: the two embedded players (Watch live, Recordings) already used
+  Video.js; the one hold-out was the dashboard source card's "Open" button, which dumped the raw
+  finished file into a new browser tab (native player). Replaced with "Open latest" →
+  `openSourceLatest(id)` → the same in-app `openRecordingPlayer` (Video.js) as everywhere else.
+  No raw `<video>`/`<audio>` elements remain; the only native-browser media links left are
+  explicit downloads.
+- **Downloadable timetables + import-from-file**: restored the community DEFQON.1 timetable under
+  `timetables/defqon1-2026.json` (with a `timetables/README.md` documenting format + trademark
+  provenance) - it is *not* embedded in the binary or copied into the image, only shipped as a
+  release asset by a new `.github/workflows/release.yml` (tag-triggered; attaches
+  `timetables/*.json` + a zip via `softprops/action-gh-release`). New `POST /api/timetable/import`
+  endpoint + `parseAnyTimetableJSON` accept either the app's RFC3339 export shape or the compact
+  numeric-tuple community shape (RFC3339 tried first; a compact file fails that decode and falls
+  through), preserving existing per-stage stream URLs by stage name. New "Import from file" panel
+  in the Timetable tab uploads to it. Verified end-to-end importing the real 14-stage / 372-set
+  file. Covered by `TestParseAnyTimetableJSON`.
 - **Auto-reconnect / stream-health watchdog**: a source whose recording ends without having
   run for at least `minStableRecordingDuration` (60s) - a dropped connection, a bad/offline
   URL, etc. - now schedules an automatic retry with exponential backoff (`reconnectDelay`:
