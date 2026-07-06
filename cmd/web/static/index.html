@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Defqon Stream Recorder</title>
+  <title>MutiRec</title>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#09090b">
   <link rel="icon" href="/icons/icon-192.png">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="StreamRec">
+  <meta name="apple-mobile-web-app-title" content="MutiRec">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
   <link href="https://unpkg.com/video.js@8/dist/video-js.min.css" rel="stylesheet">
@@ -24,7 +24,7 @@
       <div class="flex items-center gap-3">
         <img id="logo" class="hidden h-10 w-10 rounded object-contain" alt="">
         <div class="min-w-0 flex-1">
-          <h1 id="app-name" class="truncate text-lg font-semibold tracking-normal">Defqon Stream Recorder</h1>
+          <h1 id="app-name" class="truncate text-lg font-semibold tracking-normal">MutiRec</h1>
           <p class="text-xs text-zinc-400">Docker-first stream recorder</p>
         </div>
       </div>
@@ -345,6 +345,8 @@
             <button type="button" id="lib-matchfile-export" class="btn" title="Download a shareable match file for everything you've organized">Export Match File</button>
             <button type="button" id="lib-matchfile-import" class="btn" title="Apply an exact-match file someone else exported">Import Match File</button>
             <input type="file" id="lib-matchfile-input" accept="application/json" class="hidden">
+            <button type="button" id="lib-share-open" class="btn" data-admin-only title="Select recordings and generate a share code to send to another MutiRec instance">Share Sets</button>
+            <button type="button" id="lib-receive-open" class="btn" data-admin-only title="Paste a share code to pull recordings from another MutiRec instance">Receive</button>
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -364,6 +366,66 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Best-guess matches for unsorted recordings, from the timestamp in each filename (or its file date) and its channel name against every event's archived timetable. Nothing is applied until you approve it - correct anything wrong first.</p>
           <div id="lib-match-list" class="space-y-2 text-sm"></div>
+        </div>
+
+        <div id="lib-share-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Share Sets</h2>
+            <div class="flex items-center gap-2">
+              <span id="lib-share-selcount" class="pill">0 selected</span>
+              <button type="button" id="lib-share-close" class="btn">Back to Library</button>
+            </div>
+          </div>
+          <p id="lib-share-setup-warn" class="mb-3 hidden text-sm text-amber-300"></p>
+          <p class="mb-3 text-sm text-zinc-400">Pick the recordings to share, then generate a code. The receiver pastes it into <span class="font-medium">Receive</span> to pull the files and their metadata straight from this instance.</p>
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <input id="lib-share-name" class="input max-w-xs" placeholder="Share name (optional)" style="margin:0">
+            <input id="lib-share-filter" class="input max-w-xs" placeholder="Filter list…" style="margin:0">
+            <button type="button" id="lib-share-selectall" class="btn">Select all shown</button>
+            <button type="button" id="lib-share-clear" class="btn">Clear</button>
+            <button type="button" id="lib-share-create" class="btn primary">Create share code</button>
+          </div>
+          <div id="lib-share-code-box" class="mb-3 hidden rounded border border-emerald-400/30 bg-emerald-500/10 p-3">
+            <div class="mb-1 text-sm font-medium text-emerald-200">Share code — send this to the other instance</div>
+            <div class="flex items-center gap-2">
+              <input id="lib-share-code" class="input codebox" readonly style="margin:0">
+              <button type="button" id="lib-share-copy" class="btn">Copy</button>
+            </div>
+          </div>
+          <div id="lib-share-list" class="space-y-3 text-sm"></div>
+          <div id="lib-share-existing" class="mt-4"></div>
+        </div>
+
+        <div id="lib-receive-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Receive a Share</h2>
+            <button type="button" id="lib-receive-close" class="btn">Back to Library</button>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Paste a share code from another MutiRec instance to preview what's on offer, then pull the recordings (and their metadata sidecars) into your library.</p>
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <input id="lib-receive-code" class="input flex-1" placeholder="Paste share code here" style="margin:0;min-width:260px">
+            <button type="button" id="lib-receive-preview" class="btn primary">Preview</button>
+          </div>
+          <p id="lib-receive-status" class="mb-3 text-sm text-zinc-400"></p>
+          <div id="lib-receive-preview-box" class="hidden">
+            <div class="mb-3 flex flex-wrap items-center gap-2">
+              <span id="lib-receive-selcount" class="pill">0 selected</span>
+              <button type="button" id="lib-receive-selectall" class="btn">Select all</button>
+              <button type="button" id="lib-receive-import" class="btn primary">Import selected</button>
+            </div>
+            <div id="lib-receive-list" class="space-y-2 text-sm"></div>
+          </div>
+          <div id="lib-receive-job-box" class="mt-4 hidden">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span id="lib-receive-job-title" class="text-sm font-medium"></span>
+              <span id="lib-receive-job-stats" class="text-xs text-zinc-400"></span>
+            </div>
+            <div class="storage-bar-track">
+              <div id="lib-receive-job-bar" class="storage-bar-fill" style="width:0%"></div>
+            </div>
+            <p id="lib-receive-job-current" class="mt-1 text-xs text-zinc-500"></p>
+            <pre id="lib-receive-job-log" class="codebox mt-2 h-40 overflow-y-auto text-xs"></pre>
+          </div>
         </div>
 
         <div id="lib-home">
@@ -399,7 +461,7 @@
             <h2 id="event-editor-title">New Event</h2>
             <button type="button" id="event-editor-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Name<input id="ev-name" class="input" placeholder="e.g. Defqon.1 2022"></label>
+          <label>Name<input id="ev-name" class="input" placeholder="e.g. Neonbeat 2026"></label>
           <div class="grid gap-2 md:grid-cols-3">
             <label>Year<input id="ev-year" type="number" class="input" placeholder="2022"></label>
             <label>Start date<input id="ev-start" type="date" class="input"></label>
@@ -407,7 +469,17 @@
           </div>
           <div class="grid gap-2 md:grid-cols-2">
             <label>Color<input id="ev-color" type="color" class="input color-input" value="#ef4444"></label>
-            <label>Cover image URL<input id="ev-cover" class="input" placeholder="https://..."></label>
+            <label>Cover image
+              <div class="image-upload-field" data-image-field="ev-cover">
+                <input type="hidden" id="ev-cover" class="input">
+                <img id="ev-cover-preview" class="image-upload-preview hidden">
+                <div class="image-upload-actions">
+                  <button type="button" class="btn" data-upload-btn="ev-cover">Upload</button>
+                  <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="ev-cover">Remove</button>
+                  <input type="file" accept="image/*" class="hidden" data-file-input="ev-cover">
+                </div>
+              </div>
+            </label>
           </div>
           <label>Description<textarea id="ev-desc" class="input" rows="2"></textarea></label>
           <label class="mt-2">Event (franchise)
@@ -446,7 +518,7 @@
             <h2>New Event</h2>
             <button type="button" id="festival-editor-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Name<input id="festival-name" class="input" placeholder="e.g. Defqon.1"></label>
+          <label>Name<input id="festival-name" class="input" placeholder="e.g. Neonbeat"></label>
           <label>Color<input id="festival-color" type="color" class="input color-input" value="#ef4444"></label>
           <p id="festival-editor-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-end gap-2">
@@ -463,10 +535,20 @@
             <h2 id="org-editor-title">New Organisation</h2>
             <button type="button" id="org-editor-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Name<input id="org-name" class="input" placeholder="e.g. Q-dance"></label>
+          <label>Name<input id="org-name" class="input" placeholder="e.g. Nightlife Collective"></label>
           <label class="mt-2">Description<input id="org-desc" class="input" placeholder="Optional"></label>
           <label class="mt-2">Color<input id="org-color" type="color" class="input color-input" value="#ef4444"></label>
-          <label class="mt-2">Logo URL<input id="org-logo" class="input" placeholder="https://…"></label>
+          <label class="mt-2">Logo
+            <div class="image-upload-field" data-image-field="org-logo">
+              <input type="hidden" id="org-logo" class="input">
+              <img id="org-logo-preview" class="image-upload-preview hidden">
+              <div class="image-upload-actions">
+                <button type="button" class="btn" data-upload-btn="org-logo">Upload</button>
+                <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="org-logo">Remove</button>
+                <input type="file" accept="image/*" class="hidden" data-file-input="org-logo">
+              </div>
+            </div>
+          </label>
           <p id="org-editor-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-end gap-2">
             <button type="button" class="btn" onclick="closeOrgEditor()">Cancel</button>
@@ -482,10 +564,20 @@
             <h2 id="ev-festival-editor-title">New Event</h2>
             <button type="button" id="ev-festival-editor-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <label>Name<input id="ev-fest-name" class="input" placeholder="e.g. Defqon.1"></label>
+          <label>Name<input id="ev-fest-name" class="input" placeholder="e.g. Neonbeat"></label>
           <label class="mt-2">Description<input id="ev-fest-desc" class="input" placeholder="Optional"></label>
           <label class="mt-2">Color<input id="ev-fest-color" type="color" class="input color-input" value="#ef4444"></label>
-          <label class="mt-2">Logo URL<input id="ev-fest-logo" class="input" placeholder="https://…"></label>
+          <label class="mt-2">Logo
+            <div class="image-upload-field" data-image-field="ev-fest-logo">
+              <input type="hidden" id="ev-fest-logo" class="input">
+              <img id="ev-fest-logo-preview" class="image-upload-preview hidden">
+              <div class="image-upload-actions">
+                <button type="button" class="btn" data-upload-btn="ev-fest-logo">Upload</button>
+                <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="ev-fest-logo">Remove</button>
+                <input type="file" accept="image/*" class="hidden" data-file-input="ev-fest-logo">
+              </div>
+            </div>
+          </label>
           <label class="mt-2">Organisation
             <div class="custom-dropdown mt-1" id="ev-fest-org-dropdown"></div>
           </label>
@@ -503,6 +595,15 @@
           <div class="panel-head">
             <h2 id="assign-title" class="truncate">Organize recording</h2>
             <button type="button" id="assign-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <div class="thumb-editor-preview-wrap">
+            <img id="assign-thumb-preview" class="hidden">
+          </div>
+          <div class="thumb-editor-actions mb-3">
+            <button type="button" id="assign-thumb-upload-btn" class="btn">Upload thumbnail</button>
+            <button type="button" id="assign-thumb-regen-btn" class="btn hidden">Regenerate</button>
+            <button type="button" id="assign-thumb-remove-btn" class="btn hidden" style="color:#fda4af">Remove thumbnail</button>
+            <input type="file" id="assign-thumb-file" accept="image/*" class="hidden">
           </div>
           <label>Event<div class="custom-dropdown" id="assign-event-dropdown"></div></label>
           <label>Channel <span class="text-xs text-zinc-500">(optional display name override)</span><input id="assign-channel" class="input" placeholder="defaults to source folder name"></label>
@@ -560,6 +661,16 @@
         </div>
 
         <div class="panel">
+          <div class="panel-head"><h2>Import from file</h2></div>
+          <p class="mb-3 text-sm text-zinc-400">Load a timetable JSON file — both the app's own export format and the compact community format are accepted. Ready-made timetables are attached to each <a href="https://github.com/givinghawk/mutirec/releases" target="_blank" rel="noopener">GitHub release</a>. Existing per-stage stream URLs are kept, matched by stage name.</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" id="tt-file-import" class="btn primary">Choose file…</button>
+            <input type="file" id="tt-file-input" accept="application/json,.json" class="hidden">
+            <span id="tt-file-status" class="text-sm text-zinc-400"></span>
+          </div>
+        </div>
+
+        <div class="panel">
           <div class="panel-head">
             <h2>Timetable</h2>
             <div class="flex items-center gap-2">
@@ -590,7 +701,7 @@
 
       <section id="settings" class="view hidden">
         <div class="grid gap-4 lg:grid-cols-2">
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Recorder</h2></div>
             <label>Finished directory<input id="finishedDir" class="input"></label>
             <label>Temporary directory<input id="tempDir" class="input"></label>
@@ -606,13 +717,23 @@
               <label class="inline-flex items-center gap-2"><input id="allowLiveProxy" type="checkbox" class="accent-red-500"> Live links</label>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Branding</h2></div>
             <label>App name<input id="uiAppName" class="input"></label>
-            <label>Logo URL<input id="uiLogoUrl" class="input"></label>
+            <label>Logo
+              <div class="image-upload-field" data-image-field="uiLogoUrl">
+                <input type="hidden" id="uiLogoUrl" class="input">
+                <img id="uiLogoUrl-preview" class="image-upload-preview hidden">
+                <div class="image-upload-actions">
+                  <button type="button" class="btn" data-upload-btn="uiLogoUrl">Upload</button>
+                  <button type="button" class="btn hidden" style="color:#fda4af" data-remove-btn="uiLogoUrl">Remove</button>
+                  <input type="file" accept="image/*" class="hidden" data-file-input="uiLogoUrl">
+                </div>
+              </div>
+            </label>
             <label>Custom CSS<textarea id="uiCustomCss" class="codebox h-40"></textarea></label>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Theme</h2></div>
             <div class="mb-4">
               <p class="text-sm text-zinc-400 mb-3">Festival Presets:</p>
@@ -631,7 +752,7 @@
               <button type="button" id="applyCustomTheme" class="btn primary mt-3">Apply Custom Theme</button>
             </div>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Notifications</h2></div>
             <label>Reminder lead time (minutes)<input id="reminderLeadMinutes" type="number" class="input"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">How long before a starred timetable set to send a reminder via Discord/SMTP below. Star sets from the Timetable tab.</p>
@@ -644,11 +765,11 @@
             <label>From<input id="smtpFrom" class="input"></label>
             <label>To<input id="smtpTo" class="input"></label>
           </div>
-          <div class="panel">
+          <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Backups</h2></div>
             <label class="inline-flex items-center gap-2 text-sm"><input id="backupEnabled" type="checkbox" class="accent-red-500"> Enable rclone backup</label>
             <label class="mt-3 inline-flex items-center gap-2 text-sm"><input id="backupAfterComplete" type="checkbox" class="accent-red-500"> Run after each recording</label>
-            <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/defqon or gdrive:recordings"></label>
+            <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/mutirec or gdrive:recordings"></label>
             <label>Extra rclone args, one per line<textarea id="rcloneArgs" class="codebox h-32"></textarea></label>
           </div>
           <div class="panel">
@@ -660,9 +781,50 @@
               <label>New password<input id="acct-password" type="password" class="input" autocomplete="new-password" placeholder="at least 8 characters"></label>
               <button type="button" id="acct-save" class="btn primary mt-2">Update credentials</button>
             </div>
+            <div class="mt-4 border-t border-white/10 pt-3">
+              <p class="mb-2 text-sm text-zinc-400">Discord login</p>
+              <p id="acct-discord-status" class="mb-2 text-sm text-zinc-400"></p>
+              <button type="button" id="acct-discord-link" class="btn hidden">Link Discord</button>
+              <button type="button" id="acct-discord-unlink" class="btn hidden">Unlink Discord</button>
+            </div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Users</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Everyone with a login here can watch live and browse recordings. Admins can also manage sources, settings, and other users.</p>
+            <div id="users-list" class="space-y-2 mb-4"></div>
+            <div class="border-t border-white/10 pt-3">
+              <p class="mb-2 text-sm text-zinc-400">Add a user</p>
+              <label>Username<input id="user-new-username" class="input" autocomplete="off"></label>
+              <label>Password<input id="user-new-password" type="password" class="input" autocomplete="new-password" placeholder="at least 8 characters"></label>
+              <label class="inline-flex items-center gap-2 text-sm mt-2"><input id="user-new-admin" type="checkbox"> Admin</label>
+              <button type="button" id="user-add" class="btn primary mt-2">Add User</button>
+            </div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Discord Login (Admin)</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Lets existing users link their Discord account for a faster login (Account section above). Create an application at <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">discord.com/developers/applications</a>, add an OAuth2 redirect matching the URL below exactly, and paste its Client ID/Secret here. This never creates new accounts by itself - a user must already exist.</p>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="discordOAuthEnabled" type="checkbox" class="accent-red-500"> Enabled</label>
+            <label>Client ID<input id="discordOAuthClientId" class="input"></label>
+            <label>Client Secret<input id="discordOAuthClientSecret" type="password" class="input"></label>
+            <label>Redirect URL<input id="discordOAuthRedirectUrl" class="input" placeholder="https://your-domain/api/auth/discord/callback"></label>
+            <p class="-mt-2 text-xs text-zinc-500">Register this exact URL in the Discord application's OAuth2 redirect settings - both the login page's button and linking from Account use this same callback.</p>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head">
+              <h2>Peer Sharing (P2P)</h2>
+              <span id="share-status-pill" class="pill">off</span>
+            </div>
+            <p class="mb-3 text-sm text-zinc-400">Let another MutiRec instance pull recordings straight from this one. This instance must be reachable at a public URL — set it below and verify it before sharing (the check confirms the URL routes back here). Once verified, use <span class="font-medium">Recordings → Share Sets</span> to generate a code.</p>
+            <label>Public URL<input id="share-public-url" class="input" placeholder="https://your-domain-or-tunnel"></label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" id="share-verify" class="btn primary">Verify &amp; enable</button>
+              <button type="button" id="share-disable" class="btn hidden">Disable sharing</button>
+              <span id="share-verify-status" class="text-sm text-zinc-400"></span>
+            </div>
+            <p class="mt-2 text-xs text-zinc-500">Expose this instance publicly however you like — a reverse proxy, a Cloudflare/ngrok tunnel, or a port forward. Share tokens are unguessable and each only exposes the exact files you put in that share; revoke a share any time from Recordings → Share Sets.</p>
           </div>
         </div>
-        <button id="save-settings" class="btn primary mt-4">Save Settings</button>
+        <button id="save-settings" class="btn primary mt-4" data-admin-only>Save Settings</button>
       </section>
 
       <section id="diagnostics" class="view hidden">

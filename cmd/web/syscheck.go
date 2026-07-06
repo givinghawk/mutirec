@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"defqon-stream-recorder/internal/disk"
+	"mutirec/internal/disk"
 )
 
 // CheckStatus is the verdict for one system check or hardware requirement row.
@@ -232,7 +232,7 @@ func checkDirWritable(id, label, path string) SystemCheckItem {
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return SystemCheckItem{ID: id, Label: label, Status: StatusFail, Detail: fmt.Sprintf("%s: cannot create directory (%s)", path, err)}
 	}
-	probe := filepath.Join(path, ".defqon-write-test")
+	probe := filepath.Join(path, ".mutirec-write-test")
 	if err := os.WriteFile(probe, []byte("ok"), 0o644); err != nil {
 		return SystemCheckItem{ID: id, Label: label, Status: StatusFail, Detail: fmt.Sprintf("%s: not writable (%s)", path, err)}
 	}

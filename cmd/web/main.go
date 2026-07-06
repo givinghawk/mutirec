@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"embed"
 	"encoding/hex"
@@ -32,9 +31,7 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
-	"defqon-stream-recorder/internal/disk"
+	"mutirec/internal/disk"
 )
 
 var version = "dev"
@@ -55,10 +52,11 @@ type AppConfig struct {
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
 	Festivals       []Festival               `json:"festivals"`
 	Organisations   []Organisation           `json:"organisations"`
+	Shares          []Share                  `json:"shares,omitempty"`
 }
 
 // Festival is the recurring franchise a live Source belongs to (e.g.
-// "Defqon.1", "Sensation") - shown to the user simply as "Event". It's
+// "Neonbeat", "Aurora Nights") - shown to the user simply as "Event". It's
 // intentionally a separate, lighter-weight concept from LibraryEvent (which
 // represents one specific yearly edition/recording archive): a live Source's
 // stream URL is reused every year, so it's grouped by the franchise rather
@@ -74,9 +72,8 @@ type Festival struct {
 }
 
 // Organisation is the parent label above Festivals — a promoter, brand, or
-// collective (e.g. "Q-dance", "ID&T") that owns one or more Festival
-// franchises. Optional: Festivals that don't belong to an Organisation still
-// show up as standalone entries.
+// collective that owns one or more Festival franchises. Optional: Festivals
+// that don't belong to an Organisation still show up as standalone entries.
 type Organisation struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -86,7 +83,7 @@ type Organisation struct {
 }
 
 // LibraryEvent groups recorded files into one edition of a festival (e.g.
-// "Defqon.1 2022"), independent of whatever Sources/Timetable are currently
+// "Neonbeat 2022"), independent of whatever Sources/Timetable are currently
 // configured for live recording. Each event can carry its own archived
 // timetable, imported separately, so old recordings can be matched back up
 // to the artist/set that was actually playing when they were captured.
@@ -118,23 +115,38 @@ type RecordingMeta struct {
 }
 
 type Settings struct {
-	FinishedDir             string        `json:"finishedDir"`
-	TempDir                 string        `json:"tempDir"`
-	LogDir                  string        `json:"logDir"`
-	CheckIntervalSeconds    int           `json:"checkIntervalSeconds"`
-	MinFreeBytes            uint64        `json:"minFreeBytes"`
-	DefaultQuality          string        `json:"defaultQuality"`
-	DefaultContainer        string        `json:"defaultContainer"`
-	EnableNFO               bool          `json:"enableNfo"`
-	EnableWaveform          bool          `json:"enableWaveform"`
-	Backup                  BackupConfig  `json:"backup"`
-	Notifications           Notifications `json:"notifications"`
-	AllowLiveProxy          bool          `json:"allowLiveProxy"`
-	WarnFreeBytes           uint64        `json:"warnFreeBytes"`
-	LiveRewindWindowSeconds int           `json:"liveRewindWindowSeconds"`
-	FavoriteSetIDs          []string      `json:"favoriteSetIds"`
-	ReminderLeadMinutes     int           `json:"reminderLeadMinutes"`
-	RecordingSetLookahead   time.Duration `json:"-"`
+	FinishedDir             string             `json:"finishedDir"`
+	TempDir                 string             `json:"tempDir"`
+	LogDir                  string             `json:"logDir"`
+	CheckIntervalSeconds    int                `json:"checkIntervalSeconds"`
+	MinFreeBytes            uint64             `json:"minFreeBytes"`
+	DefaultQuality          string             `json:"defaultQuality"`
+	DefaultContainer        string             `json:"defaultContainer"`
+	EnableNFO               bool               `json:"enableNfo"`
+	EnableWaveform          bool               `json:"enableWaveform"`
+	Backup                  BackupConfig       `json:"backup"`
+	Notifications           Notifications      `json:"notifications"`
+	AllowLiveProxy          bool               `json:"allowLiveProxy"`
+	WarnFreeBytes           uint64             `json:"warnFreeBytes"`
+	LiveRewindWindowSeconds int                `json:"liveRewindWindowSeconds"`
+	FavoriteSetIDs          []string           `json:"favoriteSetIds"`
+	ReminderLeadMinutes     int                `json:"reminderLeadMinutes"`
+	RecordingSetLookahead   time.Duration      `json:"-"`
+	DiscordOAuth            DiscordOAuthConfig `json:"discordOAuth"`
+	Sharing                 SharingConfig      `json:"sharing"`
+}
+
+// DiscordOAuthConfig holds this instance's Discord OAuth2 application
+// credentials (from https://discord.com/developers/applications), used only
+// to let an *existing* user (created by an admin) link their Discord account
+// for a faster login - there's no self-service signup via Discord, so a
+// stranger who happens to have a Discord account still can't get in without
+// an admin-created account first.
+type DiscordOAuthConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret,omitempty"`
+	RedirectURL  string `json:"redirectUrl"`
 }
 
 type UISettings struct {
@@ -240,6 +252,7 @@ type State struct {
 	ActiveCount int                 `json:"activeCount"`
 	Warnings    []string            `json:"warnings"`
 	NowPlaying  map[string]*NowItem `json:"nowPlaying"`
+	Role        Role                `json:"role,omitempty"`
 }
 
 type SourceStatus struct {
@@ -315,19 +328,27 @@ type App struct {
 	lastFinished  map[string]string
 	authUser      string
 	authPass      string
-	authFile      string
+	usersFile     string
 	remindersSent map[string]time.Time
 
 	retryMu sync.Mutex
 	retry   map[string]*retryState
 
 	sessMu   sync.Mutex
-	sessions map[string]time.Time
+	sessions map[string]sessionInfo
 
-	credMu     sync.RWMutex
-	credUser   string
-	credHash   []byte
+	usersMu    sync.RWMutex
+	users      []User
 	needsSetup bool
+
+	oauthMu    sync.Mutex
+	oauthState map[string]pendingOAuth
+
+	shareNonceMu sync.Mutex
+	shareNonces  map[string]time.Time
+
+	shareJobsMu sync.Mutex
+	shareJobs   map[string]*ShareJob
 
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
@@ -344,9 +365,6 @@ type hashCacheEntry struct {
 	Size    int64
 	Hash    string
 }
-
-const sessionCookieName = "dqr_session"
-const sessionTTL = 30 * 24 * time.Hour
 
 func main() {
 	configPath := localizePath(env("CONFIG_PATH", "/app/config/config.json"))
@@ -380,7 +398,7 @@ func main() {
 		app.stopAll()
 	}()
 
-	log.Printf("Defqon recorder web UI listening on %s", addr)
+	log.Printf("MutiRec web UI listening on %s", addr)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -399,7 +417,10 @@ func NewApp(configPath string) (*App, error) {
 		lastFinished:  map[string]string{},
 		remindersSent: map[string]time.Time{},
 		retry:         map[string]*retryState{},
-		sessions:      map[string]time.Time{},
+		sessions:      map[string]sessionInfo{},
+		oauthState:    map[string]pendingOAuth{},
+		shareNonces:   map[string]time.Time{},
+		shareJobs:     map[string]*ShareJob{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -409,366 +430,6 @@ func NewApp(configPath string) (*App, error) {
 	}
 	app.event("info", "Recorder started")
 	return app, nil
-}
-
-// storedCredentials is the on-disk shape of auth.json: a username and a
-// bcrypt hash, written by the in-browser setup wizard or the account
-// settings form so nobody has to touch environment variables by hand.
-type storedCredentials struct {
-	Username     string `json:"username"`
-	PasswordHash string `json:"passwordHash"`
-}
-
-// setupAuth decides how this instance authenticates, in priority order:
-//  1. AUTH_USERNAME/AUTH_PASSWORD from the environment, for Docker-style
-//     deployments that prefer to manage credentials externally.
-//  2. Credentials previously saved to auth.json by the setup wizard or the
-//     account settings form.
-//  3. Neither: needsSetup is set, and the web UI serves a one-time setup
-//     wizard instead of ever generating or printing a throwaway password.
-func (a *App) setupAuth() {
-	a.authFile = filepath.Join(filepath.Dir(a.config), "auth.json")
-	a.authUser = os.Getenv("AUTH_USERNAME")
-	a.authPass = os.Getenv("AUTH_PASSWORD")
-	if a.authPass != "" {
-		if a.authUser == "" {
-			a.authUser = "admin"
-		}
-		log.Printf("Using AUTH_USERNAME/AUTH_PASSWORD from the environment.")
-		return
-	}
-	a.authUser = ""
-
-	if creds, err := loadStoredCredentials(a.authFile); err == nil {
-		a.credUser = creds.Username
-		a.credHash = []byte(creds.PasswordHash)
-		log.Printf("Using saved credentials from %s (change them any time from Settings).", a.authFile)
-		return
-	}
-
-	a.credMu.Lock()
-	a.needsSetup = true
-	a.credMu.Unlock()
-	log.Printf("No credentials configured yet - open the web UI to finish setup and choose a username/password.")
-}
-
-func loadStoredCredentials(path string) (storedCredentials, error) {
-	var creds storedCredentials
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return creds, err
-	}
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return creds, err
-	}
-	if creds.Username == "" || creds.PasswordHash == "" {
-		return creds, errors.New("incomplete credentials file")
-	}
-	return creds, nil
-}
-
-// setCredentials hashes and persists a new username/password to auth.json,
-// used by both the first-run setup wizard and the account settings form.
-func (a *App) setCredentials(username, password string) error {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(storedCredentials{Username: username, PasswordHash: string(hash)}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(a.authFile), 0o755); err != nil {
-		return err
-	}
-	if err := os.WriteFile(a.authFile, data, 0o600); err != nil {
-		return err
-	}
-	a.credMu.Lock()
-	a.credUser = username
-	a.credHash = hash
-	a.needsSetup = false
-	a.credMu.Unlock()
-	return nil
-}
-
-func (a *App) isSetupNeeded() bool {
-	a.credMu.RLock()
-	defer a.credMu.RUnlock()
-	return a.needsSetup
-}
-
-// checkCredentials verifies a login attempt against whichever credential
-// source setupAuth selected: env vars (plain constant-time compare) or a
-// saved bcrypt hash.
-func (a *App) checkCredentials(username, password string) bool {
-	if a.authPass != "" {
-		userMatch := subtle.ConstantTimeCompare([]byte(username), []byte(a.authUser)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(password), []byte(a.authPass)) == 1
-		return userMatch && passMatch
-	}
-	a.credMu.RLock()
-	credUser, credHash := a.credUser, a.credHash
-	a.credMu.RUnlock()
-	if len(credHash) == 0 {
-		return false
-	}
-	if subtle.ConstantTimeCompare([]byte(username), []byte(credUser)) != 1 {
-		return false
-	}
-	return bcrypt.CompareHashAndPassword(credHash, []byte(password)) == nil
-}
-
-// isPublicPath lists the handful of routes reachable without a session, so
-// the login/setup pages (and the requests that submit them) don't get
-// redirected back to themselves.
-func isPublicPath(p string) bool {
-	switch p {
-	case "/login", "/api/login", "/setup", "/api/setup", "/app.css", "/manifest.json", "/sw.js":
-		return true
-	}
-	// Icons are pure branding assets (no user data) and need to load
-	// unauthenticated for the browser's install/add-to-home-screen prompt
-	// and for the login/setup pages themselves.
-	return strings.HasPrefix(p, "/icons/")
-}
-
-// requireAuth gates every request (UI and API) behind a session cookie set by
-// a real login page (see handleLogin), redirecting page loads to /setup or
-// /login as appropriate and returning error JSON for API calls when the
-// session is missing, expired, or credentials haven't been chosen yet.
-func (a *App) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicPath(r.URL.Path) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if a.isSetupNeeded() {
-			// The setup wizard's system check needs to run - and be
-			// re-run - before any credentials exist, so it can't wait
-			// behind a session the user has no way to create yet.
-			if r.URL.Path == "/api/system-check" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if strings.HasPrefix(r.URL.Path, "/api/") {
-				http.Error(w, "setup required", http.StatusUnauthorized)
-				return
-			}
-			http.Redirect(w, r, "/setup", http.StatusFound)
-			return
-		}
-		if a.validSession(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.Error(w, "authentication required", http.StatusUnauthorized)
-			return
-		}
-		http.Redirect(w, r, "/login", http.StatusFound)
-	})
-}
-
-// createSession mints a new random session token, records its expiry, and
-// sets it as an HttpOnly cookie on the response.
-func (a *App) createSession(w http.ResponseWriter) {
-	var b [32]byte
-	_, _ = rand.Read(b[:])
-	token := hex.EncodeToString(b[:])
-	expiry := time.Now().Add(sessionTTL)
-	a.sessMu.Lock()
-	a.sessions[token] = expiry
-	a.sessMu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expiry,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func (a *App) validSession(r *http.Request) bool {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil || c.Value == "" {
-		return false
-	}
-	a.sessMu.Lock()
-	defer a.sessMu.Unlock()
-	expiry, ok := a.sessions[c.Value]
-	if !ok {
-		return false
-	}
-	if time.Now().After(expiry) {
-		delete(a.sessions, c.Value)
-		return false
-	}
-	return true
-}
-
-func (a *App) destroySession(r *http.Request) {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
-		return
-	}
-	a.sessMu.Lock()
-	delete(a.sessions, c.Value)
-	a.sessMu.Unlock()
-}
-
-// handleLoginPage serves the standalone login page, unauthenticated. Visitors
-// who haven't chosen credentials yet are sent to the setup wizard instead.
-func (a *App) handleLoginPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.isSetupNeeded() {
-		http.Redirect(w, r, "/setup", http.StatusFound)
-		return
-	}
-	serveStaticPage(w, r, "static/login.html")
-}
-
-// handleLogin verifies the configured credentials (env vars or a saved
-// bcrypt hash) and, on success, starts a session so the rest of the app is
-// reachable without re-authenticating on every request.
-func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.isSetupNeeded() {
-		http.Error(w, "setup required", http.StatusConflict)
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-	if !a.checkCredentials(req.Username, req.Password) {
-		http.Error(w, "invalid username or password", http.StatusUnauthorized)
-		return
-	}
-	a.createSession(w)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	a.destroySession(r)
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-// handleSetupPage serves the first-run setup wizard. Once credentials exist
-// it redirects to /login instead, so the wizard can't be replayed to hijack
-// an already-configured instance.
-func (a *App) handleSetupPage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.isSetupNeeded() {
-		http.Redirect(w, r, "/login", http.StatusFound)
-		return
-	}
-	serveStaticPage(w, r, "static/setup.html")
-}
-
-// handleSetup completes first-run setup by saving the chosen username and
-// password, then immediately starts a session. Only reachable once, before
-// any credentials exist - afterwards use handleAccount to change them.
-func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !a.isSetupNeeded() {
-		http.Error(w, "setup has already been completed", http.StatusConflict)
-		return
-	}
-	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
-		return
-	}
-	req.Username = strings.TrimSpace(req.Username)
-	if req.Username == "" || len(req.Password) < 8 {
-		http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
-		return
-	}
-	if err := a.setCredentials(req.Username, req.Password); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	a.event("info", fmt.Sprintf("Initial setup completed for user %q", req.Username))
-	a.createSession(w)
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-// handleAccount lets a signed-in user view or change their credentials from
-// the Settings tab, so nothing ever has to be edited by hand on disk or in
-// the environment - unless this deployment pins credentials via
-// AUTH_USERNAME/AUTH_PASSWORD, in which case they're read-only here.
-func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
-	managedByEnv := a.authPass != ""
-	switch r.Method {
-	case http.MethodGet:
-		username := a.authUser
-		if !managedByEnv {
-			a.credMu.RLock()
-			username = a.credUser
-			a.credMu.RUnlock()
-		}
-		writeJSON(w, map[string]any{"username": username, "managedByEnv": managedByEnv})
-	case http.MethodPost:
-		if managedByEnv {
-			http.Error(w, "credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD and can't be changed here", http.StatusConflict)
-			return
-		}
-		var req struct {
-			CurrentPassword string `json:"currentPassword"`
-			Username        string `json:"username"`
-			Password        string `json:"password"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid request", http.StatusBadRequest)
-			return
-		}
-		req.Username = strings.TrimSpace(req.Username)
-		if req.Username == "" || len(req.Password) < 8 {
-			http.Error(w, "a username and a password of at least 8 characters are required", http.StatusBadRequest)
-			return
-		}
-		a.credMu.RLock()
-		currentUser := a.credUser
-		a.credMu.RUnlock()
-		if !a.checkCredentials(currentUser, req.CurrentPassword) {
-			http.Error(w, "current password is incorrect", http.StatusUnauthorized)
-			return
-		}
-		if err := a.setCredentials(req.Username, req.Password); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		a.event("info", fmt.Sprintf("Credentials updated for user %q", req.Username))
-		writeJSON(w, map[string]string{"status": "ok"})
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-	}
 }
 
 func serveStaticPage(w http.ResponseWriter, r *http.Request, path string) {
@@ -800,6 +461,13 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/setup", a.handleSetupPage)
 	mux.HandleFunc("/api/setup", a.handleSetup)
 	mux.HandleFunc("/api/account", a.handleAccount)
+	mux.HandleFunc("/api/users", a.handleUsers)
+	mux.HandleFunc("/api/users/", a.handleUserItem)
+	mux.HandleFunc("/api/auth/discord/status", a.handleDiscordStatus)
+	mux.HandleFunc("/api/auth/discord/login/start", a.handleDiscordLoginStart)
+	mux.HandleFunc("/api/auth/discord/link/start", a.handleDiscordLinkStart)
+	mux.HandleFunc("/api/auth/discord/callback", a.handleDiscordCallback)
+	mux.HandleFunc("/api/auth/discord/unlink", a.handleDiscordUnlink)
 	mux.HandleFunc("/api/state", a.handleState)
 	mux.HandleFunc("/api/system-check", a.handleSystemCheck)
 	mux.HandleFunc("/api/config", a.handleConfig)
@@ -808,6 +476,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
 	mux.HandleFunc("/api/timetable", a.handleTimetable)
+	mux.HandleFunc("/api/timetable/import", a.handleTimetableImport)
 	mux.HandleFunc("/api/timetable/favorites", a.handleTimetableFavorites)
 	mux.HandleFunc("/api/timetable/lol-events", a.handleTimetableLolEvents)
 	mux.HandleFunc("/api/timetable/lol-import", a.handleTimetableLolImport)
@@ -819,6 +488,22 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/match-suggestions", a.handleRecordingMatchSuggestions)
 	mux.HandleFunc("/api/recordings/matchfile/export", a.handleRecordingsMatchfileExport)
 	mux.HandleFunc("/api/recordings/matchfile/import", a.handleRecordingsMatchfileImport)
+	mux.HandleFunc("/api/recordings/thumbnail", a.handleRecordingThumbnail)
+	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
+	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
+	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
+	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
+	mux.HandleFunc("/api/share/ping", a.handleSharePing)
+	mux.HandleFunc("/api/share/verify", a.handleShareVerify)
+	mux.HandleFunc("/api/share/config", a.handleShareConfig)
+	mux.HandleFunc("/api/share/preview", a.handleSharePreview)
+	mux.HandleFunc("/api/share/import", a.handleShareImport)
+	mux.HandleFunc("/api/share/jobs", a.handleShareJobs)
+	mux.HandleFunc("/api/share/jobs/", a.handleShareJobItem)
+	mux.HandleFunc("/api/share/get/", a.handleShareGet)
+	mux.HandleFunc("/api/shares", a.handleShares)
+	mux.HandleFunc("/api/shares/", a.handleShareItem)
 	mux.HandleFunc("/api/events", a.handleLibraryEvents)
 	mux.HandleFunc("/api/events/", a.handleLibraryEventItem)
 	mux.HandleFunc("/api/festivals", a.handleFestivals)
@@ -926,11 +611,23 @@ func (a *App) start(src Source) {
 const minViableRecordingBytes = 64 * 1024
 
 // retryState tracks the auto-reconnect backoff for a single source: how many
-// consecutive short-lived failures it has had in a row, and when it's next
-// allowed to try again. Kept in memory only - a restart just starts clean.
+// consecutive short-lived failures it has had in a row, when it's next
+// allowed to try again, and - separately - whether those retries are
+// currently "visible" (logged and shown as a dashboard status) or silent.
+// Kept in memory only - a restart just starts clean.
+//
+// A source that simply hasn't gone live yet retries silently forever (see
+// windowUntil): that's normal, expected background polling, not an error.
+// Only a source that *was* confirmed live and then stopped - whether that's
+// a genuine dropped connection or just the broadcaster ending their stream -
+// opens a visible reconnect window (see startReconnectWindow), so the user
+// sees retry activity right when it's actually relevant (right after a
+// stream they were recording went away) and it quietly stops being noisy if
+// nothing comes back within reconnectVisibilityWindow.
 type retryState struct {
 	attempts    int
 	nextAttempt time.Time
+	windowUntil time.Time // zero => not currently in a visible reconnect window
 }
 
 // minStableRecordingDuration is how long a recording has to run before it's
@@ -939,6 +636,14 @@ type retryState struct {
 // elapsed (bad URL, offline channel, network blip right at start) counts
 // toward the reconnect backoff instead of being retried every scheduler tick.
 const minStableRecordingDuration = 60 * time.Second
+
+// reconnectVisibilityWindow is how long retry attempts stay visible (logged
+// and shown as a "reconnecting" dashboard status) after a source that was
+// confirmed live stops. Past this, the scheduler keeps quietly trying in the
+// background - same as a source that simply hasn't gone live yet - since by
+// this point it's more likely the broadcaster is done than that they're
+// about to come back any second.
+const reconnectVisibilityWindow = 10 * time.Minute
 
 const (
 	reconnectBaseDelay = 5 * time.Second
@@ -965,7 +670,9 @@ func reconnectDelay(attempts int) time.Duration {
 }
 
 // retryBlocked reports whether a source is still within its reconnect
-// backoff window and, if so, when it'll next be eligible.
+// backoff window and, if so, when it'll next be eligible. Applies equally to
+// silent and visible retries - only the logging/dashboard status cares about
+// the difference, not whether the scheduler should currently try again.
 func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
@@ -976,35 +683,68 @@ func (a *App) retryBlocked(sourceID string) (time.Time, bool) {
 	return st.nextAttempt, true
 }
 
-// clearRetry resets a source's reconnect backoff, used both on a manual stop
-// (the user is in control, not a dropped connection) and after a stable run.
+// clearRetry resets a source's reconnect backoff entirely (including any
+// visible window), used on a manual stop/start - the user is in control,
+// not a dropped connection.
 func (a *App) clearRetry(sourceID string) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
 	delete(a.retry, sourceID)
 }
 
-// recordFailure bumps a source's reconnect attempt counter and schedules the
-// next allowed retry, returning the new attempt count and delay for logging.
-func (a *App) recordFailure(sourceID string) (int, time.Duration) {
+// startReconnectWindow opens a fresh, visible reconnect window for a source
+// whose recording just ended after running stably (see
+// minStableRecordingDuration) - it doesn't matter whether that end was a
+// genuine drop or just the broadcaster stopping normally, since either way
+// the scheduler is about to start silently retrying it and, unlike a source
+// that's never gone live, this one's worth surfacing for a little while.
+func (a *App) startReconnectWindow(sourceID string) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
+	a.retry[sourceID] = &retryState{windowUntil: time.Now().Add(reconnectVisibilityWindow)}
+}
+
+// recordFailure bumps a source's reconnect attempt counter and schedules the
+// next allowed retry. It only logs the attempt (and only counts as a visible
+// "reconnecting" status via reconnectStatus) while an active window from
+// startReconnectWindow is still open; once that window lapses, it logs one
+// final "giving up" notice and every attempt after that goes quiet, exactly
+// like a source that's never gone live at all.
+func (a *App) recordFailure(name, sourceID string) {
+	a.retryMu.Lock()
 	st := a.retry[sourceID]
 	if st == nil {
 		st = &retryState{}
 		a.retry[sourceID] = st
 	}
+	wasVisible := !st.windowUntil.IsZero()
+	stillVisible := wasVisible && time.Now().Before(st.windowUntil)
 	st.attempts++
 	delay := reconnectDelay(st.attempts)
 	st.nextAttempt = time.Now().Add(delay)
-	return st.attempts, delay
+	attempts := st.attempts
+	if wasVisible && !stillVisible {
+		st.windowUntil = time.Time{} // only report "giving up" once
+	}
+	a.retryMu.Unlock()
+
+	switch {
+	case stillVisible:
+		a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", name, delay.Round(time.Second), attempts))
+	case wasVisible:
+		a.event("info", fmt.Sprintf("[%s] no reconnect within %s - will keep checking quietly in the background", name, reconnectVisibilityWindow))
+	}
 }
 
+// reconnectStatus reports a source's live reconnect attempt count and next
+// retry time, but only while it's within a visible window (see
+// startReconnectWindow) - a source silently waiting to go live for the first
+// time never reports as "reconnecting" on the dashboard.
 func (a *App) reconnectStatus(sourceID string) (attempts int, nextAttempt time.Time, ok bool) {
 	a.retryMu.Lock()
 	defer a.retryMu.Unlock()
 	st := a.retry[sourceID]
-	if st == nil {
+	if st == nil || st.windowUntil.IsZero() || !time.Now().Before(st.windowUntil) {
 		return 0, time.Time{}, false
 	}
 	return st.attempts, st.nextAttempt, true
@@ -1039,6 +779,11 @@ func (a *App) runRecording(rec *recording) {
 		}
 		a.writeNFO(rec)
 		a.backup(rec)
+		if rel, relErr := filepath.Rel(a.snapshotConfig().Settings.FinishedDir, rec.finalPath); relErr == nil {
+			audioOnly := rec.source.AudioOnly
+			finalPath := rec.finalPath
+			go a.generateThumbnail(finalPath, filepath.ToSlash(rel), audioOnly)
+		}
 		if failed {
 			// Real content was captured before the error hit (e.g. a network
 			// drop partway through a long recording) - worth keeping, but
@@ -1063,16 +808,17 @@ func (a *App) runRecording(rec *recording) {
 	// Auto-reconnect bookkeeping: a manual stop (or app shutdown, which also
 	// goes through stop()) is the user/operator in control, not a dropped
 	// connection, so it's exempt from backoff. Otherwise, a recording that
-	// ran long enough to be considered stable clears any prior backoff;
-	// anything shorter (or with no output at all) counts as a failed
-	// connection attempt and schedules the next retry with backoff instead
-	// of letting the scheduler hammer a dead stream every tick.
+	// ran long enough to be considered stable opens a visible reconnect
+	// window - the next several retry attempts (if any) will be logged and
+	// shown on the dashboard, since the source was just confirmed live and
+	// might come right back. Anything shorter (or with no output at all)
+	// schedules the next retry with backoff same as always, but stays silent
+	// unless it's within an already-open window (recordFailure decides).
 	if !rec.manualStop.Load() {
 		if hasOutput && time.Since(rec.startedAt) >= minStableRecordingDuration {
-			a.clearRetry(rec.source.ID)
+			a.startReconnectWindow(rec.source.ID)
 		} else {
-			attempts, delay := a.recordFailure(rec.source.ID)
-			a.event("warn", fmt.Sprintf("[%s] stream appears down - will retry in %s (attempt %d)", rec.source.Name, delay.Round(time.Second), attempts))
+			a.recordFailure(rec.source.Name, rec.source.ID)
 		}
 	}
 
@@ -1338,12 +1084,22 @@ func (a *App) stopAll() {
 }
 
 func (a *App) handleState(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, a.state())
+	s := a.state()
+	role := roleFromRequest(r)
+	s.Role = role
+	if role != RoleAdmin {
+		redactSecrets(&s.Config)
+	}
+	writeJSON(w, s)
 }
 
 func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		writeJSON(w, a.snapshotConfig())
+		cfg := a.snapshotConfig()
+		if roleFromRequest(r) != RoleAdmin {
+			redactSecrets(&cfg)
+		}
+		writeJSON(w, cfg)
 		return
 	}
 	if r.Method != http.MethodPut {
@@ -1825,8 +1581,8 @@ var filenameTimestampRe = regexp.MustCompile(`(\d{4})-?(\d{2})-?(\d{2})[ _.T-]?(
 
 // dateDMYRe matches a day-month-year date separated by underscores, dashes,
 // or dots (e.g. "25_06_2026") - the convention many non-US recording tools
-// (and this app's own suggested Defqon.1-style filenames) use, as opposed to
-// the YYYY-first convention filenameTimestampRe expects.
+// (and this app's own suggested festival-recording filenames) use, as
+// opposed to the YYYY-first convention filenameTimestampRe expects.
 var dateDMYRe = regexp.MustCompile(`(?:^|[_\-. ])(\d{1,2})[_\-.](\d{1,2})[_\-.](\d{4})(?:$|[_\-. ])`)
 
 // weekdayAbbrevs maps the first three letters of a weekday name (case
@@ -1978,7 +1734,7 @@ func normalizeArtistWords(s string) []string {
 // artistSimilarity gives a rough 0..1 score for how closely a guessed
 // artist name (parsed from a filename) matches an archived timetable set's
 // name, tolerant of case, punctuation, and extra words on either side (e.g.
-// "DJ Isaac" vs "DJ Isaac B2B Adaro" still scores 1.0, not diluted by the
+// "DJ Vertex" vs "DJ Vertex B2B Fenrix" still scores 1.0, not diluted by the
 // combo's extra name).
 func artistSimilarity(guessed, setName string) float64 {
 	g := normalizeArtistWords(guessed)
@@ -2490,7 +2246,7 @@ func (a *App) handleFestivalItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleOrganisations lists or creates Organisations - the parent grouping
-// above Festivals (e.g. the promoter "Q-dance" owns "Defqon.1", "Rebirth").
+// above Festivals (e.g. a promoter that owns several festival franchises).
 func (a *App) handleOrganisations(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, a.snapshotConfig().Organisations)
@@ -2588,9 +2344,9 @@ func (a *App) handleOrganisationItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLibraryEventTimetable serves and imports the archived timetable for
-// one LibraryEvent. POST accepts the same raw JSON shape as dq-timetable.json
-// (an array of stage objects with [year,month,day,hour,minute,name] set
-// tuples) so a previous year's schedule can be pasted in directly.
+// one LibraryEvent. POST accepts a compact per-stage JSON shape (an array of
+// stage objects with [year,month,day,hour,minute,name] set tuples) so a
+// previous year's schedule can be pasted in directly.
 func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request, id string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -2608,7 +2364,7 @@ func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		tt, err := parseDQTimetableJSON(body)
+		tt, err := parseStageTimetableJSON(body)
 		if err != nil {
 			http.Error(w, "could not parse timetable JSON: "+err.Error(), http.StatusBadRequest)
 			return
@@ -2732,6 +2488,79 @@ func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	_ = a.persist(cfg)
 	writeJSON(w, tt)
+}
+
+// parseAnyTimetableJSON accepts either timetable shape this app can produce or
+// consume: the RFC3339 StageSchedule array the app itself emits, or the
+// compact [year,month,day,hour,minute,name?] per-stage tuple format (the
+// shape the downloadable community timetables ship in). It tries the RFC3339
+// shape first - a compact file, whose sets are arrays not objects, fails that
+// decode and falls through to the compact parser.
+func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
+	var direct []StageSchedule
+	if err := json.Unmarshal(data, &direct); err == nil {
+		total := 0
+		for _, s := range direct {
+			total += len(s.Sets)
+		}
+		if total > 0 {
+			return direct, nil
+		}
+	}
+	return parseStageTimetableJSON(data)
+}
+
+// handleTimetableImport replaces the whole timetable from an uploaded file,
+// accepting either supported JSON shape (see parseAnyTimetableJSON) so a
+// downloaded community timetable can be applied in one click instead of
+// hand-pasting it into the raw JSON editor.
+func (a *App) handleTimetableImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	tt, err := parseAnyTimetableJSON(body)
+	if err != nil {
+		http.Error(w, "could not parse that timetable file: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(tt) == 0 {
+		http.Error(w, "no stages or sets found in that file", http.StatusBadRequest)
+		return
+	}
+	assignScheduleIDs(tt)
+	a.mu.Lock()
+	// Preserve any per-stage stream URLs already configured, matched by stage
+	// name, since community timetables usually don't carry playable URLs.
+	existingURL := map[string]string{}
+	for _, s := range a.cfg.Timetable {
+		if s.URL != "" {
+			existingURL[strings.ToLower(s.Stage)] = s.URL
+		}
+	}
+	for i := range tt {
+		if tt[i].URL == "" {
+			if u, ok := existingURL[strings.ToLower(tt[i].Stage)]; ok {
+				tt[i].URL = u
+			}
+		}
+	}
+	a.cfg.Timetable = tt
+	cfg := a.cfg
+	a.mu.Unlock()
+	_ = a.persist(cfg)
+	stageCount := len(tt)
+	setCount := 0
+	for _, s := range tt {
+		setCount += len(s.Sets)
+	}
+	a.event("info", fmt.Sprintf("Imported timetable from file: %d stage(s), %d set(s)", stageCount, setCount))
+	writeJSON(w, map[string]any{"timetable": tt, "stages": stageCount, "sets": setCount})
 }
 
 // handleTimetableFavorites replaces the list of favorited/starred set IDs
@@ -3032,10 +2861,23 @@ func parseFlexibleDate(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized date %q", s)
 }
 
-// combineDateTime combines a day's date with an "HH:MM" wall-clock time in
-// the event's timezone. Hours >= 24 (a common festival-timetable convention
-// for after-midnight sets) roll over into the next calendar day automatically
-// via time.Date's normalization.
+// festivalDayRolloverHour is the wall-clock hour before which a set listed
+// under a given festival "day" is treated as belonging to the *next*
+// calendar day. Festival timetables group a program that runs from the
+// afternoon/evening into the small hours of the following morning all under
+// one day label, so a set listed under "Thursday" at 01:00 is really Friday
+// 01:00. There's a wide, reliable gap between when an after-party ends (~6am)
+// and when the next day's program opens (late morning at the earliest), so
+// any time from midnight up to this hour is unambiguously "after midnight,
+// belongs to the next day". 8 is comfortably inside that gap.
+const festivalDayRolloverHour = 8
+
+// combineDateTime combines a festival day's date with an "HH:MM" wall-clock
+// time in the event's timezone, rolling early-morning times over to the next
+// calendar day per the festival-day convention (see festivalDayRolloverHour).
+// An "HH:MM" with hour >= 24 (another common after-midnight convention, e.g.
+// "25:00") is normalized by time.Date the same way. A value that's already a
+// full RFC3339 timestamp is absolute and used as-is with no rollover.
 func combineDateTime(base time.Time, hm string, loc *time.Location) (time.Time, bool) {
 	hm = strings.TrimSpace(hm)
 	if hm == "" {
@@ -3053,7 +2895,11 @@ func combineDateTime(base time.Time, hm string, loc *time.Location) (time.Time, 
 	if err1 != nil || err2 != nil {
 		return time.Time{}, false
 	}
-	return time.Date(base.Year(), base.Month(), base.Day(), h, m, 0, 0, loc), true
+	dayOffset := 0
+	if h < festivalDayRolloverHour {
+		dayOffset = 1
+	}
+	return time.Date(base.Year(), base.Month(), base.Day()+dayOffset, h, m, 0, 0, loc), true
 }
 
 func (a *App) handleRecordAction(w http.ResponseWriter, r *http.Request) {
@@ -3337,7 +3183,7 @@ Source: %s
 URL: %s
 Started: %s
 Finished: %s
-Recorder: Defqon Stream Recorder %s
+Recorder: MutiRec %s
 
 %s
 `, rec.source.Name, rec.source.Type, rec.source.URL, rec.startedAt.Format(time.RFC3339), time.Now().Format(time.RFC3339), version, rec.source.ExtraNFO))
@@ -3440,10 +3286,6 @@ func loadConfig(path string) (AppConfig, error) {
 		return cfg, nil
 	}
 	cfg := defaultConfig()
-	if tt := loadDQTimetable("dq-timetable.json"); len(tt) > 0 {
-		cfg.Timetable = tt
-		cfg.Sources = sourcesFromTimetable(tt)
-	}
 	normalizeConfig(&cfg)
 	data, _ := json.MarshalIndent(cfg, "", "  ")
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
@@ -3466,18 +3308,8 @@ func defaultConfig() AppConfig {
 			AllowLiveProxy:          true,
 			LiveRewindWindowSeconds: 1800,
 		},
-		UI: UISettings{AppName: "Defqon Stream Recorder", Theme: "midnight", Accent: "red"},
-		Sources: []Source{{
-			ID:        "red",
-			Name:      "RED",
-			Type:      "youtube",
-			URL:       "https://www.youtube.com/@qdance/live",
-			Enabled:   true,
-			Record:    false,
-			Quality:   "best",
-			Container: "mkv",
-			Color:     "#ef4444",
-		}},
+		UI:      UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
+		Sources: []Source{},
 	}
 }
 
@@ -3507,7 +3339,7 @@ func normalizeConfig(cfg *AppConfig) {
 		cfg.Settings.LiveRewindWindowSeconds = 1800
 	}
 	if cfg.UI.AppName == "" {
-		cfg.UI.AppName = "Defqon Stream Recorder"
+		cfg.UI.AppName = "MutiRec"
 	}
 	for i := range cfg.Sources {
 		if cfg.Sources[i].ID == "" {
@@ -3588,28 +3420,21 @@ type rawStage struct {
 	Sets  [][]any `json:"sets"`
 }
 
-func loadDQTimetable(path string) []StageSchedule {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	tt, err := parseDQTimetableJSON(data)
-	if err != nil {
-		return nil
-	}
-	return tt
-}
-
-// parseDQTimetableJSON parses the raw per-stage timetable JSON shape used by
-// dq-timetable.json (and, by extension, any archived timetable pasted into a
-// LibraryEvent): an array of stage objects whose "sets" are
-// [year, month, day, hour, minute, name?] tuples. A row with no name marks
-// only the end time of the previous set.
-func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
+// parseStageTimetableJSON parses a compact per-stage timetable JSON shape -
+// an array of stage objects whose "sets" are
+// [year, month, day, hour, minute, name?] tuples - used when pasting an
+// archived timetable into a LibraryEvent. A row with no name marks only the
+// end time of the previous set.
+func parseStageTimetableJSON(data []byte) ([]StageSchedule, error) {
 	var raw []rawStage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
+	// Compact timetables carry explicit calendar days per row, but still use
+	// the after-midnight hour convention (e.g. an hour of 25, or a 1am set
+	// authored on the previous day's row); time.Date normalizes both into a
+	// valid instant rather than emitting an out-of-range "T25:00:00" string.
+	cest := time.FixedZone("CEST", 2*60*60)
 	var out []StageSchedule
 	for _, stage := range raw {
 		var sets []ScheduleSet
@@ -3618,7 +3443,7 @@ func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
 			if len(row) < 5 {
 				continue
 			}
-			start := fmt.Sprintf("%04d-%02d-%02dT%02d:%02d:00+02:00", toInt(row[0]), toInt(row[1]), toInt(row[2]), toInt(row[3]), toInt(row[4]))
+			start := time.Date(toInt(row[0]), time.Month(toInt(row[1])), toInt(row[2]), toInt(row[3]), toInt(row[4]), 0, 0, cest).Format(time.RFC3339)
 			name := ""
 			if len(row) > 5 {
 				var parts []string
@@ -3646,25 +3471,6 @@ func parseDQTimetableJSON(data []byte) ([]StageSchedule, error) {
 		out = append(out, StageSchedule{Stage: stage.Stage, URL: stage.URL, Sets: sets})
 	}
 	return out, nil
-}
-
-func sourcesFromTimetable(tt []StageSchedule) []Source {
-	colors := map[string]string{"RED": "#ef4444", "BLUE": "#3b82f6", "BLACK": "#a3a3a3", "UV": "#a855f7", "MAGENTA": "#d946ef", "YELLOW": "#eab308", "ORANGE": "#f97316", "GREEN": "#22c55e"}
-	var srcs []Source
-	for _, st := range tt {
-		if st.URL == "" {
-			continue
-		}
-		typ := "http"
-		if strings.Contains(st.URL, "youtube") || strings.Contains(st.URL, "youtu.be") {
-			typ = "youtube"
-		}
-		if strings.Contains(st.URL, "twitch.tv") || strings.Contains(st.URL, "mixlr.com") {
-			typ = "twitch"
-		}
-		srcs = append(srcs, Source{ID: strings.ToLower(safeName(st.Stage)), Name: st.Stage, Type: typ, URL: st.URL, Enabled: true, Record: false, Quality: "best", Container: "mkv", Color: colors[st.Stage]})
-	}
-	return srcs
 }
 
 func scheduleFor(tt []StageSchedule, stage string, now time.Time) (*ScheduleSet, *ScheduleSet) {

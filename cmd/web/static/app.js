@@ -45,6 +45,58 @@ async function api(path, opts) {
 
 function $(id) { return document.getElementById(id); }
 
+// Shows/hides the preview image and remove button for one image-upload-field
+// based on the current value of its hidden input - called whenever an editor
+// modal is (re)populated so re-opening it reflects what's actually saved.
+function syncImageUploadPreview(fieldId) {
+  const url = $(fieldId).value;
+  const preview = $(`${fieldId}-preview`);
+  const removeBtn = document.querySelector(`[data-remove-btn="${fieldId}"]`);
+  if (url) {
+    preview.src = url;
+    preview.classList.remove('hidden');
+    if (removeBtn) removeBtn.classList.remove('hidden');
+  } else {
+    preview.classList.add('hidden');
+    preview.removeAttribute('src');
+    if (removeBtn) removeBtn.classList.add('hidden');
+  }
+}
+
+// Wires every "image URL -> file upload" field on the page (app logo,
+// Organisation/Festival logo, Event cover): clicking Upload opens a file
+// picker, the chosen file is POSTed to /api/uploads/image, and the returned
+// content-addressed URL is stashed in the field's hidden input. Bound once at
+// load - the fields themselves are static parts of the page, not re-rendered.
+function setupImageUploadFields() {
+  document.querySelectorAll('[data-image-field]').forEach(container => {
+    const fieldId = container.dataset.imageField;
+    const fileInput = container.querySelector(`[data-file-input="${fieldId}"]`);
+    const uploadBtn = container.querySelector(`[data-upload-btn="${fieldId}"]`);
+    const removeBtn = container.querySelector(`[data-remove-btn="${fieldId}"]`);
+    uploadBtn.onclick = () => fileInput.click();
+    removeBtn.onclick = () => {
+      $(fieldId).value = '';
+      syncImageUploadPreview(fieldId);
+    };
+    fileInput.onchange = async () => {
+      const file = fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      const form = new FormData();
+      form.append('image', file);
+      let res;
+      try {
+        res = await api('/api/uploads/image', { method: 'POST', body: form });
+      } catch {
+        return;
+      }
+      $(fieldId).value = res.url;
+      syncImageUploadPreview(fieldId);
+    };
+  });
+}
+
 function toast(message, level) {
   const el = document.createElement('div');
   el.className = `toast toast-${level || 'info'}`;
@@ -66,15 +118,46 @@ async function refresh() {
   // UI silently - log it and keep whatever else already rendered visible.
   try {
     applyTheme();
+    applyRoleVisibility();
     renderVersion();
     renderDashboard();
     renderEditors();
     updateWatchIfActive();
     maybeStartOnboarding();
+    maybeShowDiscordLinkResult();
   } catch (err) {
     console.error('Render failed:', err);
     toast(`UI failed to render: ${err.message}`, 'error');
   }
+}
+
+// Hides admin-only controls (source/settings management, the Users list,
+// entire nav tabs that are all-mutation) for a viewer role. This is UX only
+// - the real boundary is server-side (rbacAllowed in auth.go); a viewer who
+// forced one of these open would just get a 403 from the API.
+function applyRoleVisibility() {
+  const isAdmin = state.role === 'admin';
+  document.querySelectorAll('[data-admin-only]').forEach(el => el.classList.toggle('hidden', !isAdmin));
+  ['sources', 'diagnostics', 'events-tab'].forEach(id => {
+    const btn = document.querySelector(`.nav[data-view="${id}"]`);
+    if (btn) btn.classList.toggle('hidden', !isAdmin);
+  });
+}
+
+// The Discord OAuth callback redirects back here with ?discordLinked=1 or
+// ?discordError=... (see handleDiscordCallback) - surface it once as a toast
+// and strip the query param so a later manual refresh doesn't repeat it.
+let discordLinkResultHandled = false;
+function maybeShowDiscordLinkResult() {
+  if (discordLinkResultHandled) return;
+  discordLinkResultHandled = true;
+  const params = new URLSearchParams(location.search);
+  const linked = params.get('discordLinked');
+  const err = params.get('discordError');
+  if (!linked && !err) return;
+  history.replaceState(null, '', location.pathname);
+  if (linked) toast('Discord account linked', 'info');
+  else toast(`Discord link failed (${err})`, 'error');
 }
 
 // The first-run setup wizard (setup.html) redirects here with ?onboarding=1
@@ -95,14 +178,14 @@ function maybeStartOnboarding() {
 function renderVersion() {
   const v = state.version || 'dev';
   $('version-footer').textContent = v;
-  $('version-footer').title = `Defqon Stream Recorder ${v}`;
+  $('version-footer').title = `MutiRec ${v}`;
   const helpVersion = $('help-version');
   if (helpVersion) helpVersion.textContent = v;
 }
 
 function applyTheme() {
   document.body.className = `min-h-screen text-zinc-100 theme-${config.ui.theme || 'midnight'} bg-zinc-950`;
-  $('app-name').textContent = config.ui.appName || 'Defqon Stream Recorder';
+  $('app-name').textContent = config.ui.appName || 'MutiRec';
   $('custom-css').textContent = config.ui.customCss || '';
   if (config.ui.logoUrl) {
     $('logo').src = config.ui.logoUrl;
@@ -159,9 +242,19 @@ function sourceCardHtml(src) {
         ${src.orphaned ? '' : `<button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>`}
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
         ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
-        ${src.mediaPath ? `<a class="btn" href="/media/${encodeMediaPath(src.mediaPath)}" target="_blank" rel="noopener">Open</a>` : ''}
+        ${src.mediaPath ? `<button class="btn" onclick="openSourceLatest('${src.id}')">Open latest</button>` : ''}
       </div>
     </article>`;
+}
+
+// openSourceLatest plays a source's most recent finished file through the
+// same in-app Video.js recordings player as everything else, rather than
+// dumping the raw file into a new browser tab (which used the browser's
+// native player and left the app). Looks the path up from live state at
+// click time so no file path has to be escaped into the markup.
+function openSourceLatest(id) {
+  const src = (state.sources || []).find(s => s.id === id);
+  if (src && src.mediaPath) openRecordingPlayer(src.mediaPath, src.name);
 }
 
 function toggleSourceGroup(id) {
@@ -177,7 +270,7 @@ function renderDashboard() {
   $('warnings').innerHTML = warnings.map(w => `<div class="rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">${escapeHtml(w)}</div>`).join('');
 
   if (!sources.length) {
-    $('source-grid').innerHTML = '<p class="text-sm text-zinc-400">No sources yet — add one from the Sources tab.</p>';
+    $('source-grid').innerHTML = '<div class="empty-state md:col-span-2"><div class="empty-icon">📡</div><div>No sources yet</div><button class="btn primary" onclick="goToView(\'sources\')">Add your first source</button></div>';
   } else {
     const festivals = config.festivals || [];
     const groups = new Map(); // festivalId ("" = ungrouped) -> { name, color, sources }
@@ -418,6 +511,8 @@ function renderEditors() {
     $('timetable-json').value = JSON.stringify(config.timetable, null, 2);
     fillSettings();
     loadAccount();
+    loadUsers();
+    loadShareConfig();
     renderVisualTimetable();
     renderLinkedBadge();
     loadLolEvents();
@@ -543,7 +638,7 @@ function drawSourceEditor() {
           <label>Color<input class="input src-color" value="${escapeAttr(s.color || '')}"></label>
           <label>NFO note<input class="input src-nfo" value="${escapeAttr(s.extraNfo || '')}"></label>
           <label title="Matches this source to a stage name in the Timetable tab for Now/Next lookup, if it doesn't match this source's own name.">Timetable stage<input class="input src-ttstage" list="timetable-stage-names" value="${escapeAttr(s.timetableStage || '')}" placeholder="defaults to source name"></label>
-          <label title="Groups this source under a recurring event (e.g. Defqon.1) for the Watch tab's source picker and Dashboard groups.">Event
+          <label title="Groups this source under a recurring event (e.g. a festival franchise) for the Watch tab's source picker and Dashboard groups.">Event
             <div class="custom-dropdown">
               <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(festivalName(s.festivalId) || 'None')}</span><span class="ml-auto">▼</span></button>
               <div class="dropdown-menu hidden">
@@ -729,6 +824,7 @@ function fillSettings() {
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
+  syncImageUploadPreview('uiLogoUrl');
   $('uiCustomCss').value = ui.customCss || '';
   $('discordWebhook').value = s.notifications.discordWebhook || '';
   $('smtpEnabled').checked = !!s.notifications.smtp.enabled;
@@ -738,6 +834,11 @@ function fillSettings() {
   $('backupAfterComplete').checked = !!s.backup.afterComplete;
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
+  const d = s.discordOAuth || {};
+  $('discordOAuthEnabled').checked = !!d.enabled;
+  $('discordOAuthClientId').value = d.clientId || '';
+  $('discordOAuthClientSecret').value = d.clientSecret || '';
+  $('discordOAuthRedirectUrl').value = d.redirectUrl || '';
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -754,6 +855,7 @@ function readSettings() {
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
   s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
+  s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
 }
 
 async function saveConfig() {
@@ -772,11 +874,26 @@ async function loadAccount() {
   }
   $('acct-username').value = acct.username || '';
   if (acct.managedByEnv) {
-    $('account-note').textContent = `Signed in as "${acct.username}". Credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD environment variables and can't be changed here.`;
+    $('account-note').textContent = `Signed in as "${acct.username}" (${acct.role}). Credentials for this deployment are set via AUTH_USERNAME/AUTH_PASSWORD environment variables and can't be changed here.`;
     $('account-form').classList.add('hidden');
   } else {
-    $('account-note').textContent = `Signed in as "${acct.username}".`;
+    $('account-note').textContent = `Signed in as "${acct.username}" (${acct.role}).`;
     $('account-form').classList.remove('hidden');
+  }
+
+  let discordEnabled = false;
+  try {
+    discordEnabled = (await api('/api/auth/discord/status')).enabled;
+  } catch { /* leave hidden */ }
+
+  if (acct.discordLinked) {
+    $('acct-discord-status').textContent = `Linked to Discord as "${acct.discordName}".`;
+    $('acct-discord-link').classList.add('hidden');
+    $('acct-discord-unlink').classList.toggle('hidden', acct.managedByEnv);
+  } else {
+    $('acct-discord-status').textContent = discordEnabled ? 'Not linked.' : 'Discord login is not configured on this instance.';
+    $('acct-discord-unlink').classList.add('hidden');
+    $('acct-discord-link').classList.toggle('hidden', acct.managedByEnv || !discordEnabled);
   }
 }
 
@@ -791,6 +908,124 @@ $('acct-save').onclick = async () => {
     $('acct-current').value = '';
     $('acct-password').value = '';
   } catch { /* toast already shown */ }
+};
+
+$('acct-discord-link').onclick = () => { window.location.href = '/api/auth/discord/link/start'; };
+$('acct-discord-unlink').onclick = async () => {
+  try {
+    await api('/api/auth/discord/unlink', { method: 'POST' });
+    toast('Discord unlinked', 'info');
+    await loadAccount();
+  } catch { /* toast already shown */ }
+};
+
+// --- Users tab (admin only - loadUsers is a no-op for other roles) ---
+
+let usersList = [];
+
+async function loadUsers() {
+  if (state.role !== 'admin') return;
+  try {
+    usersList = await api('/api/users');
+  } catch {
+    return;
+  }
+  renderUsersList();
+}
+
+function renderUsersList() {
+  if (!usersList.length) {
+    $('users-list').innerHTML = '<p class="text-sm text-zinc-400">No users yet.</p>';
+    return;
+  }
+  $('users-list').innerHTML = usersList.map(u => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(u.username)} <span class="pill">${escapeHtml(u.role)}</span></div>
+        ${u.discordName ? `<div class="text-xs text-zinc-500">Discord: ${escapeHtml(u.discordName)}</div>` : ''}
+      </div>
+      <div class="flex flex-shrink-0 items-center gap-2">
+        <button type="button" class="btn" onclick="toggleUserRole('${escapeAttr(u.id)}', '${u.role === 'admin' ? 'viewer' : 'admin'}')">${u.role === 'admin' ? 'Make viewer' : 'Make admin'}</button>
+        <button type="button" class="btn" style="color:#fda4af" onclick="deleteUserAccount('${escapeAttr(u.id)}', '${escapeAttr(u.username)}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+async function toggleUserRole(id, role) {
+  try {
+    await api(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role }) });
+    toast('Role updated', 'info');
+    await loadUsers();
+  } catch { /* toast already shown */ }
+}
+
+async function deleteUserAccount(id, username) {
+  if (!confirm(`Delete user "${username}"? This can't be undone.`)) return;
+  try {
+    await api(`/api/users/${id}`, { method: 'DELETE' });
+    toast(`Deleted "${username}"`, 'info');
+    await loadUsers();
+  } catch { /* toast already shown */ }
+}
+
+$('user-add').onclick = async () => {
+  const username = $('user-new-username').value.trim();
+  const password = $('user-new-password').value;
+  const role = $('user-new-admin').checked ? 'admin' : 'viewer';
+  if (!username || password.length < 8) { toast('A username and a password of at least 8 characters are required', 'error'); return; }
+  try {
+    await api('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, role }) });
+    toast(`Added user "${username}"`, 'info');
+    $('user-new-username').value = '';
+    $('user-new-password').value = '';
+    $('user-new-admin').checked = false;
+    await loadUsers();
+  } catch { /* toast already shown */ }
+};
+
+// --- Peer sharing setup (Settings) ---
+
+async function loadShareConfig() {
+  if (state.role !== 'admin') return;
+  let cfg;
+  try { cfg = await api('/api/share/config'); } catch { return; }
+  $('share-public-url').value = cfg.publicUrl || '';
+  const pill = $('share-status-pill');
+  if (cfg.enabled) {
+    pill.textContent = cfg.public ? 'on' : 'on (LAN?)';
+    pill.className = 'pill status-recording';
+    $('share-disable').classList.remove('hidden');
+  } else {
+    pill.textContent = 'off';
+    pill.className = 'pill status-idle';
+    $('share-disable').classList.add('hidden');
+  }
+  if (cfg.enabled && !cfg.public) {
+    $('share-verify-status').textContent = 'Verified, but the URL looks like a LAN/loopback address — other instances on the internet may not reach it.';
+  } else if (cfg.verifiedAt) {
+    $('share-verify-status').textContent = `Verified ${new Date(cfg.verifiedAt).toLocaleString()}.`;
+  } else {
+    $('share-verify-status').textContent = '';
+  }
+}
+
+$('share-verify').onclick = async () => {
+  const publicUrl = $('share-public-url').value.trim();
+  if (!publicUrl) { toast('Enter the public URL first', 'error'); return; }
+  $('share-verify-status').textContent = 'Checking reachability…';
+  let result;
+  try {
+    result = await api('/api/share/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ publicUrl }) });
+  } catch { $('share-verify-status').textContent = ''; return; }
+  if (!result.ok) { $('share-verify-status').textContent = result.error || 'Verification failed.'; toast('Could not verify that URL', 'error'); return; }
+  toast(result.public ? 'Public URL verified — sharing enabled' : 'Verified, but the URL looks LAN-only', 'info');
+  await loadShareConfig();
+};
+
+$('share-disable').onclick = async () => {
+  try { await api('/api/share/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) }); } catch { return; }
+  toast('Sharing disabled', 'info');
+  await loadShareConfig();
 };
 
 async function start(id) { try { await api(`/api/record/${id}`, { method: 'POST' }); } catch { return; } await refresh(); }
@@ -1040,6 +1275,13 @@ function switchToView(viewId) {
   if (navBtn) navBtn.classList.add('active');
   const section = $(viewId);
   if (section) section.classList.remove('hidden');
+}
+
+// goToView clicks a nav tab by name (runs its full open/refresh handler),
+// used by in-content shortcuts like empty-state call-to-action buttons.
+function goToView(viewId) {
+  const btn = document.querySelector(`.nav[data-view="${viewId}"]`);
+  if (btn) btn.click();
 }
 
 document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
@@ -1494,6 +1736,30 @@ async function importFromLol(slug) {
     $('tt-lol-status').textContent = 'Import failed.';
   }
 }
+// Import a timetable from a local JSON file (app export format or the compact
+// community format - the server accepts either). Paired with the timetables
+// attached to each GitHub release.
+$('tt-file-import').onclick = () => $('tt-file-input').click();
+$('tt-file-input').addEventListener('change', async () => {
+  const file = $('tt-file-input').files[0];
+  $('tt-file-input').value = '';
+  if (!file) return;
+  if (config.timetable && config.timetable.length && !confirm(`Replace your current timetable with "${file.name}"?`)) return;
+  $('tt-file-status').textContent = `Importing "${file.name}"…`;
+  let text;
+  try { text = await file.text(); } catch { $('tt-file-status').textContent = 'Could not read that file.'; return; }
+  let result;
+  try {
+    result = await api('/api/timetable/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+  } catch {
+    $('tt-file-status').textContent = 'Import failed — is it a valid timetable JSON file?';
+    return;
+  }
+  $('tt-file-status').textContent = `Imported ${result.stages} stage(s), ${result.sets} set(s).`;
+  toast(`Imported ${result.stages} stage(s), ${result.sets} set(s) from "${file.name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+});
 $('tt-lol-import').onclick = () => importFromLol($('tt-lol-event').value);
 $('tt-lol-resync').onclick = () => { if (config.timetableSource) importFromLol(config.timetableSource.eventSlug); };
 $('tt-lol-unlink').onclick = async () => {
@@ -1557,6 +1823,8 @@ async function openMatchView() {
   $('lib-home').classList.add('hidden');
   $('lib-event-view').classList.add('hidden');
   $('lib-search-results').classList.add('hidden');
+  $('lib-share-view').classList.add('hidden');
+  $('lib-receive-view').classList.add('hidden');
   $('lib-back').classList.add('hidden');
   $('lib-match-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -1624,6 +1892,247 @@ $('lib-matchfile-input').addEventListener('change', async () => {
   toast(result.matched ? `Matched and organized ${result.matched} recording${result.matched === 1 ? '' : 's'}` : 'No local recordings matched this file', result.matched ? 'info' : 'warn');
   await reloadLibraryData();
 });
+
+// --- Peer-to-peer sharing (sender side): pick sets, generate a share code ---
+
+let shareSelected = new Set(); // recording paths chosen to share
+
+function openShareView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-share-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  shareSelected = new Set();
+  $('lib-share-code-box').classList.add('hidden');
+  $('lib-share-name').value = '';
+  $('lib-share-filter').value = '';
+  const s = (config.settings && config.settings.sharing) || {};
+  const warn = $('lib-share-setup-warn');
+  if (!s.enabled || !s.publicUrl) {
+    warn.textContent = 'Set up and verify a public URL in Settings → Peer Sharing before a share code will work.';
+    warn.classList.remove('hidden');
+  } else {
+    warn.classList.add('hidden');
+  }
+  renderShareList();
+  renderExistingShares();
+}
+function closeShareView() { $('lib-share-view').classList.add('hidden'); reloadLibraryData(); }
+
+function updateShareSelCount() { $('lib-share-selcount').textContent = `${shareSelected.size} selected`; }
+
+function shareFilteredRecordings() {
+  const q = $('lib-share-filter').value.trim().toLowerCase();
+  let list = recordings || [];
+  if (q) list = list.filter(r => `${r.name} ${r.channel || ''} ${r.artist || ''}`.toLowerCase().includes(q));
+  return list;
+}
+
+function renderShareList() {
+  const list = shareFilteredRecordings();
+  if (!list.length) {
+    $('lib-share-list').innerHTML = '<p class="text-zinc-400">No recordings to share yet.</p>';
+    updateShareSelCount();
+    return;
+  }
+  // Group by channel for "select whole stage".
+  const groups = new Map();
+  list.forEach(r => { const ch = r.channel || 'Unsorted'; if (!groups.has(ch)) groups.set(ch, []); groups.get(ch).push(r); });
+  $('lib-share-list').innerHTML = [...groups.entries()].map(([ch, items]) => `
+    <div class="source-group open">
+      <div class="source-group-head">
+        <label class="flex items-center gap-2 font-semibold"><input type="checkbox" class="share-group-check" data-ch="${escapeAttr(ch)}"> ${escapeHtml(ch)}</label>
+        <span class="pill">${items.length}</span>
+      </div>
+      <div class="source-group-body space-y-1">
+        ${items.map(r => `
+          <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+            <span class="flex min-w-0 items-center gap-2">
+              <input type="checkbox" class="share-item-check" data-path="${escapeAttr(r.path)}" ${shareSelected.has(r.path) ? 'checked' : ''}>
+              <span class="truncate">${escapeHtml(libDisplayTitle(r))}</span>
+            </span>
+            <span class="flex-shrink-0 text-xs text-zinc-500">${formatBytes(r.size)}</span>
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+  $('lib-share-list').querySelectorAll('.share-item-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) shareSelected.add(cb.dataset.path); else shareSelected.delete(cb.dataset.path);
+    updateShareSelCount();
+  }));
+  $('lib-share-list').querySelectorAll('.share-group-check').forEach(cb => cb.addEventListener('change', () => {
+    const ch = cb.dataset.ch;
+    (groups.get(ch) || []).forEach(r => { if (cb.checked) shareSelected.add(r.path); else shareSelected.delete(r.path); });
+    renderShareList(); updateShareSelCount();
+  }));
+  updateShareSelCount();
+}
+
+async function renderExistingShares() {
+  let shares;
+  try { shares = await api('/api/shares'); } catch { return; }
+  const box = $('lib-share-existing');
+  if (!shares.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="mb-2 text-sm font-medium text-zinc-300">Active shares</div>` + shares.map(s => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(s.name || '(unnamed)')} <span class="pill">${s.count} file${s.count === 1 ? '' : 's'}</span></div>
+        <div class="truncate text-xs text-zinc-500">${escapeHtml(s.code)}</div>
+      </div>
+      <div class="flex flex-shrink-0 gap-2">
+        <button class="btn" onclick="copyShareCode('${escapeAttr(s.code)}')">Copy code</button>
+        <button class="btn" style="color:#fda4af" onclick="revokeShare('${escapeAttr(s.token)}')">Revoke</button>
+      </div>
+    </div>`).join('');
+}
+
+function copyShareCode(code) { navigator.clipboard.writeText(code).then(() => toast('Share code copied', 'info')).catch(() => {}); }
+
+async function revokeShare(token) {
+  if (!confirm('Revoke this share? Its code will stop working immediately.')) return;
+  try { await api(`/api/shares/${encodeURIComponent(token)}`, { method: 'DELETE' }); toast('Share revoked', 'info'); } catch { return; }
+  renderExistingShares();
+}
+
+$('lib-share-open').onclick = openShareView;
+$('lib-share-close').onclick = closeShareView;
+$('lib-share-filter').addEventListener('input', renderShareList);
+$('lib-share-selectall').onclick = () => { shareFilteredRecordings().forEach(r => shareSelected.add(r.path)); renderShareList(); };
+$('lib-share-clear').onclick = () => { shareSelected = new Set(); renderShareList(); };
+$('lib-share-copy').onclick = () => copyShareCode($('lib-share-code').value);
+$('lib-share-create').onclick = async () => {
+  if (!shareSelected.size) { toast('Select at least one recording to share', 'error'); return; }
+  let result;
+  try {
+    result = await api('/api/shares', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: $('lib-share-name').value.trim(), paths: [...shareSelected] }) });
+  } catch { return; }
+  $('lib-share-code').value = result.code;
+  $('lib-share-code-box').classList.remove('hidden');
+  toast(`Share created with ${result.count} recording${result.count === 1 ? '' : 's'}`, 'info');
+  renderExistingShares();
+};
+
+// --- Peer-to-peer sharing (receiver side): paste a code, preview, import ---
+
+let receiveManifest = null;
+let receiveSelected = new Set();
+
+function openReceiveView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-receive-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  $('lib-receive-code').value = '';
+  $('lib-receive-status').textContent = '';
+  $('lib-receive-preview-box').classList.add('hidden');
+  $('lib-receive-job-box').classList.add('hidden');
+  stopReceiveJobPoll();
+  $('lib-receive-import').disabled = false;
+  receiveManifest = null;
+  receiveSelected = new Set();
+}
+function closeReceiveView() {
+  $('lib-receive-view').classList.add('hidden');
+  stopReceiveJobPoll();
+  $('lib-receive-job-box').classList.add('hidden');
+  reloadLibraryData();
+}
+
+function updateReceiveSelCount() { $('lib-receive-selcount').textContent = `${receiveSelected.size} selected`; }
+
+function renderReceiveList() {
+  if (!receiveManifest) return;
+  const items = receiveManifest.items || [];
+  $('lib-receive-list').innerHTML = items.map(it => `
+    <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <span class="flex min-w-0 items-center gap-2">
+        <input type="checkbox" class="receive-item-check" data-index="${it.index}" ${receiveSelected.has(it.index) ? 'checked' : ''}>
+        <span class="min-w-0">
+          <span class="block truncate font-medium">${escapeHtml(it.artist || it.name)}</span>
+          <span class="block truncate text-xs text-zinc-500">${escapeHtml(it.channel || '')}${it.eventName ? ' · ' + escapeHtml(it.eventName) : ''} · ${formatBytes(it.size)}${it.hasNfo ? ' · +nfo' : ''}</span>
+        </span>
+      </span>
+    </label>`).join('');
+  $('lib-receive-list').querySelectorAll('.receive-item-check').forEach(cb => cb.addEventListener('change', () => {
+    const i = Number(cb.dataset.index);
+    if (cb.checked) receiveSelected.add(i); else receiveSelected.delete(i);
+    updateReceiveSelCount();
+  }));
+  updateReceiveSelCount();
+}
+
+$('lib-receive-open').onclick = openReceiveView;
+$('lib-receive-close').onclick = closeReceiveView;
+$('lib-receive-selectall').onclick = () => { (receiveManifest.items || []).forEach(it => receiveSelected.add(it.index)); renderReceiveList(); };
+$('lib-receive-preview').onclick = async () => {
+  const code = $('lib-receive-code').value.trim();
+  if (!code) { toast('Paste a share code first', 'error'); return; }
+  $('lib-receive-status').textContent = 'Fetching…';
+  let result;
+  try {
+    result = await api('/api/share/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }) });
+  } catch { $('lib-receive-status').textContent = ''; return; }
+  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Could not read that share.'; $('lib-receive-preview-box').classList.add('hidden'); return; }
+  receiveManifest = result.manifest;
+  receiveSelected = new Set((receiveManifest.items || []).map(it => it.index));
+  $('lib-receive-status').textContent = `"${receiveManifest.name || 'Share'}" — ${receiveManifest.items.length} recording(s):`;
+  $('lib-receive-preview-box').classList.remove('hidden');
+  renderReceiveList();
+};
+let receiveJobPollTimer = null;
+
+// The import itself runs as a background job on the server (see
+// handleShareImport) so a large transfer doesn't need this tab left open -
+// this just starts it and polls for progress until it's done, but closing
+// the tab mid-import loses nothing since the job keeps running server-side.
+$('lib-receive-import').onclick = async () => {
+  if (!receiveManifest) return;
+  if (!receiveSelected.size) { toast('Select at least one recording to import', 'error'); return; }
+  const code = $('lib-receive-code').value.trim();
+  $('lib-receive-import').disabled = true;
+  $('lib-receive-status').textContent = 'Starting import…';
+  let result;
+  try {
+    result = await api('/api/share/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code, indices: [...receiveSelected] }) });
+  } catch { $('lib-receive-status').textContent = 'Import failed to start.'; $('lib-receive-import').disabled = false; return; }
+  if (!result.ok) { $('lib-receive-status').textContent = result.error || 'Import failed to start.'; $('lib-receive-import').disabled = false; return; }
+  $('lib-receive-status').textContent = 'Import running in the background — you can navigate away, it will keep going.';
+  $('lib-receive-job-box').classList.remove('hidden');
+  pollReceiveJob(result.jobId);
+};
+
+function stopReceiveJobPoll() {
+  if (receiveJobPollTimer) { clearTimeout(receiveJobPollTimer); receiveJobPollTimer = null; }
+}
+
+async function pollReceiveJob(jobId) {
+  stopReceiveJobPoll();
+  let job;
+  try {
+    job = await api(`/api/share/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    receiveJobPollTimer = setTimeout(() => pollReceiveJob(jobId), 2000);
+    return;
+  }
+  renderReceiveJob(job);
+  if (job.status === 'running') {
+    receiveJobPollTimer = setTimeout(() => pollReceiveJob(jobId), 1000);
+  } else {
+    $('lib-receive-import').disabled = false;
+    toast(`Import ${job.status === 'error' ? 'failed' : 'finished'}: ${job.doneFiles} imported, ${job.skippedFiles} skipped, ${job.failedFiles} failed`, job.status === 'error' ? 'error' : 'info');
+  }
+}
+
+function renderReceiveJob(job) {
+  const pct = job.totalBytes > 0 ? Math.min(100, Math.round(job.transferredBytes / job.totalBytes * 100)) : 0;
+  $('lib-receive-job-title').textContent = job.status === 'running' ? 'Importing…' : (job.status === 'error' ? 'Import failed' : 'Import finished');
+  $('lib-receive-job-stats').textContent = `${formatBytes(job.transferredBytes)} / ${formatBytes(job.totalBytes)} · ${formatBytes(job.speedBps)}/s · ${job.doneFiles + job.skippedFiles + job.failedFiles}/${job.totalFiles} files`;
+  $('lib-receive-job-bar').style.width = `${pct}%`;
+  $('lib-receive-job-current').textContent = job.currentFile
+    ? `${job.currentFile} (${formatBytes(job.currentFileBytes)} / ${formatBytes(job.currentFileTotal)})`
+    : (job.error || '');
+  $('lib-receive-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('lib-receive-job-log').scrollTop = $('lib-receive-job-log').scrollHeight;
+}
 
 function renderMatchList() {
   $('lib-match-count').textContent = `${matchSuggestions.length} unsorted`;
@@ -1707,6 +2216,9 @@ function libEventDates(e) {
 }
 
 function renderLibrary() {
+  // The Smart Match / Share / Receive overlays sit alongside the library views;
+  // rendering the normal library always dismisses them.
+  ['lib-match-view', 'lib-share-view', 'lib-receive-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
   const term = ($('lib-search').value || '').trim().toLowerCase();
   if (term) {
     renderLibrarySearch(term);
@@ -1851,6 +2363,7 @@ function libSetCardHtml(r) {
   return `
     <div class="lib-set-card" data-path="${escapeAttr(r.path)}">
       <div class="lib-set-thumb lib-set-play">
+        <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
         <span class="lib-set-play-icon">&#9658;</span>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
       </div>
@@ -1908,6 +2421,7 @@ function openEventEditor(ev) {
   $('ev-end').value = ev ? (ev.endDate || '') : '';
   $('ev-color').value = (ev && ev.color) || '#ef4444';
   $('ev-cover').value = ev ? (ev.coverUrl || '') : '';
+  syncImageUploadPreview('ev-cover');
   $('ev-desc').value = ev ? (ev.description || '') : '';
   // Populate festival (franchise) dropdown; setDropdownOptions creates the hidden input inside the container
   const festOpts = [{ value: '', label: 'None' }, ...(config.festivals || []).map(f => ({ value: f.id, label: f.name }))];
@@ -2041,6 +2555,7 @@ function openAssignModal(r) {
   $('assign-tracklist').value = r.tracklist || '';
   $('assign-find-result').textContent = '';
   $('assign-error').classList.add('hidden');
+  refreshAssignThumbPreview();
 
   setDropdownOptions('assign-event',
     [{ value: '', label: 'Unsorted' }, ...libraryEvents().map(e => ({ value: e.id, label: e.name }))],
@@ -2053,6 +2568,49 @@ function openAssignModal(r) {
 function closeAssignModal() { $('assign-overlay').classList.add('hidden'); libAssignTarget = null; }
 $('assign-close').onclick = closeAssignModal;
 $('assign-overlay').addEventListener('click', (e) => { if (e.target.id === 'assign-overlay') closeAssignModal(); });
+
+// Reloads the Organize modal's thumbnail preview from scratch (bumping a
+// cache-busting query param since the URL is derived from the recording's
+// path, not its content, so the browser would otherwise keep showing a
+// stale/removed image after a regenerate or upload).
+function refreshAssignThumbPreview() {
+  if (!libAssignTarget) return;
+  const img = $('assign-thumb-preview');
+  img.classList.add('hidden');
+  img.onload = () => { img.classList.remove('hidden'); $('assign-thumb-remove-btn').classList.remove('hidden'); $('assign-thumb-regen-btn').classList.remove('hidden'); };
+  img.onerror = () => { img.classList.add('hidden'); $('assign-thumb-remove-btn').classList.add('hidden'); $('assign-thumb-regen-btn').classList.add('hidden'); };
+  img.src = `${thumbnailUrl(libAssignTarget.path)}&t=${Date.now()}`;
+}
+
+$('assign-thumb-upload-btn').onclick = () => $('assign-thumb-file').click();
+$('assign-thumb-file').onchange = async () => {
+  const file = $('assign-thumb-file').files[0];
+  $('assign-thumb-file').value = '';
+  if (!file || !libAssignTarget) return;
+  const form = new FormData();
+  form.append('image', file);
+  try {
+    await api(`/api/recordings/thumbnail?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'POST', body: form });
+    toast('Thumbnail updated', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
+$('assign-thumb-regen-btn').onclick = async () => {
+  if (!libAssignTarget) return;
+  try {
+    await api(`/api/recordings/thumbnail/regenerate?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'POST' });
+    toast('Thumbnail regenerated', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
+$('assign-thumb-remove-btn').onclick = async () => {
+  if (!libAssignTarget) return;
+  try {
+    await api(`/api/recordings/thumbnail?path=${encodeURIComponent(libAssignTarget.path)}`, { method: 'DELETE' });
+    toast('Thumbnail removed', 'info');
+  } catch { return; }
+  refreshAssignThumbPreview();
+};
 
 function setAssignMode(mode) {
   document.querySelectorAll('.assign-mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
@@ -2497,20 +3055,23 @@ function setupPiP(button, getVideoEl) {
 function sel(v, x) { return (v || '') === x ? 'selected' : ''; }
 function encodeMediaPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
 function formatBytes(v) { const u = ['B','KB','MB','GB','TB']; let i = 0; while (v > 1024 && i < u.length - 1) { v /= 1024; i++; } return `${v.toFixed(i ? 1 : 0)} ${u[i]}`; }
+function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 
 // --- Theme Switcher ---
 
+// Generic colour presets, not named after (or derived from) any real
+// festival's branding - just a starting palette to tweak from.
 const festivalThemes = {
-  'defqon': { name: 'Defqon.1', colors: { primary: '#ef4444', secondary: '#dc2626', bg: '#09090b', accent: '#ef4444', text: '#f4f4f5', textMuted: '#a1a1aa' } },
-  'qlimax': { name: 'Qlimax', colors: { primary: '#7c3aed', secondary: '#6d28d9', bg: '#0a0a0a', accent: '#ec4899', text: '#f4f4f5', textMuted: '#a1a1aa' } },
-  'defqon-pink': { name: 'Defqon Pink', colors: { primary: '#ec4899', secondary: '#be185d', bg: '#0f0a0a', accent: '#ec4899', text: '#fce7f3', textMuted: '#be185d' } },
-  'defqon-cyan': { name: 'Defqon Cyan', colors: { primary: '#06b6d4', secondary: '#0891b2', bg: '#000d0f', accent: '#06b6d4', text: '#cffafe', textMuted: '#0a7ea4' } },
-  'defqon-gold': { name: 'Defqon Gold', colors: { primary: '#f59e0b', secondary: '#d97706', bg: '#0b0803', accent: '#fbbf24', text: '#f9f5f0', textMuted: '#92400e' } },
-  'xtreme': { name: 'Xtreme (Lime)', colors: { primary: '#84cc16', secondary: '#65a30d', bg: '#0a0a0a', accent: '#84cc16', text: '#f4f4f5', textMuted: '#4b5320' } },
-  'mysteryland': { name: 'Mysteryland', colors: { primary: '#a855f7', secondary: '#9333ea', bg: '#0d0010', accent: '#d946ef', text: '#f4f4f5', textMuted: '#8b5cf6' } },
-  'tomorrowland': { name: 'Tomorrowland', colors: { primary: '#3b82f6', secondary: '#1d4ed8', bg: '#000812', accent: '#0ea5e9', text: '#f4f4f5', textMuted: '#60a5fa' } },
+  'crimson': { name: 'Crimson', colors: { primary: '#ef4444', secondary: '#dc2626', bg: '#09090b', accent: '#ef4444', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'violet': { name: 'Violet Pulse', colors: { primary: '#7c3aed', secondary: '#6d28d9', bg: '#0a0a0a', accent: '#ec4899', text: '#f4f4f5', textMuted: '#a1a1aa' } },
+  'rose': { name: 'Rose', colors: { primary: '#ec4899', secondary: '#be185d', bg: '#0f0a0a', accent: '#ec4899', text: '#fce7f3', textMuted: '#be185d' } },
+  'cyan': { name: 'Cyan Wave', colors: { primary: '#06b6d4', secondary: '#0891b2', bg: '#000d0f', accent: '#06b6d4', text: '#cffafe', textMuted: '#0a7ea4' } },
+  'amber': { name: 'Amber', colors: { primary: '#f59e0b', secondary: '#d97706', bg: '#0b0803', accent: '#fbbf24', text: '#f9f5f0', textMuted: '#92400e' } },
+  'lime': { name: 'Lime', colors: { primary: '#84cc16', secondary: '#65a30d', bg: '#0a0a0a', accent: '#84cc16', text: '#f4f4f5', textMuted: '#4b5320' } },
+  'orchid': { name: 'Orchid', colors: { primary: '#a855f7', secondary: '#9333ea', bg: '#0d0010', accent: '#d946ef', text: '#f4f4f5', textMuted: '#8b5cf6' } },
+  'ocean': { name: 'Ocean Blue', colors: { primary: '#3b82f6', secondary: '#1d4ed8', bg: '#000812', accent: '#0ea5e9', text: '#f4f4f5', textMuted: '#60a5fa' } },
 };
 
 function renderFestivalPresets() {
@@ -2557,6 +3118,11 @@ function readCustomTheme() {
 }
 
 function applyThemeColors(colors) {
+  // Drive the design-token layer (app.css keys everything off these), so a
+  // custom theme recolours the whole polished UI without per-component
+  // overrides. A few legacy helper rules are kept for anything still
+  // referencing the older --color-* names.
+  const bgRgb = hexToRgb(colors.bg).join(' ');
   const css = `
     :root {
       --color-primary: ${colors.primary};
@@ -2565,20 +3131,24 @@ function applyThemeColors(colors) {
       --color-accent: ${colors.accent};
       --color-text: ${colors.text};
       --color-text-muted: ${colors.textMuted};
+      --accent: ${colors.accent};
+      --bg: ${colors.bg};
+      --text: ${colors.text};
+      --text-muted: ${colors.textMuted};
     }
     body { background: var(--color-bg); color: var(--color-text); }
-    .panel { background: rgb(${hexToRgb(colors.bg).join(' ')} / .72); }
+    .panel { background: linear-gradient(180deg, rgb(255 255 255 / .035), rgb(255 255 255 / 0) 120px), rgb(${bgRgb} / .72); }
     .accent-color { color: var(--color-accent); }
-    .btn.primary, .nav.active { background: var(--color-accent); }
-    .source-card { border-left-color: var(--color-accent); }
-    .nav { color: var(--color-text-muted); }
-    label { color: var(--color-text-muted); }
   `;
   const styleEl = document.getElementById('custom-css');
   if (styleEl) {
     styleEl.textContent = config.ui.customCss + '\n' + css;
   }
-  document.documentElement.style.setProperty('--accent', colors.accent);
+  const root = document.documentElement.style;
+  root.setProperty('--accent', colors.accent);
+  root.setProperty('--bg', colors.bg);
+  root.setProperty('--text', colors.text);
+  root.setProperty('--text-muted', colors.textMuted);
 }
 
 function rgbToHex(rgb) {
@@ -2848,6 +3418,7 @@ function openOrgEditor(org) {
   $('org-desc').value = org ? (org.description || '') : '';
   $('org-color').value = (org && org.color) || '#ef4444';
   $('org-logo').value = org ? (org.logoUrl || '') : '';
+  syncImageUploadPreview('org-logo');
   $('org-editor-error').classList.add('hidden');
   $('org-editor-overlay').classList.remove('hidden');
 }
@@ -2891,6 +3462,7 @@ function openEvFestivalEditor(festival) {
   $('ev-fest-desc').value = festival ? (festival.description || '') : '';
   $('ev-fest-color').value = (festival && festival.color) || '#ef4444';
   $('ev-fest-logo').value = festival ? (festival.logoUrl || '') : '';
+  syncImageUploadPreview('ev-fest-logo');
   // Populate organisation dropdown; setDropdownOptions creates the hidden input inside the container
   const orgOpts = [{ value: '', label: 'None' }, ...(config.organisations || []).map(o => ({ value: o.id, label: o.name }))];
   setDropdownOptions('ev-fest-org', orgOpts, { value: festival ? (festival.organisationId || '') : '' });
@@ -2936,6 +3508,7 @@ async function deleteEvFestival(id) {
 // script runs - the source editor's per-row dropdowns get the same wiring
 // again after every render, safely, since already-bound elements are skipped.
 setupCustomDropdowns();
+setupImageUploadFields();
 
 refresh();
 setInterval(refresh, 5000);

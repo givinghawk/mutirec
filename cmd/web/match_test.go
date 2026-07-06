@@ -15,7 +15,7 @@ func TestGuessTimeFromName(t *testing.T) {
 		wantFromName        bool
 		wantTimeOfDay       bool
 	}{
-		{"DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3", 2026, 6, 25, true, false},
+		{"DJ_Vertex_BLUE_Thursday_25_06_2026_Neonbeat_Prime_Directive_HardDance.mp3", 2026, 6, 25, true, false},
 		{"recording.20260625-143000.mkv", 2026, 6, 25, true, true},
 		{"Some_Set_2026-06-25.mp4", 2026, 6, 25, true, false},
 		{"no_date_in_this_one.mp3", 2026, 8, 1, false, false}, // falls back to mtime
@@ -54,8 +54,8 @@ func TestGuessArtistFromName(t *testing.T) {
 	cases := []struct {
 		name, channel, want string
 	}{
-		{"DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3", "BLUE", "DJ Isaac"},
-		{"Adaro_B2B_Da_Tweekaz_RED_Friday_26_06_2026.mkv", "RED", "Adaro B2B Da Tweekaz"},
+		{"DJ_Vertex_BLUE_Thursday_25_06_2026_Neonbeat_Prime_Directive_HardDance.mp3", "BLUE", "DJ Vertex"},
+		{"Fenrix_B2B_Glitch_Bros_RED_Friday_26_06_2026.mkv", "RED", "Fenrix B2B Glitch Bros"},
 		{"recording.20260625-143000.mkv", "BLUE", "recording"},
 	}
 	for _, c := range cases {
@@ -71,10 +71,10 @@ func TestArtistSimilarity(t *testing.T) {
 		guessed, setName string
 		wantMin          float64
 	}{
-		{"DJ Isaac", "DJ Isaac", 0.99},
-		{"DJ Isaac", "DJ Isaac B2B Adaro", 0.99}, // exact subset shouldn't be diluted
-		{"Adaro B2B Da Tweekaz", "Adaro B2B Da Tweekaz", 0.99},
-		{"DJ Isaac", "Wildstylez", 0},
+		{"DJ Vertex", "DJ Vertex", 0.99},
+		{"DJ Vertex", "DJ Vertex B2B Fenrix", 0.99}, // exact subset shouldn't be diluted
+		{"Fenrix B2B Glitch Bros", "Fenrix B2B Glitch Bros", 0.99},
+		{"DJ Vertex", "Nightcaster", 0},
 	}
 	for _, c := range cases {
 		got := artistSimilarity(c.guessed, c.setName)
@@ -85,24 +85,25 @@ func TestArtistSimilarity(t *testing.T) {
 }
 
 // TestBestMatchSuggestion_UserExample exercises the full matching pipeline
-// against the exact filename/scenario reported: "BLUE" is the real stage
-// name (matching the recording's folder/channel), "Defqon_1_Sacred_Oath" is
-// the festival name plus that year's edition/theme name (not a stage, and
-// not parsed further), and the date is given day-first with no
-// time-of-day - the channel match, guessed date, and guessed artist name
-// together should be enough to confidently identify the set.
+// against a filename shaped like a real reported convention (genericized
+// here): "BLUE" is the real stage name (matching the recording's
+// folder/channel), "Neonbeat_Prime_Directive" is the festival name plus that
+// year's edition/theme name (not a stage, and not parsed further), and the
+// date is given day-first with no time-of-day - the channel match, guessed
+// date, and guessed artist name together should be enough to confidently
+// identify the set.
 func TestBestMatchSuggestion_UserExample(t *testing.T) {
 	cfg := AppConfig{
 		LibraryEvents: []LibraryEvent{
 			{
 				ID:   "ev1",
-				Name: "Defqon.1 - Sacred Oath (2026)",
+				Name: "Neonbeat - Prime Directive (2026)",
 				Timetable: []StageSchedule{
 					{
 						Stage: "BLUE",
 						Sets: []ScheduleSet{
-							{ID: "s1", Name: "DJ Isaac", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
-							{ID: "s2", Name: "Wildstylez", Start: "2026-06-25T15:00:00Z", End: "2026-06-25T16:00:00Z"},
+							{ID: "s1", Name: "DJ Vertex", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+							{ID: "s2", Name: "Nightcaster", Start: "2026-06-25T15:00:00Z", End: "2026-06-25T16:00:00Z"},
 						},
 					},
 				},
@@ -110,20 +111,20 @@ func TestBestMatchSuggestion_UserExample(t *testing.T) {
 		},
 	}
 
-	name := "DJ_Isaac_BLUE_Thursday_25_06_2026_Defqon_1_Sacred_Oath_HardDance.mp3"
+	name := "DJ_Vertex_BLUE_Thursday_25_06_2026_Neonbeat_Prime_Directive_HardDance.mp3"
 	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
 	if !fromName {
 		t.Fatal("expected a date to be parsed from the filename")
 	}
 	got := bestMatchSuggestion(cfg, "BLUE/"+name, name, "BLUE", guessed, fromName, hasTOD)
 	if got.SetID != "s1" {
-		t.Fatalf("expected match on set s1 (DJ Isaac), got SetID=%q Artist=%q Confidence=%q Reason=%q", got.SetID, got.Artist, got.Confidence, got.Reason)
+		t.Fatalf("expected match on set s1 (DJ Vertex), got SetID=%q Artist=%q Confidence=%q Reason=%q", got.SetID, got.Artist, got.Confidence, got.Reason)
 	}
 	if got.Confidence != "high" {
 		t.Errorf("expected high confidence, got %q (reason: %s)", got.Confidence, got.Reason)
 	}
-	if got.GuessedArtist != "DJ Isaac" {
-		t.Errorf("expected GuessedArtist = %q, got %q", "DJ Isaac", got.GuessedArtist)
+	if got.GuessedArtist != "DJ Vertex" {
+		t.Errorf("expected GuessedArtist = %q, got %q", "DJ Vertex", got.GuessedArtist)
 	}
 }
 
@@ -143,19 +144,19 @@ func TestBestMatchSuggestion_FestivalScoping(t *testing.T) {
 			{
 				ID: "ev-a", Name: "Festival A 2026", FestivalID: "fest-a",
 				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
-					{ID: "a1", Name: "Wildstylez", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+					{ID: "a1", Name: "Nightcaster", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
 				}}},
 			},
 			{
 				ID: "ev-b", Name: "Festival B 2026", FestivalID: "fest-b",
 				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
-					{ID: "b1", Name: "Wildstylez", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+					{ID: "b1", Name: "Nightcaster", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
 				}}},
 			},
 		},
 	}
 
-	name := "Wildstylez_RED_Thursday_25_06_2026.mp3"
+	name := "Nightcaster_RED_Thursday_25_06_2026.mp3"
 	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
 	got := bestMatchSuggestion(cfg, "RED/"+name, name, "RED", guessed, fromName, hasTOD)
 	if got.EventID != "ev-a" {

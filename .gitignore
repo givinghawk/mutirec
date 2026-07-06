@@ -1,6 +1,5 @@
 # Go build artifacts
-/defqon-stream-recorder
-/defqon-recorder
+/mutirec
 /bin/
 /dist/
 
@@ -14,6 +13,7 @@ coverage.txt
 *.log
 config.json
 auth.json
+users.json
 /.devdata/
 
 # OS / editor

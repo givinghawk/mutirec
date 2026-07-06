@@ -10,7 +10,7 @@ func TestScanSumsAndGroupsByStage(t *testing.T) {
 	root := t.TempDir()
 
 	// Raw recording in root.
-	mustWrite(t, filepath.Join(root, "DEFQON.1.2026.UV.20260626.1300.LIVE.MP3-x.mp3"), 1000)
+	mustWrite(t, filepath.Join(root, "NEONBEAT.2026.UV.20260626.1300.LIVE.MP3-x.mp3"), 1000)
 	// Split files under stage subfolders.
 	mustWrite(t, filepath.Join(root, "UV", "set1.mp3"), 500)
 	mustWrite(t, filepath.Join(root, "UV", "set2.mp3"), 250)

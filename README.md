@@ -1,38 +1,91 @@
-# Defqon Stream Recorder
+# MutiRec
 
-Docker-based automatic stream recorder with a dark Tailwind WebUI. It is built
-for multi-user recording, but it can record any Twitch,
-YouTube, Streamlink-compatible, or raw HTTP/HLS source.
+### *Muti-* as in **Mutual** — record together, not alone.
+
+[![Build](https://github.com/givinghawk/mutirec/actions/workflows/container.yml/badge.svg)](https://github.com/givinghawk/mutirec/actions/workflows/container.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Container](https://img.shields.io/badge/container-ghcr.io-2496ED?logo=docker&logoColor=white)](https://github.com/givinghawk/mutirec/pkgs/container/mutirec)
+
+> **Why "MutiRec"?** It started as a typo — *multirec* missing its "l". We
+> kept it, because the shorter name fits better: **Mutual Recorder**. Not one
+> person babysitting one stream, but a shared setup — multiple sources,
+> multiple people with their own logins, one library everyone organizes
+> together. The typo turned out to be the better name.
+
+**MutiRec** is a self-hosted, Docker-based stream recorder with a dark
+Tailwind WebUI. Point it at Twitch, YouTube, or any Streamlink/raw HTTP/HLS
+source, hand out accounts to the people helping you record, and let it run
+unattended through an entire festival weekend.
+
+It ships empty - no bundled festival, no pre-added sources - but leans toward
+hardstyle festival weekends in its defaults and extras: a handful of
+well-known DJs/streamers are one click away as Preset Packs, and the
+Organisations/Festivals/Timetable model is built for recurring multi-stage
+events. There's nothing festival-specific about the recorder itself, though —
+add any source you like.
+
+---
+
+## Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Docker Compose](#docker-compose)
+- [Sources](#sources)
+- [Timetable](#timetable)
+- [Live Rewind](#live-rewind)
+- [Preset Packs](#preset-packs)
+- [Auto-Reconnect](#auto-reconnect)
+- [Progressive Web App](#progressive-web-app)
+- [Storage](#storage)
+- [Backups](#backups)
+- [Notifications](#notifications)
+- [Peer Sharing (P2P)](#peer-sharing-p2p)
+- [Hardware Transcoding](#hardware-transcoding)
+- [Development](#development)
+- [Authentication and Users](#authentication-and-users)
+- [Disclaimer](#disclaimer)
 
 ## Features
 
-- Multiple sources with per-source enable, auto-record, audio-only, transcode, quality, container, and colour settings.
-- Twitch and YouTube recording through `streamlink`, piped into FFmpeg.
-- Raw HTTP/HLS/DASH recording directly with FFmpeg.
-- One finished subdirectory per source/stage.
-- Separate temporary, finished, and log directories.
-- Visual timetable editor (day tabs, click-to-edit/add sets), with raw JSON editing still available.
-- Optional timetable lookup/import from [timetable.lol](https://timetable.lol) for hundreds of festivals, or build your own by hand - entirely optional either way.
-- Per-source "timetable stage" linking, for when a recording source's name doesn't match its stage name in the timetable.
-- Star any timetable set to get a Discord/SMTP reminder a configurable number of minutes before it starts.
-- Optional FFmpeg transcoding with hardware acceleration presets for CUDA/NVENC, Quick Sync, and VAAPI.
-- Optional single-pass loudness normalization (EBU R128) per source, so recordings from different artists/sources land at a consistent volume.
-- Auto-reconnect: a source that drops mid-stream is retried automatically with exponential backoff, instead of being hammered every scheduler tick or left stopped.
-- Installable as a PWA (add to home screen on mobile/desktop) for quick access to the dashboard and Watch tab.
-- Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events (Sources tab → Preset Packs), one click each - no URLs to hand-type.
-- Optional `.nfo` files beside completed recordings.
+**Recording**
+
+- Twitch and YouTube via `streamlink`, piped into FFmpeg; raw HTTP/HLS/DASH recorded directly with FFmpeg.
+- Per-source enable, auto-record, audio-only, transcode, quality, container, and colour settings.
+- Optional hardware-accelerated transcoding (CUDA/NVENC, Quick Sync, VAAPI) and single-pass loudness normalization (EBU R128).
+- Auto-reconnect with exponential backoff for a source that drops mid-stream, silent until it's actually been live.
+- Optional live rewind: scrub backward within an in-progress recording via a rolling HLS buffer.
 - Disk free-space guard that pauses recording below 1 GB free and warns earlier.
-- SMTP and Discord webhook notifications.
-- Optional `rclone` backups for Dropbox, Google Drive, S3-compatible storage, and many other remotes.
-- Basic player interface for audio and video streams, with optional WaveSurfer.js waveform rendering.
-- Live stage switching from the WebUI when the browser can play the resolved stream URL.
-- Optional live rewind: scrub backward within an in-progress recording using a rolling HLS buffer.
-- Custom app name, logo URL, colour scheme, accent colour, and custom CSS.
-- Recordings library view with search/filter across all finished files.
+
+**Organizing & discovery**
+
+- Visual timetable editor (day tabs, click-to-edit/add sets), with raw JSON editing still available.
+- Optional timetable lookup/import from [timetable.lol](https://timetable.lol) for hundreds of festivals.
+- Recordings library with search/filter, plus Smart Match to suggest which archived set an unsorted recording belongs to.
+- Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
+- Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
+- Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
+- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
+
+**Accounts & security**
+
+- Multi-user accounts with admin/viewer roles, managed from Settings → Users.
+- Optional Discord OAuth as a faster login for an *existing* account — it never creates one on its own.
+- Session-based login in front of the whole app (WebUI and API), with a one-time setup wizard on first run.
+
+**Notifications & backups**
+
+- Star any timetable set for a Discord/SMTP reminder before it starts.
+- SMTP and Discord webhook notifications when recordings finish.
+- Optional `rclone` backups to Dropbox, Google Drive, S3-compatible storage, and more.
+
+**Nice touches**
+
+- Installable as a PWA for quick access to the dashboard and Watch tab from a phone or desktop.
+- Custom app name, logo, colour scheme, and CSS — logos and cover art (app, Organisation, Festival, Event) are uploaded as files rather than pasted in as external URLs.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
-- Delete and duplicate buttons for sources, plus validation on required fields.
-- Toast notifications surface API/server errors directly in the WebUI.
-- Session-based login page in front of the whole app (WebUI and API), with a one-time setup wizard on first run - no environment variables required unless you want them.
+- Optional `.nfo` files beside completed recordings; toast notifications surface API/server errors directly in the WebUI.
 
 ## Quick Start
 
@@ -46,31 +99,36 @@ Open:
 http://localhost:8080
 ```
 
-You'll land on a one-time setup page to choose a username and password -
-nothing to configure by hand first. You can change these credentials any
-time from Settings → Account. See [Authentication](#authentication) below if
-you'd rather manage credentials via environment variables instead.
+You'll land on a one-time setup page to create the first account — always an
+admin, nothing to configure by hand first. Further accounts (and their
+roles) are managed from Settings → Users once you're in. See
+[Authentication and Users](#authentication-and-users) below for the full
+picture, including environment-pinned credentials and Discord login.
 
 On first start the app creates:
 
 ```text
 data/
   config/config.json
+  config/users.json
   incomplete/
   logs/
   recordings/
 ```
 
-The bundled `dq-timetable.json` is used to seed DEFQON.1 stages and timetable
-entries. Auto-recording starts disabled by default so you can review sources,
-storage, and backup settings before recording.
+There are no sources or timetable entries yet - add your first source from
+the Sources tab (or a Preset Pack) and build a timetable by hand, by importing
+one from [timetable.lol](https://timetable.lol), or by loading a ready-made
+timetable file (attached to each [release](https://github.com/givinghawk/mutirec/releases))
+via **Timetable → Import from file**. Auto-recording starts disabled by default
+so you can review sources, storage, and backup settings before recording.
 
 ## Docker Compose
 
 ```yaml
 services:
   recorder:
-    image: ghcr.io/givinghawk/mutlirec:latest
+    image: ghcr.io/givinghawk/mutirec:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -139,7 +197,7 @@ use RFC3339 timestamps:
 [
   {
     "stage": "RED",
-    "url": "https://www.youtube.com/@qdance/live",
+    "url": "https://www.youtube.com/@example/live",
     "sets": [
       {
         "id": "opt-stable-id",
@@ -169,6 +227,18 @@ URLs are preserved by matching on stage name across a re-sync.
 If a recording source's name doesn't match the stage name from an imported
 (or hand-built) timetable, set "Timetable stage" on that source in the
 Source Manager to point it at the right stage for Now/Next lookups.
+
+### Importing from a file (optional)
+
+**Timetable → Import from file** loads a timetable JSON file directly.
+Ready-made timetables are attached to each
+[GitHub release](https://github.com/givinghawk/mutirec/releases) (they are not
+bundled into the app itself), and the [`timetables/`](timetables/) directory in
+the repo documents the format. Both the app's own export format and the compact
+`[year, month, day, hour, minute, name]` format are accepted, and any per-stage
+stream URLs you've already configured are kept, matched by stage name.
+After-midnight sets roll to the correct next calendar day automatically — a set
+listed under Thursday at 01:00 is stored as Friday 01:00.
 
 ### Reminders
 
@@ -203,21 +273,29 @@ manually (enabled, but not auto-recording), and is a no-op if you've already
 added it. Presets are bundled read-only with the app (`cmd/web/presets/presets.json`,
 served via `GET /api/presets`); they're a starting point, not a restriction -
 edit or delete the resulting source like any other afterward. There's no
-Defqon preset since its stages already ship as the default source list.
+preset tied to any one specific festival's own stages - presets are for
+individual streamers/DJs/events, and any festival's stages are just regular
+sources you add yourself.
 
 ## Auto-Reconnect
 
-If a source's stream drops mid-recording (a network blip, a brief outage, a
-stage going temporarily offline), the recorder retries it automatically
-instead of requiring a manual restart. A recording that ran for at least a
-minute before ending is treated as "the stream was working" and clears any
-backoff; one that fails faster than that (or produces no output at all)
-schedules a retry with exponential backoff - 5s, 10s, 20s, ... up to a 5
-minute cap - so a stream that's genuinely down for a while isn't hammered
-with a reconnect attempt on every scheduler tick. The dashboard shows a
-"reconnecting" status with a countdown and attempt count while this is
-happening; clicking Record on a source clears its backoff and retries
-immediately.
+Every enabled, auto-record source that isn't currently live gets retried by
+the scheduler automatically, with exponential backoff (5s, 10s, 20s, ... up
+to a 5 minute cap) so a source that's genuinely offline isn't hammered with a
+restart attempt on every scheduler tick. Most of the time this is silent -
+a source waiting for its DJ/event to go live for the first time doesn't show
+up in the dashboard or event log at all, since that's just normal background
+polling, not a problem.
+
+If a source *was* confirmed live (recorded for at least a minute) and then
+stops - a dropped connection, a brief outage, or just the broadcaster ending
+their stream - retry attempts for the next 10 minutes are surfaced: the
+dashboard shows a "reconnecting" status with a countdown and attempt count,
+and each attempt is logged. If nothing comes back within those 10 minutes,
+it quietly goes back to silent background retries (a final "no reconnect
+within 10m0s" note is logged once) - by that point it's more likely the
+stream is over for now than that it's about to come back any second.
+Clicking Record on a source clears its backoff and retries immediately.
 
 ## Progressive Web App
 
@@ -239,7 +317,7 @@ container:
 
 ```yaml
 volumes:
-  - /mnt/defqon-recordings:/data/recordings
+  - /mnt/mutirec-recordings:/data/recordings
 ```
 
 Host mounting is the most predictable approach across Linux, macOS, Windows,
@@ -251,9 +329,9 @@ The image includes `rclone`. Mount an `rclone.conf`, enable backups in the UI,
 and set a remote path such as:
 
 ```text
-gdrive:defqon-recordings
-s3:my-bucket/defqon
-dropbox:defqon
+gdrive:mutirec-recordings
+s3:my-bucket/mutirec
+dropbox:mutirec
 ```
 
 Example Compose mount:
@@ -275,6 +353,50 @@ The WebUI supports:
 
 Notifications are sent when recordings finish. Backup failures are written to
 the app event log.
+
+## Peer Sharing (P2P)
+
+Two MutiRec instances can send recordings directly to each other — no cloud
+service in the middle. One instance ("sender") publishes a bundle of
+recordings; the other ("receiver") pastes a short code and pulls the files
+(and their metadata) straight over HTTP.
+
+### Setup (required first)
+
+The sender must be reachable at a public URL. Expose it however you like — a
+reverse proxy, a Cloudflare/ngrok-style tunnel, or a port forward — then, in
+**Settings → Peer Sharing**, enter that URL and click **Verify & enable**. The
+check generates a one-time nonce and fetches the URL back to confirm it
+actually routes to this instance (catching typos and misconfigured proxies);
+it also warns if the URL looks like a LAN/loopback address that outside
+instances won't reach. Sharing stays disabled until a URL verifies.
+
+### Sending
+
+In **Recordings → Share Sets**, tick the recordings you want (individually, or
+a whole stage at once via its group checkbox), optionally name the share, and
+click **Create share code**. You get a short code — base64 of just the public
+URL and an unguessable token — to send however you like (chat, email). Each
+share exposes only the exact files you selected; revoke it any time from the
+same panel and its code stops working immediately.
+
+### Receiving
+
+In **Recordings → Receive**, paste the code and click **Preview** to see
+what's on offer (artist, stage, size, whether an `.nfo` sidecar is included).
+Pick what you want and **Import** — the transfer runs as a background job on
+the server, so you don't need to keep the tab open for a large import; the
+page polls for progress (bytes transferred, current file, transfer speed, and
+a live log) and it's safe to navigate away or close the browser mid-transfer.
+Files download into your library under their stage folder, `.nfo` sidecars
+come along, and the event/festival grouping is recreated by name (the same
+content-addressed approach as Match Files). Each downloaded file's hash is
+verified against the sender's manifest before it's kept — a mismatch discards
+the file and marks it failed rather than silently keeping a corrupted
+download. Files you already have are skipped rather than overwritten.
+
+Sharing setup, share creation, and importing are all admin-only; share tokens
+are never exposed to viewer accounts.
 
 ## Hardware Transcoding
 
@@ -322,30 +444,63 @@ the `/data` and `/app` defaults above are automatically swapped for paths
 relative to the working directory, so the app has somewhere to write without
 any of these variables being set.
 
-## Authentication
+## Authentication and Users
 
 The entire WebUI and API sit behind a login page (`/login`) backed by a
-session cookie. There are two ways to manage credentials, and neither
-requires editing files or environment variables unless you want to:
+session cookie. On first run, with no `AUTH_USERNAME`/`AUTH_PASSWORD` set,
+the app redirects to a one-time `/setup` page where you choose a username and
+password for the first account, which is always an admin. From there, admins
+manage further accounts from **Settings → Users** - this is the "mutual"
+part: hand out a login instead of a shared password, and everyone's actions
+show up under their own name in the event log.
 
-- **Setup wizard (default).** On first run, with no `AUTH_USERNAME`/
-  `AUTH_PASSWORD` set, the app redirects to a one-time `/setup` page where you
-  choose a username and password directly in the browser. They're hashed
-  with bcrypt and saved to `auth.json` next to your config file. Change them
-  any time from **Settings → Account** — no restart or redeploy needed.
-- **Environment variables (for automated/Docker deployments).** Set
-  `AUTH_USERNAME` and `AUTH_PASSWORD` explicitly (for example in
-  `docker-compose.yml`) if you'd rather pin credentials externally:
+### Roles
 
-  ```yaml
-  environment:
-    AUTH_USERNAME: yourname
-    AUTH_PASSWORD: a-long-random-password
-  ```
+- **Admin** — full access: sources, timetable, settings, backups, and other
+  users.
+- **Viewer** — can watch live sources, browse and organize recordings, and
+  manage their own account (including linking Discord), but can't change
+  sources, settings, or users. Secrets (SMTP password, Discord webhook/OAuth
+  client secret, rclone args) are never sent to a viewer's browser at all.
 
-  When these are set, they always take priority over any saved credentials,
-  and the Account settings form becomes read-only (change the environment
-  variables and restart instead).
+There's always at least one admin — the last remaining admin account can't be
+demoted or deleted (from either the Users tab or the API), so you can't
+accidentally lock yourself out of managing the instance.
+
+### Environment variables (for automated/Docker deployments)
+
+Set `AUTH_USERNAME` and `AUTH_PASSWORD` (for example in `docker-compose.yml`)
+to pin one extra admin login externally, on top of whatever's in the Users
+tab:
+
+```yaml
+environment:
+  AUTH_USERNAME: yourname
+  AUTH_PASSWORD: a-long-random-password
+```
+
+This account is always an admin and is read-only in Settings → Account
+(change the environment variables and restart instead) - it doesn't replace
+or block the Users tab, it's just an extra fixed login.
+
+### Discord login
+
+Users can also sign in with Discord, but only as a faster login for an
+*existing* account - authorizing with Discord can never create a new account
+by itself. To set it up:
+
+1. Create an application at
+   [discord.com/developers/applications](https://discord.com/developers/applications),
+   add an OAuth2 redirect matching `https://your-domain/api/auth/discord/callback`
+   exactly (same path for both the login button and account linking), and
+   copy its Client ID/Secret.
+2. Paste those into **Settings → Discord Login (Admin)** along with the same
+   redirect URL, and enable it.
+3. Each user links their own Discord account from **Settings → Account** →
+   "Link Discord" while signed in normally. After that, the login page shows
+   a "Log in with Discord" button that works for their account too.
+
+### General
 
 Either way, don't expose the port beyond localhost until credentials are in
 place — the setup wizard is only reachable until you complete it once, so
@@ -353,10 +508,13 @@ there's no window where the app runs with a default or guessable password.
 
 Source `streamlinkArgs`/`ffmpegArgs` are passed straight to those tools, so
 treat WebUI access as equivalent to shell access to `streamlink`/`ffmpeg` on
-the host — only share credentials with people you'd trust with that.
+the host — only share admin accounts with people you'd trust with that
+(viewers never reach source configuration at all).
 
 ## Disclaimer
 
-This project is not affiliated with or endorsed by Q-dance, DEFQON.1, Twitch,
-YouTube, or any stream provider. Use it only where you have the right to record
-and store the content.
+MutiRec is an independent, unaffiliated tool. It isn't endorsed by, affiliated
+with, or sponsored by Twitch, YouTube, Discord, or any festival, promoter, or
+event organizer whose stream you point it at. Names of festivals, artists, or
+events you configure it with belong to their respective owners. Use it only
+where you have the right to record and store the content.

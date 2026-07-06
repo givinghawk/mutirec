@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in — Defqon Stream Recorder</title>
+  <title>Sign in — MutiRec</title>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#09090b">
   <link rel="icon" href="/icons/icon-192.png">
@@ -14,15 +14,40 @@
 <body class="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center px-4">
   <form id="login-form" class="panel w-full max-w-sm">
     <div class="panel-head"><h2>Sign in</h2></div>
-    <p class="mb-3 text-sm text-zinc-400">Defqon Stream Recorder</p>
+    <p class="mb-3 text-sm text-zinc-400">MutiRec — Mutual Recorder</p>
     <label>Username<input id="username" class="input" autocomplete="username" autofocus></label>
     <label>Password<input id="password" type="password" class="input" autocomplete="current-password"></label>
     <p id="login-error" class="mb-3 hidden text-sm text-rose-300"></p>
     <button type="submit" class="btn primary w-full">Sign in</button>
+    <button type="button" id="discord-login" class="btn w-full mt-2 hidden">Log in with Discord</button>
   </form>
   <script>
+    const discordErrors = {
+      denied: 'Discord login was cancelled.',
+      invalid_state: 'That Discord login link expired - try again.',
+      exchange_failed: 'Could not complete Discord login - try again.',
+      not_configured: 'Discord login is not configured on this instance.',
+      not_linked: 'No account here is linked to that Discord account yet - sign in with your username and password, then link Discord from Settings.',
+    };
+
     const form = document.getElementById('login-form');
     const errorEl = document.getElementById('login-error');
+    const discordBtn = document.getElementById('discord-login');
+
+    const params = new URLSearchParams(window.location.search);
+    const discordError = params.get('discordError');
+    if (discordError) {
+      errorEl.textContent = discordErrors[discordError] || 'Discord login failed.';
+      errorEl.classList.remove('hidden');
+    }
+
+    fetch('/api/auth/discord/status').then(r => r.json()).then(s => {
+      if (s.enabled) discordBtn.classList.remove('hidden');
+    }).catch(() => {});
+    discordBtn.addEventListener('click', () => {
+      window.location.href = '/api/auth/discord/login/start';
+    });
+
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       errorEl.classList.add('hidden');
@@ -46,7 +71,6 @@
         errorEl.classList.remove('hidden');
         return;
       }
-      const params = new URLSearchParams(window.location.search);
       window.location.href = params.get('next') || '/';
     });
   </script>
