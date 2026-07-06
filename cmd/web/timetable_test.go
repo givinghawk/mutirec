@@ -125,6 +125,35 @@ func TestParseAnyTimetableJSON(t *testing.T) {
 		t.Errorf("compact end time = %s, want 2026-06-27T01:00", out[0].Sets[0].End)
 	}
 
+	// Planner JSON (timetable.lol / local planner file format) - the third
+	// shape parseAnyTimetableJSON tries.
+	planner := []byte(`{
+		"planType":"timetable",
+		"timeZone":"UTC",
+		"data":{
+			"Friday":{
+				"date":"2026-06-26",
+				"stages":{
+					"RED":[
+						["x1","14:00","15:00","Opener"],
+						["x2","23:00","01:00","Afterparty"]
+					]
+				}
+			}
+		},
+		"festivalRange":{"Friday":{"date":"2026-06-26"}}
+	}`)
+	out, err = parseAnyTimetableJSON(planner)
+	if err != nil || len(out) != 1 || out[0].Stage != "RED" || len(out[0].Sets) != 2 {
+		t.Fatalf("planner shape did not parse: %+v (err %v)", out, err)
+	}
+	// Afterparty starts 23:00 Friday, ends 01:00 Saturday (rolled over).
+	afterSet := out[0].Sets[1]
+	afterEnd, _ := time.Parse(time.RFC3339, afterSet.End)
+	if afterEnd.Day() != 27 || afterEnd.Hour() != 1 {
+		t.Errorf("planner afterparty end = %s, want 2026-06-27T01:00", afterSet.End)
+	}
+
 	if _, err := parseAnyTimetableJSON([]byte(`{"not":"an array"}`)); err == nil {
 		t.Error("expected an error for input that is neither timetable shape")
 	}

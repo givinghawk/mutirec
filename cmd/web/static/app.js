@@ -1625,13 +1625,22 @@ function renderVisualTimetable() {
   }
 
   const favIds = new Set(config.settings.favoriteSetIds || []);
+  // endMinutes: returns the end time as minutes from midnight of selectedTimetableDay,
+  // rolling an end on the *next* calendar day forward by 24*60 so afterparties
+  // that run past midnight are displayed as extending beyond 24:00 on the
+  // current day's grid rather than snapping back to before the start time.
+  function endMinutes(sp, ep) {
+    if (!ep) return sp.minutes + 60;
+    if (ep.date > selectedTimetableDay) return ep.minutes + 24 * 60;
+    return ep.minutes;
+  }
   let minMin = 24 * 60, maxMin = 0, any = false;
   config.timetable.forEach(st => (st.sets || []).forEach(s => {
     const sp = parseIso(s.start), ep = parseIso(s.end);
     if (sp && sp.date === selectedTimetableDay) {
       any = true;
       minMin = Math.min(minMin, sp.minutes);
-      maxMin = Math.max(maxMin, (ep && ep.date === selectedTimetableDay ? ep.minutes : sp.minutes + 60));
+      maxMin = Math.max(maxMin, endMinutes(sp, ep));
     }
   }));
   if (!any) { minMin = 12 * 60; maxMin = 24 * 60; }
@@ -1643,7 +1652,7 @@ function renderVisualTimetable() {
       const sp = parseIso(set.start), ep = parseIso(set.end);
       if (!sp || sp.date !== selectedTimetableDay) return '';
       const left = ((sp.minutes - minMin) / span) * 100;
-      const width = Math.max(3, (((ep ? ep.minutes : sp.minutes + 60) - sp.minutes) / span) * 100);
+      const width = Math.max(3, ((endMinutes(sp, ep) - sp.minutes) / span) * 100);
       const starred = set.id && favIds.has(set.id);
       return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(set.name)}">
         <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id || ''}')">&#9733;</button>

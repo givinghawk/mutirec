@@ -221,6 +221,7 @@ type SourcePreset struct {
 type StageSchedule struct {
 	Stage string        `json:"stage"`
 	URL   string        `json:"url"`
+	Color string        `json:"color,omitempty"`
 	Sets  []ScheduleSet `json:"sets"`
 }
 
@@ -2547,7 +2548,7 @@ func (a *App) handleLibraryEventTimetable(w http.ResponseWriter, r *http.Request
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		tt, err := parseStageTimetableJSON(body)
+		tt, err := parseAnyTimetableJSON(body)
 		if err != nil {
 			http.Error(w, "could not parse timetable JSON: "+err.Error(), http.StatusBadRequest)
 			return
@@ -2673,13 +2674,15 @@ func (a *App) handleTimetable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, tt)
 }
 
-// parseAnyTimetableJSON accepts either timetable shape this app can produce or
-// consume: the RFC3339 StageSchedule array the app itself emits, or the
-// compact [year,month,day,hour,minute,name?] per-stage tuple format (the
-// shape the downloadable community timetables ship in). It tries the RFC3339
-// shape first - a compact file, whose sets are arrays not objects, fails that
-// decode and falls through to the compact parser.
+// parseAnyTimetableJSON accepts any timetable shape this app can produce or
+// consume, tried in order:
+//  1. RFC3339 StageSchedule array — the app's own export format.
+//  2. Planner JSON — the format used by timetable.lol and local JSON exports
+//     (object with "data": { day: { date, stages: { name: [[id,start,end,artist]] } } }).
+//  3. Compact [year,month,day,hour,minute,name?] per-stage tuple array — the
+//     shape hand-edited community timetables typically ship in.
 func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
+	// Try 1: RFC3339 StageSchedule array (app's own export).
 	var direct []StageSchedule
 	if err := json.Unmarshal(data, &direct); err == nil {
 		total := 0
@@ -2690,6 +2693,15 @@ func parseAnyTimetableJSON(data []byte) ([]StageSchedule, error) {
 			return direct, nil
 		}
 	}
+	// Try 2: Planner JSON (timetable.lol / local planner file format).
+	var planner timetableLolPlannerData
+	if err := json.Unmarshal(data, &planner); err == nil && len(planner.Data) > 0 {
+		tt, _, convErr := convertTimetableLolData(planner)
+		if convErr == nil && len(tt) > 0 {
+			return tt, nil
+		}
+	}
+	// Try 3: Compact [year,month,day,hour,minute,name?] per-stage tuple array.
 	return parseStageTimetableJSON(data)
 }
 
@@ -2804,12 +2816,20 @@ type timetableLolDay struct {
 	Stages map[string][]timetableLolSet `json:"stages"`
 }
 
+type timetableLolFestivalDay struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+	Date  string `json:"date"` // YYYY-MM-DD — more reliable than parsing day.Date label
+}
+
 type timetableLolPlannerData struct {
-	EventSlug string                     `json:"eventSlug"`
-	PlanType  string                     `json:"planType"`
-	Title     string                     `json:"title"`
-	TimeZone  string                     `json:"timeZone"`
-	Data      map[string]timetableLolDay `json:"data"`
+	EventSlug     string                             `json:"eventSlug"`
+	PlanType      string                             `json:"planType"`
+	Title         string                             `json:"title"`
+	TimeZone      string                             `json:"timeZone"`
+	Data          map[string]timetableLolDay         `json:"data"`
+	FestivalRange map[string]timetableLolFestivalDay `json:"festivalRange,omitempty"`
+	StageColors   map[string]string                  `json:"stageColors,omitempty"`
 }
 
 // handleTimetableLolEvents lists public events from timetable.lol so the
@@ -2965,7 +2985,15 @@ func convertTimetableLolData(payload timetableLolPlannerData) ([]StageSchedule, 
 
 	for _, dayKey := range dayKeys {
 		day := payload.Data[dayKey]
-		dateStr := day.Date
+		// Prefer festivalRange[dayKey].Date (clean YYYY-MM-DD) over the day
+		// label ("Friday 24.06.22") since it needs no regex parsing.
+		dateStr := ""
+		if fr, ok := payload.FestivalRange[dayKey]; ok && fr.Date != "" {
+			dateStr = fr.Date
+		}
+		if dateStr == "" {
+			dateStr = day.Date
+		}
 		if dateStr == "" {
 			dateStr = dayKey
 		}
@@ -3014,7 +3042,8 @@ func convertTimetableLolData(payload timetableLolPlannerData) ([]StageSchedule, 
 	for _, name := range stageNames {
 		sets := byStage[name]
 		sort.Slice(sets, func(i, j int) bool { return sets[i].Start < sets[j].Start })
-		out = append(out, StageSchedule{Stage: name, Sets: sets})
+		color := payload.StageColors[name]
+		out = append(out, StageSchedule{Stage: name, Color: color, Sets: sets})
 	}
 	assignScheduleIDs(out)
 	return out, warnings, nil
