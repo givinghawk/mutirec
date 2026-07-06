@@ -134,6 +134,7 @@ type Settings struct {
 	RecordingSetLookahead   time.Duration      `json:"-"`
 	DiscordOAuth            DiscordOAuthConfig `json:"discordOAuth"`
 	Sharing                 SharingConfig      `json:"sharing"`
+	FileExplorerRoot        string             `json:"fileExplorerRoot,omitempty"`
 }
 
 // DiscordOAuthConfig holds this instance's Discord OAuth2 application
@@ -350,6 +351,9 @@ type App struct {
 	shareJobsMu sync.Mutex
 	shareJobs   map[string]*ShareJob
 
+	fetchJobsMu sync.Mutex
+	fetchJobs   map[string]*URLFetchJob
+
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
@@ -421,6 +425,7 @@ func NewApp(configPath string) (*App, error) {
 		oauthState:    map[string]pendingOAuth{},
 		shareNonces:   map[string]time.Time{},
 		shareJobs:     map[string]*ShareJob{},
+		fetchJobs:     map[string]*URLFetchJob{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -492,6 +497,17 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
+	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).
+	mux.HandleFunc("/api/explorer/list", a.handleExplorerList)
+	mux.HandleFunc("/api/explorer/mkdir", a.handleExplorerMkdir)
+	mux.HandleFunc("/api/explorer/rename", a.handleExplorerRename)
+	mux.HandleFunc("/api/explorer/delete", a.handleExplorerDelete)
+	mux.HandleFunc("/api/explorer/download", a.handleExplorerDownload)
+	mux.HandleFunc("/api/explorer/upload", a.handleExplorerUpload)
+	mux.HandleFunc("/api/explorer/zip", a.handleExplorerZip)
+	mux.HandleFunc("/api/explorer/unzip", a.handleExplorerUnzip)
+	mux.HandleFunc("/api/explorer/fetch", a.handleExplorerFetchURL)
+	mux.HandleFunc("/api/explorer/fetch/jobs/", a.handleExplorerFetchJobItem)
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)

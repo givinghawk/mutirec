@@ -28,19 +28,36 @@ import (
 // golang.org/x/net/proxy package doesn't support SOCKS4).
 // ============================================================================
 
+// dialTimeout bounds how long connecting to the proxy (or, with no proxy,
+// the destination itself) may take; responseHeaderTimeout bounds how long a
+// server may take to start responding once connected. Neither bounds how
+// long *streaming the body* takes - large recordings can take many minutes
+// to transfer, so nothing here uses http.Client.Timeout, which (unlike
+// these) covers the entire response body read and would otherwise kill a
+// large in-progress download for no reason other than having taken a while.
+const (
+	dialTimeout           = 15 * time.Second
+	responseHeaderTimeout = 30 * time.Second
+)
+
 // shareHTTPClient builds the HTTP client used for one sharing-related
 // request, optionally routed through proxyURL (empty means dial directly).
+// Callers that need a short overall deadline (e.g. the self-verification
+// ping, which talks to a single small endpoint) should set client.Timeout
+// themselves after getting the client back.
 func shareHTTPClient(proxyURL string) (*http.Client, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
 	if strings.TrimSpace(proxyURL) == "" {
-		return client, nil
+		return &http.Client{Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: dialTimeout}).DialContext,
+			TLSHandshakeTimeout:   dialTimeout,
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		}}, nil
 	}
 	transport, err := proxyTransport(proxyURL)
 	if err != nil {
 		return nil, err
 	}
-	client.Transport = transport
-	return client, nil
+	return &http.Client{Transport: transport}, nil
 }
 
 // proxyTransport builds an http.RoundTripper that dials through the given
@@ -54,7 +71,10 @@ func proxyTransport(proxyURL string) (*http.Transport, error) {
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
-		return &http.Transport{Proxy: http.ProxyURL(u)}, nil
+		return &http.Transport{
+			Proxy:                 http.ProxyURL(u),
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		}, nil
 	case "socks5", "socks5h":
 		var auth *proxy.Auth
 		if u.User != nil {
@@ -65,9 +85,15 @@ func proxyTransport(proxyURL string) (*http.Transport, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid SOCKS5 proxy: %w", err)
 		}
-		return &http.Transport{DialContext: contextDialerFunc(dialer)}, nil
+		return &http.Transport{
+			DialContext:           contextDialerFunc(dialer),
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		}, nil
 	case "socks4", "socks4a":
-		return &http.Transport{DialContext: socks4DialContext(u, u.Scheme == "socks4a")}, nil
+		return &http.Transport{
+			DialContext:           socks4DialContext(u, u.Scheme == "socks4a"),
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q - use http, https, socks5, socks4, or socks4a", u.Scheme)
 	}
@@ -113,7 +139,7 @@ func socks4DialContext(proxyURL *url.URL, useHostname bool) func(ctx context.Con
 		if err != nil || port <= 0 || port > 65535 {
 			return nil, fmt.Errorf("invalid port %q", portStr)
 		}
-		var d net.Dialer
+		d := net.Dialer{Timeout: dialTimeout}
 		conn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
 		if err != nil {
 			return nil, err

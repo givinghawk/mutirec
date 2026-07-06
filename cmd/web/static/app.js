@@ -138,7 +138,7 @@ async function refresh() {
 function applyRoleVisibility() {
   const isAdmin = state.role === 'admin';
   document.querySelectorAll('[data-admin-only]').forEach(el => el.classList.toggle('hidden', !isAdmin));
-  ['sources', 'diagnostics', 'events-tab'].forEach(id => {
+  ['sources', 'diagnostics', 'events-tab', 'explorer'].forEach(id => {
     const btn = document.querySelector(`.nav[data-view="${id}"]`);
     if (btn) btn.classList.toggle('hidden', !isAdmin);
   });
@@ -822,6 +822,7 @@ function fillSettings() {
   const s = config.settings, ui = config.ui;
   ['finishedDir','tempDir','logDir','checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
+  $('fileExplorerRoot').value = s.fileExplorerRoot || '';
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
   syncImageUploadPreview('uiLogoUrl');
@@ -851,6 +852,7 @@ function readSettings() {
   ['finishedDir','tempDir','logDir'].forEach(k => s[k] = $(k).value);
   ['checkIntervalSeconds','minFreeBytes','warnFreeBytes','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => s[k] = Number($(k).value));
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
+  s.fileExplorerRoot = $('fileExplorerRoot').value.trim();
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
@@ -1309,6 +1311,7 @@ document.querySelectorAll('.nav').forEach(b => b.onclick = async () => {
   if (b.dataset.view === 'diagnostics') runDiagnostics();
   if (b.dataset.view === 'watch') initWatch();
   if (b.dataset.view === 'events-tab') renderEventsTab();
+  if (b.dataset.view === 'explorer') loadExplorer();
 });
 
 // --- Diagnostics (system check) ---
@@ -3518,6 +3521,236 @@ async function deleteEvFestival(id) {
 }
 
 // ─── End of Events tab ────────────────────────────────────────────────────────
+
+// ─── File Explorer ────────────────────────────────────────────────────────────
+
+let explorerPath = '';
+let explorerEntries = [];
+let explorerSelected = new Set();
+let explorerFetchJobPollTimer = null;
+
+function explorerJoin(base, name) { return base ? `${base}/${name}` : name; }
+function explorerParent(p) { const i = p.lastIndexOf('/'); return i === -1 ? '' : p.slice(0, i); }
+
+async function loadExplorer() {
+  explorerSelected = new Set();
+  let data;
+  try {
+    data = await api(`/api/explorer/list?path=${encodeURIComponent(explorerPath)}`);
+  } catch {
+    // Path likely no longer exists (deleted/renamed elsewhere) - fall back to root.
+    explorerPath = '';
+    try { data = await api('/api/explorer/list?path='); } catch { return; }
+  }
+  explorerEntries = data.entries || [];
+  renderExplorerBreadcrumb();
+  renderExplorerRows();
+}
+
+function renderExplorerBreadcrumb() {
+  const parts = explorerPath ? explorerPath.split('/') : [];
+  let acc = '';
+  const crumbs = ['<a href="#" data-path="">root</a>'];
+  for (const part of parts) {
+    acc = explorerJoin(acc, part);
+    crumbs.push(`<a href="#" data-path="${escapeAttr(acc)}">${escapeHtml(part)}</a>`);
+  }
+  $('explorer-breadcrumb').innerHTML = crumbs.join(' / ');
+  $('explorer-breadcrumb').querySelectorAll('a').forEach(a => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    explorerPath = a.dataset.path;
+    loadExplorer();
+  }));
+}
+
+function renderExplorerRows() {
+  const tbody = $('explorer-rows');
+  $('explorer-empty').classList.toggle('hidden', explorerEntries.length > 0);
+  tbody.innerHTML = explorerEntries.map(e => `
+    <tr data-name="${escapeAttr(e.name)}">
+      <td><input type="checkbox" class="explorer-row-check" data-name="${escapeAttr(e.name)}"></td>
+      <td class="truncate">
+        ${e.isDir
+          ? `<a href="#" class="explorer-open-dir font-medium" data-name="${escapeAttr(e.name)}">&#128193; ${escapeHtml(e.name)}</a>`
+          : `<span>&#128196; ${escapeHtml(e.name)}</span>`}
+      </td>
+      <td class="text-zinc-400">${e.isDir ? '' : formatBytes(e.size)}</td>
+      <td class="text-zinc-400">${new Date(e.modTime).toLocaleString()}</td>
+      <td class="whitespace-nowrap text-right">
+        <button type="button" class="btn explorer-download" data-name="${escapeAttr(e.name)}">Download</button>
+        ${!e.isDir && /\.zip$/i.test(e.name) ? `<button type="button" class="btn explorer-extract" data-name="${escapeAttr(e.name)}">Extract</button>` : ''}
+        <button type="button" class="btn explorer-rename" data-name="${escapeAttr(e.name)}">Rename</button>
+        <button type="button" class="btn explorer-delete" data-name="${escapeAttr(e.name)}" style="color:#fda4af">Delete</button>
+      </td>
+    </tr>`).join('');
+
+  tbody.querySelectorAll('.explorer-open-dir').forEach(a => a.addEventListener('click', (e) => {
+    e.preventDefault();
+    explorerPath = explorerJoin(explorerPath, a.dataset.name);
+    loadExplorer();
+  }));
+  tbody.querySelectorAll('.explorer-row-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) explorerSelected.add(cb.dataset.name); else explorerSelected.delete(cb.dataset.name);
+    updateExplorerSelectionButtons();
+  }));
+  tbody.querySelectorAll('.explorer-download').forEach(btn => btn.addEventListener('click', () => {
+    window.open(`/api/explorer/download?path=${encodeURIComponent(explorerJoin(explorerPath, btn.dataset.name))}`, '_blank');
+  }));
+  tbody.querySelectorAll('.explorer-extract').forEach(btn => btn.addEventListener('click', async () => {
+    try {
+      await api('/api/explorer/unzip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: explorerJoin(explorerPath, btn.dataset.name) }) });
+      toast(`Extracted "${btn.dataset.name}"`, 'info');
+    } catch { return; }
+    loadExplorer();
+  }));
+  tbody.querySelectorAll('.explorer-rename').forEach(btn => btn.addEventListener('click', async () => {
+    const newName = prompt(`Rename "${btn.dataset.name}" to:`, btn.dataset.name);
+    if (!newName || newName === btn.dataset.name) return;
+    try {
+      await api('/api/explorer/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: explorerJoin(explorerPath, btn.dataset.name), newName }) });
+    } catch { return; }
+    loadExplorer();
+  }));
+  tbody.querySelectorAll('.explorer-delete').forEach(btn => btn.addEventListener('click', async () => {
+    if (!confirm(`Delete "${btn.dataset.name}"? This can't be undone.`)) return;
+    try {
+      await api('/api/explorer/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: explorerJoin(explorerPath, btn.dataset.name) }) });
+    } catch { return; }
+    loadExplorer();
+  }));
+  updateExplorerSelectionButtons();
+}
+
+function updateExplorerSelectionButtons() {
+  const any = explorerSelected.size > 0;
+  $('explorer-zip-selected').disabled = !any;
+  $('explorer-download-selected').disabled = !any;
+}
+
+$('explorer-select-all').addEventListener('change', () => {
+  const checked = $('explorer-select-all').checked;
+  explorerSelected = new Set(checked ? explorerEntries.map(e => e.name) : []);
+  document.querySelectorAll('.explorer-row-check').forEach(cb => cb.checked = checked);
+  updateExplorerSelectionButtons();
+});
+
+$('explorer-refresh').onclick = () => loadExplorer();
+
+$('explorer-mkdir').onclick = async () => {
+  const name = prompt('New folder name:');
+  if (!name) return;
+  try {
+    await api('/api/explorer/mkdir', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: explorerPath, name }) });
+  } catch { return; }
+  loadExplorer();
+};
+
+$('explorer-upload-btn').onclick = () => $('explorer-upload-input').click();
+$('explorer-upload-input').onchange = async () => {
+  const files = $('explorer-upload-input').files;
+  if (!files.length) return;
+  const form = new FormData();
+  for (const f of files) form.append('file', f);
+  $('explorer-upload-input').value = '';
+  toast(`Uploading ${files.length} file(s)…`, 'info');
+  try {
+    const res = await api(`/api/explorer/upload?path=${encodeURIComponent(explorerPath)}`, { method: 'POST', body: form });
+    toast(`Uploaded ${res.saved}/${res.total} file(s)`, 'info');
+  } catch { return; }
+  loadExplorer();
+};
+
+$('explorer-zip-selected').onclick = async () => {
+  const zipName = prompt('Zip file name:', 'archive');
+  if (!zipName) return;
+  try {
+    await api('/api/explorer/zip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: explorerPath, names: [...explorerSelected], zipName }) });
+    toast('Zip created', 'info');
+  } catch { return; }
+  loadExplorer();
+};
+
+$('explorer-download-selected').onclick = () => {
+  const params = [...explorerSelected].map(n => `path=${encodeURIComponent(explorerJoin(explorerPath, n))}`).join('&');
+  window.open(`/api/explorer/download?${params}`, '_blank');
+};
+
+// --- Fetch from URL (works with direct links and ownCloud/Nextcloud-style
+// public share links, e.g. TransIP Stack) ---
+
+function openExplorerFetchModal() {
+  $('explorer-fetch-url').value = '';
+  $('explorer-fetch-password').value = '';
+  $('explorer-fetch-error').classList.add('hidden');
+  $('explorer-fetch-job-box').classList.add('hidden');
+  stopExplorerFetchPoll();
+  $('explorer-fetch-overlay').classList.remove('hidden');
+}
+function closeExplorerFetchModal() {
+  $('explorer-fetch-overlay').classList.add('hidden');
+  stopExplorerFetchPoll();
+}
+$('explorer-fetch-open').onclick = openExplorerFetchModal;
+$('explorer-fetch-close').onclick = closeExplorerFetchModal;
+$('explorer-fetch-cancel').onclick = closeExplorerFetchModal;
+$('explorer-fetch-overlay').addEventListener('click', (e) => { if (e.target.id === 'explorer-fetch-overlay') closeExplorerFetchModal(); });
+
+$('explorer-fetch-start').onclick = async () => {
+  const url = $('explorer-fetch-url').value.trim();
+  const password = $('explorer-fetch-password').value;
+  if (!url) { $('explorer-fetch-error').textContent = 'Enter a URL first'; $('explorer-fetch-error').classList.remove('hidden'); return; }
+  $('explorer-fetch-error').classList.add('hidden');
+  $('explorer-fetch-start').disabled = true;
+  let result;
+  try {
+    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, path: explorerPath }) });
+  } catch { $('explorer-fetch-start').disabled = false; return; }
+  if (!result.ok) {
+    $('explorer-fetch-error').textContent = result.error || 'Could not start that download.';
+    $('explorer-fetch-error').classList.remove('hidden');
+    $('explorer-fetch-start').disabled = false;
+    return;
+  }
+  $('explorer-fetch-job-box').classList.remove('hidden');
+  pollExplorerFetchJob(result.jobId);
+};
+
+function stopExplorerFetchPoll() {
+  if (explorerFetchJobPollTimer) { clearTimeout(explorerFetchJobPollTimer); explorerFetchJobPollTimer = null; }
+}
+
+async function pollExplorerFetchJob(jobId) {
+  stopExplorerFetchPoll();
+  let job;
+  try {
+    job = await api(`/api/explorer/fetch/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    explorerFetchJobPollTimer = setTimeout(() => pollExplorerFetchJob(jobId), 2000);
+    return;
+  }
+  renderExplorerFetchJob(job);
+  if (job.status === 'running') {
+    explorerFetchJobPollTimer = setTimeout(() => pollExplorerFetchJob(jobId), 1000);
+  } else {
+    $('explorer-fetch-start').disabled = false;
+    if (job.status === 'error') toast(`Download failed: ${job.error || 'unknown error'}`, 'error');
+    else { toast(`Downloaded "${job.destName}"`, 'info'); loadExplorer(); }
+  }
+}
+
+function renderExplorerFetchJob(job) {
+  const pct = job.totalBytes > 0 ? Math.min(100, Math.round(job.transferredBytes / job.totalBytes * 100)) : 0;
+  $('explorer-fetch-job-title').textContent = job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
+  $('explorer-fetch-job-stats').textContent = job.totalBytes > 0
+    ? `${formatBytes(job.transferredBytes)} / ${formatBytes(job.totalBytes)} · ${formatBytes(job.speedBps)}/s`
+    : `${formatBytes(job.transferredBytes)} · ${formatBytes(job.speedBps)}/s`;
+  $('explorer-fetch-job-bar').style.width = `${pct}%`;
+  $('explorer-fetch-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('explorer-fetch-job-log').scrollTop = $('explorer-fetch-job-log').scrollHeight;
+}
+
+// Explorer only loads on demand (its tab click handler calls loadExplorer()
+// below, alongside the other per-tab loaders), not eagerly at page load.
 
 // Wires up the handful of custom dropdowns that are static parts of the page
 // (not rebuilt by drawSourceEditor() or setDropdownOptions()) as soon as the

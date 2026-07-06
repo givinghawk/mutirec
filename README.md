@@ -39,6 +39,7 @@ add any source you like.
 - [Auto-Reconnect](#auto-reconnect)
 - [Progressive Web App](#progressive-web-app)
 - [Storage](#storage)
+- [File Explorer](#file-explorer)
 - [Backups](#backups)
 - [Notifications](#notifications)
 - [Peer Sharing (P2P)](#peer-sharing-p2p)
@@ -67,6 +68,7 @@ add any source you like.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
 - Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
 - Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
+- File Explorer: browse, upload, zip/unzip, rename, and delete files under a configurable root (the recordings library by default); a "Fetch from URL" action downloads a direct link or a public ownCloud/Nextcloud-style share link (TransIP Stack included) straight into it, in the background.
 
 **Accounts & security**
 
@@ -322,6 +324,30 @@ volumes:
 
 Host mounting is the most predictable approach across Linux, macOS, Windows,
 NAS systems, and Docker Desktop.
+
+## File Explorer
+
+The **Explorer** tab is a general-purpose file manager rooted at
+**Settings → Recorder → File explorer root** - leave it blank (recommended)
+and it browses your recordings library; point it at a different folder (or
+the whole data root) if you want broader access. This is admin-only and the
+same trust level as source stream/ffmpeg args - treat it as equivalent to
+shell access to that folder.
+
+From it you can create folders, rename/delete entries, upload files, download
+a file or a whole folder (multiple selected entries download together as one
+zip, built on the fly), and zip/unzip in place.
+
+**Fetch from URL** downloads straight into the current folder as a
+background job (progress, speed, and a live log, same as a peer-sharing
+import) instead of tying up the browser tab. It works with:
+
+- A direct download link.
+- A public share link from an ownCloud/Nextcloud-based host - **TransIP
+  Stack** (and several other self-hosted "share a folder" tools people use to
+  hand out sets) is built on this, so a link like `https://host/s/<token>`
+  works, password included if the share is protected. A zip is
+  auto-extracted into a sibling folder once it finishes downloading.
 
 ## Backups
 

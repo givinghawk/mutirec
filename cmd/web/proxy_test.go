@@ -74,8 +74,17 @@ func TestShareHTTPClientNoProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if client.Transport != nil {
-		t.Fatal("expected the default transport when no proxy is configured")
+	// No blanket client.Timeout - it would cover the entire body read and
+	// kill a large in-progress download; only dial/header timeouts are set.
+	if client.Timeout != 0 {
+		t.Fatalf("expected no overall client timeout (would cut off large downloads), got %v", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport == nil {
+		t.Fatal("expected a configured *http.Transport even with no proxy")
+	}
+	if transport.ResponseHeaderTimeout == 0 {
+		t.Fatal("expected a response-header timeout to bound an unresponsive server")
 	}
 }
 
