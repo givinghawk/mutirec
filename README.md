@@ -39,6 +39,7 @@ add any source you like.
 - [Auto-Reconnect](#auto-reconnect)
 - [Progressive Web App](#progressive-web-app)
 - [Storage](#storage)
+- [Recordings Library & Smart Match](#recordings-library--smart-match)
 - [File Explorer](#file-explorer)
 - [Backups](#backups)
 - [Notifications](#notifications)
@@ -67,7 +68,7 @@ add any source you like.
 - Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
 - Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
-- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
+- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; if a recording arrived some other way (File Explorer, a URL fetch, a P2P import) and has none yet, one is generated the first time it's viewed in the library. Audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
 - File Explorer: browse, upload, zip/unzip, rename, and delete files under a configurable root (the recordings library by default); a "Fetch from URL" action downloads a direct link or a public ownCloud/Nextcloud-style share link (TransIP Stack included) straight into it, in the background.
 
 **Accounts & security**
@@ -324,6 +325,39 @@ volumes:
 
 Host mounting is the most predictable approach across Linux, macOS, Windows,
 NAS systems, and Docker Desktop.
+
+## Recordings Library & Smart Match
+
+Recordings the app makes itself land in a flat `<source>/<file>` folder
+automatically - nothing to configure there. If you're adding sets you
+already have (via the File Explorer, a URL fetch, or just copying files onto
+the disk), organize them like this so **Smart Match** can file them
+automatically instead of one-by-one by hand:
+
+```
+recordings/<Event>/<Edition or year>/<Day>/<Stage>/<Event> <year>, <Stage> (<Day>, <date>).mp4
+
+e.g.
+recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturday, 2026-07-04).mp4
+```
+
+- Only the last two levels are required: the **stage** folder (the file's
+  immediate parent) and at least one folder above it. The edition/year and
+  day folders are optional - include whichever you have.
+- A `YYYY-MM-DD`-shaped date and/or a weekday name, in the filename or a day
+  folder, lets Smart Match sort a recording onto the right day even with no
+  archived timetable to match against.
+- This convention is meant for a whole day or a whole stage recorded as a
+  single file, not one DJ's set - Smart Match won't invent an artist for it.
+  If you've imported an archived timetable for the event, Smart Match still
+  prefers a real per-set match (time window + artist name) over a
+  folder-based guess.
+- Run **Smart Match** (in the Recordings toolbar) after adding files: it
+  reads this layout, offers to file each recording under the matching event
+  and stage - creating the event first if it doesn't already exist - and
+  applies nothing until you approve it. The same explanation is available
+  in-app via the **Folder Layout** button next to Smart Match (and in the
+  File Explorer toolbar).
 
 ## File Explorer
 

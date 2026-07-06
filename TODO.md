@@ -471,6 +471,65 @@
     body streaming is only bounded by however long the transfer actually
     takes.
 
+## Done (this session, part 5)
+- **Thumbnails now backfill on demand**: the Recordings page showed no
+  thumbnail for anything that didn't arrive through the live recording
+  pipeline (a file dropped in via the File Explorer/URL fetch, a P2P import,
+  or a recording that predates the thumbnail feature) - `generateThumbnail`
+  was only ever called from `runRecording`'s success path. Fixed by adding
+  `generateThumbnailOnDemand` (`cmd/web/uploads.go`): the thumbnail GET
+  handler now generates one synchronously the first time it's requested and
+  none exists, instead of just 404ing forever. In-flight generation is
+  deduped per relPath (`App.thumbGenMu`/`thumbGenerating`, a
+  `map[string]chan struct{}`) so a burst of card renders for the same
+  recording can't spawn a pile of redundant `ffmpeg` processes.
+- **Folder-layout convention for manually-added recordings, and Smart Match
+  support for it**: users have real festival sets already organized as
+  `<event>/<edition>/<day>/<stage>/<file>` (e.g. a whole day of one stage
+  recorded as a single file - not any specific DJ's set). Previously,
+  channel/stage was always derived from the *first* path segment
+  (`handleRecordings`, `handleRecordingMatchSuggestions`), which is right for
+  the live recorder's own flat `<source>/<file>` layout but wrong for a
+  nested one (it would read "stage" as the event name instead). Added
+  `channelFromPath` (`cmd/web/main.go`) - the immediate parent directory,
+  which is a no-op for the flat 1-level case and correctly resolves to the
+  stage folder for anything deeper - and switched both call sites to it.
+  - Added `folderEventHint`/`eventMatchesFolderHint`/`applyFolderEventHint`:
+    when Smart Match's normal per-set scoring comes back weak (confidence
+    "none" or "low" - i.e. nothing in an archived timetable actually
+    matches), it now falls back to parsing the folder path itself. A
+    year-shaped segment becomes the edition year; a weekday-name or
+    date-shaped segment (a day folder) is dropped rather than folded into
+    the name; whatever's left becomes the candidate event name. If an
+    existing `LibraryEvent` matches by name (and year, if both sides have
+    one), the suggestion files straight into it; otherwise it proposes
+    *creating* that event - new `MatchSuggestion.NewEventName`/
+    `NewEventYear` fields - left for the user to approve like every other
+    suggestion, never applied silently. Deliberately never guesses an
+    artist/set for these: a whole-day/stage recording isn't one DJ's set,
+    and a real archived-timetable match is always preferred when one scores
+    well enough on its own.
+  - Frontend (`app.js`): the Smart Match list now shows "New event: X" for a
+    folder-only suggestion and its Approve button reads "Create Event &
+    Approve"; approving it calls `POST /api/events` first (using the
+    existing create-event endpoint) and folds the new ID into the normal
+    `PUT /api/recordings/meta` call. That call now also forwards
+    `guessedTime` as `start` unconditionally (harmless for a real
+    set-match, since `handleRecordingMeta` overwrites `Start`/`End` from the
+    matched set when `setId` is present anyway) so a folder/filename-only
+    match still buckets into the right day in the library view instead of
+    falling back to file mtime.
+  - **In-app documentation**: a "Folder Layout" button next to Smart Match
+    (and one in the File Explorer toolbar - same modal, `#lib-folder-help-overlay`)
+    opens a plain-language explanation of the recommended layout with a
+    genericized example (no real festival names, per the no-bundled-festival-
+    data constraint). Mirrored in a new README section, "Recordings Library &
+    Smart Match".
+  - Tests: `TestChannelFromPath`, `TestFolderEventHint`,
+    `TestBestMatchSuggestion_WholeStageFolderConvention` (both the
+    matches-existing-event and proposes-new-event branches) in
+    `match_test.go`.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

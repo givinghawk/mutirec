@@ -1361,7 +1361,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 1 {
 			source = parts[0]
 		}
-		rf := RecordingFile{Name: filepath.Base(p), Source: source, Path: rel, Size: info.Size(), ModTime: info.ModTime(), Channel: source}
+		rf := RecordingFile{Name: filepath.Base(p), Source: source, Path: rel, Size: info.Size(), ModTime: info.ModTime(), Channel: channelFromPath(rel)}
 		if meta, ok := cfg.RecordingMeta[rel]; ok {
 			rf.EventID = meta.EventID
 			rf.SetID = meta.SetID
@@ -1625,6 +1625,77 @@ var nonWordCharRe = regexp.MustCompile(`[_\-. ]+`)
 // way that's tolerant of case and punctuation/spacing differences.
 var nonAlnumRe = regexp.MustCompile(`[^a-z0-9]+`)
 
+// channelFromPath derives a recording's channel/stage from its path relative
+// to FinishedDir: the name of its immediate parent directory. For the flat
+// `<source>/<file>` layout the live recorder itself uses, that's the same as
+// the source name it always was; for a deeper, manually-organized layout
+// like `<event>/<edition>/<day>/<stage>/<file>` it correctly resolves to the
+// stage folder rather than the event folder at the top.
+func channelFromPath(rel string) string {
+	idx := strings.LastIndex(rel, "/")
+	if idx < 0 {
+		return ""
+	}
+	dir := rel[:idx]
+	if slash := strings.LastIndex(dir, "/"); slash >= 0 {
+		return dir[slash+1:]
+	}
+	return dir
+}
+
+var yearSegmentRe = regexp.MustCompile(`^(19|20)\d{2}$`)
+var dateSegmentRe = regexp.MustCompile(`^\d{4}[-_.]\d{2}[-_.]\d{2}$|^\d{2}[-_.]\d{2}[-_.]\d{4}$`)
+
+// folderEventHint parses the directories above a recording's stage folder
+// into a candidate event name and year, for the recommended layout
+// `<event>/<edition-or-year>/<day>/<stage>/<file>` (any subset of the middle
+// levels still works, e.g. `<event>/<stage>/<file>`). A year-looking segment
+// becomes the edition year; a weekday-name or date-looking segment (a day
+// folder) is dropped rather than folded into the event name. Only engages
+// with at least two directory levels - a single level is the flat
+// `<source>/<file>` layout the live recorder uses, where that one segment
+// already means "channel", not "event".
+func folderEventHint(rel string) (eventName string, year int, stage string, ok bool) {
+	idx := strings.LastIndex(rel, "/")
+	if idx < 0 {
+		return "", 0, "", false
+	}
+	dirs := strings.Split(rel[:idx], "/")
+	if len(dirs) < 2 {
+		return "", 0, "", false
+	}
+	stage = dirs[len(dirs)-1]
+	var nameParts []string
+	for _, seg := range dirs[:len(dirs)-1] {
+		switch {
+		case yearSegmentRe.MatchString(seg):
+			year, _ = strconv.Atoi(seg)
+		case dateSegmentRe.MatchString(seg) || isWeekdayWord(seg):
+			// a day folder - not part of the event's display name
+		default:
+			nameParts = append(nameParts, seg)
+		}
+	}
+	eventName = strings.TrimSpace(strings.Join(nameParts, " "))
+	if eventName == "" {
+		return "", 0, "", false
+	}
+	return eventName, year, stage, true
+}
+
+// eventMatchesFolderHint reports whether an existing LibraryEvent is the one
+// a folderEventHint is pointing at: same name (ignoring case/punctuation),
+// and the same year if both sides have one set.
+func eventMatchesFolderHint(ev LibraryEvent, name string, year int) bool {
+	if nonAlnumRe.ReplaceAllString(strings.ToLower(ev.Name), "") != nonAlnumRe.ReplaceAllString(strings.ToLower(name), "") {
+		return false
+	}
+	if year != 0 && ev.Year != 0 && ev.Year != year {
+		return false
+	}
+	return true
+}
+
 func validDate(year, month, day int) bool {
 	return year >= 2000 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31
 }
@@ -1794,6 +1865,11 @@ type MatchSuggestion struct {
 	Artist          string `json:"artist,omitempty"`
 	Confidence      string `json:"confidence"` // "high" | "medium" | "low" | "none"
 	Reason          string `json:"reason"`
+	// NewEventName/NewEventYear are set instead of EventID when the folder
+	// layout (see folderEventHint) implies an event that doesn't exist in
+	// the Library yet - approving this suggestion creates it first.
+	NewEventName string `json:"newEventName,omitempty"`
+	NewEventYear int    `json:"newEventYear,omitempty"`
 }
 
 // handleRecordingMatchSuggestions scans every recording that isn't already
@@ -1822,11 +1898,7 @@ func (a *App) handleRecordingMatchSuggestions(w http.ResponseWriter, r *http.Req
 		if meta, ok := cfg.RecordingMeta[rel]; ok && meta.EventID != "" {
 			return nil // already organized - nothing to suggest
 		}
-		parts := strings.SplitN(rel, "/", 2)
-		channel := ""
-		if len(parts) > 1 {
-			channel = parts[0]
-		}
+		channel := channelFromPath(rel)
 		name := filepath.Base(p)
 		guessed, fromName, hasTimeOfDay := guessTimeFromName(name, info.ModTime())
 		suggestions = append(suggestions, bestMatchSuggestion(cfg, rel, name, channel, guessed, fromName, hasTimeOfDay))
@@ -2000,7 +2072,7 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 	}
 
 	if best == nil {
-		return base
+		return applyFolderEventHint(cfg, base, path)
 	}
 	base.EventID = best.eventID
 	base.EventName = best.eventName
@@ -2045,6 +2117,47 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 			base.Reason = fmt.Sprintf("Closest guess: %s on %s - verify before approving.", best.artist, best.stage)
 		}
 	}
+	if base.Confidence == "none" || base.Confidence == "low" {
+		return applyFolderEventHint(cfg, base, path)
+	}
+	return base
+}
+
+// applyFolderEventHint fills in a weak (or missing) timetable-set match from
+// the recording's folder layout instead, for the case Smart Match's per-set
+// scoring can't handle at all: a whole day (or whole stage) recorded as one
+// file, with no single DJ set to attach it to. If an existing LibraryEvent's
+// name (and year, if the folder gave one) matches, the recording is filed
+// under it directly; otherwise the suggestion proposes creating that event,
+// left for the user to approve rather than done silently. Either way, no
+// SetID/Artist is guessed - approving just files the recording under the
+// right event and stage.
+func applyFolderEventHint(cfg AppConfig, base MatchSuggestion, path string) MatchSuggestion {
+	name, year, stage, ok := folderEventHint(path)
+	if !ok {
+		return base
+	}
+	for _, ev := range cfg.LibraryEvents {
+		if eventMatchesFolderHint(ev, name, year) {
+			base.EventID = ev.ID
+			base.EventName = ev.Name
+			base.SetID = ""
+			base.Artist = ""
+			base.Stage = stage
+			base.Confidence = "medium"
+			base.Reason = fmt.Sprintf("Folder path matches the existing event %q, stage %q - no specific set/artist to match, so this will be filed as a full recording with no DJ assigned.", ev.Name, stage)
+			return base
+		}
+	}
+	base.NewEventName = name
+	base.NewEventYear = year
+	base.Stage = stage
+	base.Confidence = "medium"
+	yearSuffix := ""
+	if year != 0 {
+		yearSuffix = fmt.Sprintf(" (%d)", year)
+	}
+	base.Reason = fmt.Sprintf("No event named %q%s exists yet - approving will create it and file this under stage %q.", name, yearSuffix, stage)
 	return base
 }
 

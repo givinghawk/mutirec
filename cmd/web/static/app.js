@@ -1838,6 +1838,12 @@ let matchSuggestions = [];
 $('lib-match-open').onclick = openMatchView;
 $('lib-match-close').onclick = closeMatchView;
 
+$('lib-folder-help-open').onclick = () => $('lib-folder-help-overlay').classList.remove('hidden');
+$('lib-folder-help-close').onclick = () => $('lib-folder-help-overlay').classList.add('hidden');
+$('lib-folder-help-close-2').onclick = () => $('lib-folder-help-overlay').classList.add('hidden');
+$('lib-folder-help-overlay').addEventListener('click', (e) => { if (e.target.id === 'lib-folder-help-overlay') $('lib-folder-help-overlay').classList.add('hidden'); });
+$('explorer-folder-help-open').onclick = () => $('lib-folder-help-overlay').classList.remove('hidden');
+
 async function openMatchView() {
   $('lib-home').classList.add('hidden');
   $('lib-event-view').classList.add('hidden');
@@ -2164,12 +2170,12 @@ function renderMatchList() {
     <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
       <div class="min-w-0">
         <div class="truncate font-medium">${escapeHtml(s.name)}</div>
-        <div class="text-xs text-zinc-400">${escapeHtml(s.channel)}${s.eventName ? ' · ' + escapeHtml(s.eventName) : ''}${s.artist ? ' · ' + escapeHtml(s.artist) : ''}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(s.channel)}${s.eventName ? ' · ' + escapeHtml(s.eventName) : (s.newEventName ? ' · New event: ' + escapeHtml(s.newEventName) + (s.newEventYear ? ' ' + s.newEventYear : '') : '')}${s.artist ? ' · ' + escapeHtml(s.artist) : ''}</div>
         ${s.guessedArtist ? `<div class="text-xs text-zinc-500">Filename suggests: "${escapeHtml(s.guessedArtist)}"</div>` : ''}
         <div class="text-xs ${badge[s.confidence] || 'text-zinc-500'}">${escapeHtml(s.reason)}</div>
       </div>
       <div class="flex flex-shrink-0 items-center gap-2">
-        ${s.eventId ? `<button type="button" class="btn primary lib-match-approve" data-index="${i}">Approve</button>` : ''}
+        ${(s.eventId || s.newEventName) ? `<button type="button" class="btn primary lib-match-approve" data-index="${i}">${s.newEventName ? 'Create Event & Approve' : 'Approve'}</button>` : ''}
         <button type="button" class="btn lib-match-edit" data-index="${i}">${s.eventId ? 'Edit' : 'Assign manually'}</button>
         <button type="button" class="btn lib-match-skip" data-index="${i}" style="color:#fda4af">Skip</button>
       </div>
@@ -2183,7 +2189,13 @@ function renderMatchList() {
 async function approveSuggestion(i) {
   const s = matchSuggestions[i];
   try {
-    await api('/api/recordings/meta', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: s.path, eventId: s.eventId, setId: s.setId, artist: s.artist }) });
+    let eventId = s.eventId;
+    if (!eventId && s.newEventName) {
+      const created = await api('/api/events', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: s.newEventName, year: s.newEventYear || undefined }) });
+      eventId = created.id;
+      await refresh(); // pick up the new event for the rest of this Smart Match session
+    }
+    await api('/api/recordings/meta', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: s.path, eventId, setId: s.setId, artist: s.artist, start: s.guessedTime }) });
     toast(`Organized "${s.name}"`, 'info');
   } catch {
     return;
