@@ -809,6 +809,63 @@
     upstream's actual `200` + body instead of a redirect the browser could
     never have authenticated through on its own.
 
+## Done (this session, part 9)
+- **MilkDrop-style music visualizer** (Butterchurn, a WebGL port of the
+  Winamp MilkDrop plugin, replacing the previous plain frequency-bar
+  canvas). Vendored (not CDN) at
+  `cmd/web/static/vendor/butterchurn/{butterchurn.min.js,butterchurn-presets.min.js}`
+  and included via `<script>` tags in `index.html` — vendored rather than
+  loaded from unpkg like the other CDN scripts so the visualizer keeps
+  working on a fully offline/self-hosted install, consistent with the rest
+  of the app's no-external-dependency posture.
+  - `ensureVizGraph`/`startVisualizer`/`stopVisualizer` in `app.js` keep
+    their existing signatures (`startVisualizer(videoEl, canvasId)`,
+    `stopVisualizer(canvasId)`) so both existing call sites — the Watch
+    tab's live preview (`#watch-visualizer`) and the Recordings player's
+    audio-only playback (`#cp-visualizer`) — needed no changes beyond
+    wiring up a new "Next preset" button.
+  - The `AudioContext`/`MediaElementSourceNode` graph is unchanged
+    (`source.connect(audioCtx.destination)` for actual playback); Butterchurn
+    attaches via `visualizer.connectAudio(source)` and renders via
+    `visualizer.render()` each animation frame, replacing the old
+    `AnalyserNode` + 2D bar-drawing loop as the primary path. The old bar
+    visualizer is kept as an automatic fallback for any browser/context
+    where `butterchurn.createVisualizer` isn't available or throws (e.g. no
+    WebGL2) — built lazily so a working WebGL2 context always wins first.
+  - `nextVisualizerPreset(canvasId, random)` cycles or randomly jumps
+    presets with a 1.5s blend; wired to new "Next preset" buttons next to
+    the Watch tab's visualizer toggle and as an overlay button on the
+    Recordings player's audio stage. A preset is also chosen at random on
+    first start so every recording doesn't open on the same pattern.
+  - Canvas resizing is handled by a `ResizeObserver` that calls
+    `visualizer.setRendererSize(w, h)` — needed since Butterchurn's
+    internal WebGL viewport doesn't auto-track its canvas's CSS size the
+    way a 2D canvas redraw loop does.
+  - **Real bugs caught only by loading the actual page in a browser** (`go
+    vet`/`go test` don't touch frontend JS at all here since this feature
+    has no Go-side changes): (1) both vendored UMD builds nest their real
+    API under a non-enumerable `.default` property
+    (`window.butterchurn.default.createVisualizer`, not
+    `window.butterchurn.createVisualizer` directly) — `Object.keys()` on
+    the global shows nothing useful either way since the interop props
+    aren't enumerable, so this only surfaces by actually calling the
+    function and checking `typeof`. (2) A canvas element permanently locks
+    to whichever context type (`"webgl2"` vs `"2d"`) is first *successfully*
+    established — an early `canvas.getContext('webgl2')` feature-detection
+    probe (before deciding whether to try Butterchurn) silently poisoned
+    the canvas for its own 2D fallback path once Butterchurn failed to
+    initialize, crashing on `canvas.getContext('2d')` returning `null`. Fix
+    was to remove the standalone probe entirely and let
+    `butterchurn.createVisualizer`'s own internal `getContext('webgl2')`
+    call be the only attempt, falling back to 2D only if that throws.
+  - Verified with a Playwright script driving the real embedded page (login
+    → construct a dummy `<audio>` element with a silent data-URI WAV so
+    `createMediaElementSource` has something to attach to → call
+    `startVisualizer` directly → read back WebGL pixel data via
+    `gl.readPixels` to confirm non-blank output, not just "no exception
+    thrown") rather than trusting unit tests alone, since this is a
+    rendering bug class Go's test suite has no way to catch.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

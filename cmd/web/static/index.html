@@ -15,6 +15,10 @@
   <script src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
   <link href="https://unpkg.com/video.js@8/dist/video-js.min.css" rel="stylesheet">
   <script src="https://unpkg.com/video.js@8/dist/video.min.js"></script>
+  <!-- Vendored (not CDN): the visualizer must keep working even without -->
+  <!-- internet access, since MutiRec is meant to run fully self-hosted. -->
+  <script src="/vendor/butterchurn/butterchurn.min.js"></script>
+  <script src="/vendor/butterchurn/butterchurn-presets.min.js"></script>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body class="min-h-screen bg-zinc-950 text-zinc-100">
@@ -92,9 +96,12 @@
         <div class="panel">
           <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div class="custom-dropdown" id="watch-source-dropdown" style="min-width:260px;max-width:360px"></div>
-            <label class="flex items-center gap-2 text-sm text-zinc-300">
-              <input id="watch-visualizer-toggle" type="checkbox" class="accent-red-500" checked> Visualizer
-            </label>
+            <div class="flex items-center gap-3">
+              <label class="flex items-center gap-2 text-sm text-zinc-300" title="MilkDrop-style music visualizer (Butterchurn)">
+                <input id="watch-visualizer-toggle" type="checkbox" class="accent-red-500" checked> Visualizer
+              </label>
+              <button type="button" id="watch-visualizer-next" class="btn" title="Next visualizer preset">Next preset</button>
+            </div>
           </div>
           <div id="watch-player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
           <div class="custom-player" id="watch-player">
@@ -284,6 +291,7 @@
                 <div class="custom-player-overlay-btn hidden" id="cp-center-play" aria-label="Play">&#9658;</div>
                 <div id="cp-audio-stage" class="custom-player-audio-stage hidden">
                   <canvas id="cp-visualizer" class="cp-visualizer"></canvas>
+                  <button type="button" id="cp-visualizer-next" class="btn cp-visualizer-next-btn" title="Next visualizer preset">Next preset</button>
                   <div id="cp-wave" class="cp-wave"></div>
                 </div>
                 <div class="custom-player-controls">

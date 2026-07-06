@@ -1300,6 +1300,7 @@ function setupWatchPlayerControls(player) {
   };
   player.on('loadedmetadata', updateVisualizerVisibility);
   vizToggle.addEventListener('change', () => { if (!vizToggle.disabled) updateVisualizerVisibility(); });
+  $('watch-visualizer-next').addEventListener('click', () => nextVisualizerPreset('watch-visualizer', true));
 }
 
 function switchToView(viewId) {
@@ -2981,6 +2982,8 @@ function setupCustomPlayerControls(player) {
 
   speed.addEventListener('change', () => { player.playbackRate(parseFloat(speed.value)); });
 
+  $('cp-visualizer-next').addEventListener('click', () => nextVisualizerPreset('cp-visualizer', true));
+
   setupPiP($('cp-pip'), () => techVideoEl(player));
 
   fullscreenBtn.onclick = () => {
@@ -3031,6 +3034,24 @@ function setupWaveform(url, videoEl) {
 // and the Watch tab's #watch-visualizer, each bound to its own video element).
 const vizInstances = {};
 
+// Butterchurn (a WebGL port of the Winamp MilkDrop plugin) renders the real
+// thing; plain 2D canvas bars are only a fallback for browsers/contexts
+// without WebGL2 (e.g. software-only remote desktops). Presets are loaded
+// once, lazily, and shared read-only across every visualizer instance.
+let vizPresetNames = null;
+function vizPresets() {
+  if (vizPresetNames) return vizPresetNames;
+  // The UMD builds are webpack/babel output with esModuleInterop - depending
+  // on version the real API can land directly on the global or nested under
+  // `.default`, so probe both rather than assuming one shape.
+  const mod = window.butterchurnPresets;
+  const api = mod && (typeof mod.getPresets === 'function' ? mod : mod.default);
+  if (!api) return (vizPresetNames = []);
+  const presets = api.getPresets();
+  vizPresetNames = Object.keys(presets).map(name => ({ name, preset: presets[name] }));
+  return vizPresetNames;
+}
+
 function ensureVizGraph(videoEl, canvasId) {
   const existing = vizInstances[canvasId];
   if (existing && existing.sourceEl === videoEl) return existing;
@@ -3038,18 +3059,36 @@ function ensureVizGraph(videoEl, canvasId) {
   if (!AudioCtx) return null;
   try {
     const audioCtx = new AudioCtx();
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
-    const data = new Uint8Array(analyser.frequencyBinCount);
     const source = audioCtx.createMediaElementSource(videoEl);
-    source.connect(analyser);
-    analyser.connect(audioCtx.destination);
-    const inst = { audioCtx, analyser, data, raf: null, sourceEl: videoEl };
+    source.connect(audioCtx.destination);
+    const inst = {
+      audioCtx, source, raf: null, sourceEl: videoEl,
+      butterchurn: null, presetIndex: -1, resizeObserver: null,
+      analyser: null, data: null,
+    };
     vizInstances[canvasId] = inst;
     return inst;
   } catch {
     return null;
   }
+}
+
+function resizeVizCanvas(canvas, butterchurnViz) {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width === w && canvas.height === h) return;
+  canvas.width = w;
+  canvas.height = h;
+  if (butterchurnViz) butterchurnViz.setRendererSize(w, h);
+}
+
+function nextVisualizerPreset(canvasId, random) {
+  const inst = vizInstances[canvasId || 'cp-visualizer'];
+  const presets = vizPresets();
+  if (!inst || !inst.butterchurn || !presets.length) return;
+  inst.presetIndex = random
+    ? Math.floor(Math.random() * presets.length)
+    : (inst.presetIndex + 1) % presets.length;
+  inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 1.5);
 }
 
 function startVisualizer(videoEl, canvasId) {
@@ -3058,9 +3097,51 @@ function startVisualizer(videoEl, canvasId) {
   if (!inst) return;
   if (inst.audioCtx.state === 'suspended') inst.audioCtx.resume().catch(() => {});
   const canvas = $(canvasId);
-  const ctx2d = canvas.getContext('2d');
   if (inst.raf) cancelAnimationFrame(inst.raf);
 
+  // Deliberately don't pre-probe WebGL2 support with our own getContext()
+  // call: a canvas permanently locks to whichever context type is first
+  // *successfully* created, so if butterchurn.createVisualizer below fails
+  // (or is never attempted) the 2D fallback path still needs a virgin
+  // canvas to call getContext('2d') on.
+  if (window.butterchurn && !inst.butterchurn) {
+    try {
+      canvas.width = canvas.clientWidth;
+      canvas.height = canvas.clientHeight;
+      const Butterchurn = typeof window.butterchurn.createVisualizer === 'function' ? window.butterchurn : window.butterchurn.default;
+      inst.butterchurn = Butterchurn.createVisualizer(inst.audioCtx, canvas, {
+        width: canvas.width, height: canvas.height,
+      });
+      inst.butterchurn.connectAudio(inst.source);
+      const presets = vizPresets();
+      if (presets.length) {
+        inst.presetIndex = Math.floor(Math.random() * presets.length);
+        inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 0);
+      }
+      inst.resizeObserver = new ResizeObserver(() => resizeVizCanvas(canvas, inst.butterchurn));
+      inst.resizeObserver.observe(canvas);
+    } catch {
+      inst.butterchurn = null;
+    }
+  }
+
+  if (inst.butterchurn) {
+    const draw = () => {
+      inst.raf = requestAnimationFrame(draw);
+      inst.butterchurn.render();
+    };
+    draw();
+    return;
+  }
+
+  // Fallback: plain frequency-bar spectrum on a 2D canvas.
+  if (!inst.analyser) {
+    inst.analyser = inst.audioCtx.createAnalyser();
+    inst.analyser.fftSize = 128;
+    inst.data = new Uint8Array(inst.analyser.frequencyBinCount);
+    inst.source.connect(inst.analyser);
+  }
+  const ctx2d = canvas.getContext('2d');
   const draw = () => {
     inst.raf = requestAnimationFrame(draw);
     const w = canvas.clientWidth, h = canvas.clientHeight;
@@ -3088,8 +3169,9 @@ function stopVisualizer(canvasId) {
   const inst = vizInstances[canvasId];
   if (inst && inst.raf) cancelAnimationFrame(inst.raf);
   if (inst) inst.raf = null;
+  if (inst && inst.resizeObserver) { inst.resizeObserver.disconnect(); inst.resizeObserver = null; }
   const canvas = $(canvasId);
-  if (canvas) {
+  if (canvas && !(inst && inst.butterchurn)) {
     const ctx2d = canvas.getContext('2d');
     if (ctx2d) ctx2d.clearRect(0, 0, canvas.width, canvas.height);
   }

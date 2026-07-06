@@ -85,6 +85,7 @@ add any source you like.
 
 **Nice touches**
 
+- MilkDrop-style music visualizer (Butterchurn) for audio-only sources, in both the live Watch tab and the Recordings player, with a "Next preset" button to cycle through it.
 - Installable as a PWA for quick access to the dashboard and Watch tab from a phone or desktop.
 - Custom app name, logo, colour scheme, and CSS — logos and cover art (app, Organisation, Festival, Event) are uploaded as files rather than pasted in as external URLs.
 - One-click stream test/resolve before saving a source, to catch bad URLs or qualities early.
