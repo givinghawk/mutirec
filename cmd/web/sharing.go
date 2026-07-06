@@ -35,12 +35,16 @@ import (
 // ============================================================================
 
 // SharingConfig holds the sender-side setup: the public URL other instances
-// reach this one at, whether sharing is enabled, and when the URL last passed
-// the reachability check.
+// reach this one at, whether sharing is enabled, when the URL last passed the
+// reachability check (or Forced if that check was deliberately skipped), and
+// an optional outbound proxy for all sharing-related network calls (the
+// self-verification ping, manifest preview, and downloads).
 type SharingConfig struct {
 	Enabled    bool   `json:"enabled"`
 	PublicURL  string `json:"publicUrl"`
 	VerifiedAt string `json:"verifiedAt,omitempty"`
+	Forced     bool   `json:"forced,omitempty"`
+	ProxyURL   string `json:"proxyUrl,omitempty"`
 }
 
 // Share is one published bundle: an unguessable token plus the concrete list
@@ -144,10 +148,6 @@ func looksPublicHost(raw string) bool {
 	return strings.Contains(host, ".")
 }
 
-func shareHTTPClient() *http.Client {
-	return &http.Client{Timeout: 30 * time.Second}
-}
-
 func (a *App) putShareNonce(nonce string) {
 	a.shareNonceMu.Lock()
 	defer a.shareNonceMu.Unlock()
@@ -193,7 +193,12 @@ func (a *App) handleSharePing(w http.ResponseWriter, r *http.Request) {
 // handleShareVerify checks that a candidate public URL routes back to this
 // instance (and is reachable over the network) before saving it and enabling
 // sharing. It generates a nonce and fetches {url}/api/share/ping?nonce=... -
-// success means the URL is correctly pointed at this instance.
+// success means the URL is correctly pointed at this instance. Force skips
+// that self-check entirely: the check only proves the sender can reach
+// itself, which can pass even when the real problem is that outside clients
+// can't (e.g. a firewall/VPN setup that only routes internal traffic) - an
+// admin who has already confirmed reachability some other way needs a way
+// past a check that can't see that class of problem.
 func (a *App) handleShareVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -205,6 +210,8 @@ func (a *App) handleShareVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		PublicURL string `json:"publicUrl"`
+		ProxyURL  string `json:"proxyUrl"`
+		Force     bool   `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -216,45 +223,68 @@ func (a *App) handleShareVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": false, "error": "Enter a full URL including http:// or https://"})
 		return
 	}
-
-	nonce := shortToken()
-	a.putShareNonce(nonce)
-	pingURL := base + "/api/share/ping?nonce=" + url.QueryEscape(nonce)
-
-	client := shareHTTPClient()
-	client.Timeout = 10 * time.Second
-	resp, err := client.Get(pingURL)
-	if err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": "Could not reach that URL: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	var pong struct {
-		OK    bool   `json:"ok"`
-		Nonce string `json:"nonce"`
-		App   string `json:"app"`
-	}
-	_ = json.Unmarshal(body, &pong)
-	if !pong.OK || pong.Nonce != nonce {
-		if pong.App == "mutirec" {
-			writeJSON(w, map[string]any{"ok": false, "error": "That URL reached a MutiRec instance, but not this one - double-check it points here."})
+	proxyURL := strings.TrimSpace(req.ProxyURL)
+	if proxyURL != "" {
+		if _, err := proxyTransport(proxyURL); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		writeJSON(w, map[string]any{"ok": false, "error": "That URL is reachable but didn't respond as this instance (got HTTP " + strconv.Itoa(resp.StatusCode) + ")."})
-		return
+	}
+
+	if !req.Force {
+		nonce := shortToken()
+		a.putShareNonce(nonce)
+		pingURL := base + "/api/share/ping?nonce=" + url.QueryEscape(nonce)
+
+		client, err := shareHTTPClient(proxyURL)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		client.Timeout = 10 * time.Second
+		resp, err := client.Get(pingURL)
+		if err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": "Could not reach that URL: " + err.Error() + " - if you're sure the URL is correct and reachable from outside (e.g. a VPN-only firewall is blocking this instance's own check but not real visitors), tick \"Skip verification\" to enable it anyway."})
+			return
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		var pong struct {
+			OK    bool   `json:"ok"`
+			Nonce string `json:"nonce"`
+			App   string `json:"app"`
+		}
+		_ = json.Unmarshal(body, &pong)
+		if !pong.OK || pong.Nonce != nonce {
+			if pong.App == "mutirec" {
+				writeJSON(w, map[string]any{"ok": false, "error": "That URL reached a MutiRec instance, but not this one - double-check it points here."})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": false, "error": "That URL is reachable but didn't respond as this instance (got HTTP " + strconv.Itoa(resp.StatusCode) + ")."})
+			return
+		}
 	}
 
 	a.mu.Lock()
-	a.cfg.Settings.Sharing = SharingConfig{Enabled: true, PublicURL: base, VerifiedAt: time.Now().Format(time.RFC3339)}
+	a.cfg.Settings.Sharing = SharingConfig{Enabled: true, PublicURL: base, ProxyURL: proxyURL, Forced: req.Force}
+	if !req.Force {
+		a.cfg.Settings.Sharing.VerifiedAt = time.Now().Format(time.RFC3339)
+	}
 	cfg := a.cfg
 	a.mu.Unlock()
 	_ = a.persist(cfg)
-	a.event("info", "Peer sharing enabled and verified at "+base)
-	writeJSON(w, map[string]any{"ok": true, "publicUrl": base, "public": looksPublicHost(base)})
+	if req.Force {
+		a.event("warn", "Peer sharing enabled at "+base+" WITHOUT verification (forced by an admin)")
+	} else {
+		a.event("info", "Peer sharing enabled and verified at "+base)
+	}
+	writeJSON(w, map[string]any{"ok": true, "publicUrl": base, "public": looksPublicHost(base), "verified": !req.Force, "forced": req.Force})
 }
 
-// handleShareConfig returns the current sharing setup, or (POST) disables it.
+// handleShareConfig returns the current sharing setup, (POST) toggles
+// enabled, and/or updates the outbound proxy - the proxy is just a routing
+// setting, not something that needs re-verification, so it can be changed
+// independently of the enabled flag.
 func (a *App) handleShareConfig(w http.ResponseWriter, r *http.Request) {
 	if !a.isAdminReq(r) {
 		http.Error(w, "admin only", http.StatusForbidden)
@@ -267,19 +297,34 @@ func (a *App) handleShareConfig(w http.ResponseWriter, r *http.Request) {
 			"enabled":    s.Enabled,
 			"publicUrl":  s.PublicURL,
 			"verifiedAt": s.VerifiedAt,
+			"forced":     s.Forced,
+			"proxyUrl":   s.ProxyURL,
 			"public":     s.PublicURL != "" && looksPublicHost(s.PublicURL),
 		})
 	case http.MethodPost:
 		var req struct {
-			Enabled bool `json:"enabled"`
+			Enabled  bool    `json:"enabled"`
+			ProxyURL *string `json:"proxyUrl"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		if req.ProxyURL != nil && *req.ProxyURL != "" {
+			if _, err := proxyTransport(*req.ProxyURL); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
 		a.mu.Lock()
 		a.cfg.Settings.Sharing.Enabled = req.Enabled
+		if req.ProxyURL != nil {
+			a.cfg.Settings.Sharing.ProxyURL = strings.TrimSpace(*req.ProxyURL)
+		}
 		cfg := a.cfg
 		a.mu.Unlock()
 		_ = a.persist(cfg)
-		writeJSON(w, map[string]any{"enabled": req.Enabled})
+		writeJSON(w, map[string]any{"enabled": req.Enabled, "proxyUrl": cfg.Settings.Sharing.ProxyURL})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -542,13 +587,17 @@ func (a *App) handleShareGet(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, abs)
 }
 
-// fetchShareManifest pulls and parses a share manifest from a share code.
-func fetchShareManifest(code string) (shareCodePayload, ShareManifest, error) {
+// fetchShareManifest pulls and parses a share manifest from a share code,
+// optionally routed through proxyURL (see SharingConfig.ProxyURL).
+func fetchShareManifest(code, proxyURL string) (shareCodePayload, ShareManifest, error) {
 	p, err := decodeShareCode(code)
 	if err != nil {
 		return p, ShareManifest{}, err
 	}
-	client := shareHTTPClient()
+	client, err := shareHTTPClient(proxyURL)
+	if err != nil {
+		return p, ShareManifest{}, err
+	}
 	resp, err := client.Get(p.U + "/api/share/get/" + url.PathEscape(p.T))
 	if err != nil {
 		return p, ShareManifest{}, fmt.Errorf("could not reach the sender: %w", err)
@@ -582,7 +631,8 @@ func (a *App) handleSharePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	_, man, err := fetchShareManifest(req.Code)
+	proxyURL := a.snapshotConfig().Settings.Sharing.ProxyURL
+	_, man, err := fetchShareManifest(req.Code, proxyURL)
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -852,7 +902,7 @@ func (a *App) handleShareImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	payload, man, err := fetchShareManifest(req.Code)
+	payload, man, err := fetchShareManifest(req.Code, a.snapshotConfig().Settings.Sharing.ProxyURL)
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -914,7 +964,12 @@ func formatBytesGo(n int64) string {
 func (a *App) runShareImportJob(job *ShareJob, payload shareCodePayload, items []ShareItem) {
 	cfg := a.snapshotConfig()
 	root := filepath.Clean(cfg.Settings.FinishedDir)
-	client := shareHTTPClient()
+	client, err := shareHTTPClient(cfg.Settings.Sharing.ProxyURL)
+	if err != nil {
+		job.logf("Cannot start: %s", err)
+		job.finish(err)
+		return
+	}
 
 	type applied struct {
 		rel  string

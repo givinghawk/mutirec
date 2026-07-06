@@ -367,6 +367,169 @@
   covers it. Covered by new tests in `uploads_test.go` (`readImageUpload` accepting a real PNG,
   rejecting non-image content/empty uploads/a missing form field).
 
+## Done (this session, part 3)
+- **Peer Sharing: manual override for the self-verification check + outbound
+  proxy support** (`sharing.go`, new `proxy.go`): a real user's setup had the
+  sender's self-check pass (it can reach its own public URL just fine, e.g.
+  routed internally by a VPN-gated firewall) while actual outside clients
+  hitting the same URL over the public internet couldn't connect at all -
+  the reachability check has no way to distinguish "I can reach myself" from
+  "the internet can reach me," so an override was needed for cases where the
+  admin has already confirmed reachability some other way. `handleShareVerify`
+  now accepts `force: true` to skip the nonce round-trip entirely and just
+  save+enable (still validates the URL is well-formed); `SharingConfig`
+  gained a `Forced` flag so this state is visible in Settings and logged as a
+  `warn`-level event rather than silently indistinguishable from a real
+  verification. UI: a "Skip verification (enable anyway)" checkbox next to
+  Verify & enable.
+  - **Outbound proxy**: new `SharingConfig.ProxyURL`, applied to every
+    sharing-related outbound request (`shareHTTPClient`, used by the
+    self-verify ping, `fetchShareManifest`'s preview/import fetch, and
+    `runShareImportJob`'s downloads) via a new `proxy.go`. Supports
+    `http`/`https` (standard `net/http` proxying via `http.ProxyURL`),
+    `socks5`/`socks5h` (via `golang.org/x/net/proxy` - the only new external
+    dependency added), and `socks4`/`socks4a` (hand-rolled - `x/net/proxy`
+    doesn't implement SOCKS4 at all, so `proxy.go` implements the CONNECT
+    handshake directly per the SOCKS4/4a spec). The proxy can be saved
+    independently of enabling/disabling sharing (`handleShareConfig`'s POST
+    now takes an optional `proxyUrl` alongside `enabled`, using a `*string`
+    so an omitted field doesn't clobber a previously-saved proxy - the
+    frontend's Disable button only ever sends `{enabled:false}`). Proxy URLs
+    can carry embedded credentials (`user:pass@host`), so `ProxyURL` is
+    blanked by `redactSecrets` before a non-admin ever sees `/api/state` or
+    `/api/config`, same as SMTP/Discord/rclone secrets.
+  - Covered by `proxy_test.go` (transport construction for every scheme,
+    malformed/unsupported-scheme rejection, a fake SOCKS4 TCP listener
+    exercising both IP-mode and SOCKS4a hostname-mode wire format, and a
+    rejection-response case) and new cases in `sharing_test.go`
+    (`handleShareVerify`'s force path skips the network check entirely while
+    the normal path still fails against an unreachable address, a bad proxy
+    URL is rejected even with force, and `handleShareConfig`'s proxy-only
+    update doesn't clobber the enabled flag or vice versa).
+
+## Done (this session, part 4)
+- **File Explorer** (`cmd/web/explorer.go`, new file): a general-purpose
+  browse/upload/zip/unzip/rename/delete file manager rooted at a configurable
+  directory, new `Settings.FileExplorerRoot` (blank = defaults to
+  `FinishedDir`, the recordings library - recommended default; an admin can
+  point it anywhere, same shell-equivalent trust level as source stream/
+  ffmpeg args). New "Explorer" nav tab, admin-only (added to the same
+  `['sources', 'diagnostics', 'events-tab', ...]` visibility list
+  `applyRoleVisibility` already used, plus every handler independently
+  double-checks `isAdminReq`).
+  - Endpoints: `list` (dir contents), `mkdir`, `rename` (basename only, never
+    moves across directories), `delete` (recursive, refuses to delete the
+    root itself), `download` (a single file streams directly; a directory,
+    or more than one selected entry of any kind, streams as an on-the-fly zip
+    via `archive/zip` straight to the response - never buffered fully in
+    memory, so this scales to a whole recordings tree), `upload` (multipart,
+    multiple files, 20GB cap), `zip` (bundle selected entries into a new zip
+    in the same directory), `unzip` (extract into a deduplicated sibling
+    directory, e.g. `name-2` if `name` is taken).
+  - **Path safety**: every handler resolves the client-supplied relative path
+    through `resolveExplorerPath` (clean + join + prefix check against the
+    root, same pattern as `shareImportDest` elsewhere) and every new
+    file/folder name through `sanitizeEntryName` (rejects empty/"."/".."
+    and any embedded path separator).
+  - **Zip-slip defense** (`extractZip`): each entry's path is rooted
+    (`path.Clean("/" + entry.Name)`) before being joined to the destination,
+    which collapses any leading `..` segments to a harmless in-bounds path
+    rather than escaping it (the standard safe pattern for this), plus a
+    belt-and-suspenders prefix check against the overall explorer root in
+    case a caller ever passes a destDir that isn't really under it.
+  - Covered by `explorer_test.go`: path-traversal/sanitizer rejection,
+    mkdir/rename/delete round-trip, directory-first listing sort, a
+    zip-slip attempt landing safely inside the destination (confirmed by
+    checking it does *not* end up outside), zip+unzip round-tripping real
+    file content, and the sibling-dir disambiguation helper.
+- **Fetch from URL / TransIP Stack support** (`cmd/web/urlfetch.go`, new
+  file): downloads a direct link - or a public share link - straight into
+  the current Explorer folder as a background job (`URLFetchJob`, same
+  progress/speed/live-log shape as `ShareJob`, polled via
+  `GET /api/explorer/fetch/jobs/{id}`), so a large download doesn't need a
+  browser tab left open. `looksLikeOwncloudShare` detects the ownCloud/
+  Nextcloud public-share URL convention (a `/s/<token>` path segment) that
+  TransIP Stack - and a number of other self-hosted "share a folder" tools
+  people use to hand out festival sets - is built on: for those links it
+  requests `{url}/download` (the convention's actual-file endpoint) and, if
+  a password is supplied, sends it as HTTP Basic auth with the share token
+  as the username (the standard protected-share convention). Any other URL
+  is downloaded directly, with the destination filename inferred from
+  `Content-Disposition` first, then the URL path, then a timestamp fallback.
+  A downloaded `.zip` is auto-extracted into a sibling folder afterward
+  (reusing `extractZip`). Covered by `urlfetch_test.go` (share-link
+  detection across several URL shapes, filename inference from each
+  fallback source, and job view/finish semantics).
+  - **Also fixed while touching this code**: `shareHTTPClient` (used by P2P
+    sharing's downloads too) previously set a blanket 30s `http.Client.
+    Timeout`, which covers the *entire* response including the body read -
+    meaning any download taking longer than 30 seconds (a realistic case for
+    a multi-GB recording) would have been silently killed partway through.
+    Replaced with transport-level `DialContext`/`TLSHandshakeTimeout`/
+    `ResponseHeaderTimeout` bounds (catches "can't connect"/"server never
+    responds" within a reasonable time) and no overall timeout at all, so
+    body streaming is only bounded by however long the transfer actually
+    takes.
+
+## Done (this session, part 5)
+- **Thumbnails now backfill on demand**: the Recordings page showed no
+  thumbnail for anything that didn't arrive through the live recording
+  pipeline (a file dropped in via the File Explorer/URL fetch, a P2P import,
+  or a recording that predates the thumbnail feature) - `generateThumbnail`
+  was only ever called from `runRecording`'s success path. Fixed by adding
+  `generateThumbnailOnDemand` (`cmd/web/uploads.go`): the thumbnail GET
+  handler now generates one synchronously the first time it's requested and
+  none exists, instead of just 404ing forever. In-flight generation is
+  deduped per relPath (`App.thumbGenMu`/`thumbGenerating`, a
+  `map[string]chan struct{}`) so a burst of card renders for the same
+  recording can't spawn a pile of redundant `ffmpeg` processes.
+- **Folder-layout convention for manually-added recordings, and Smart Match
+  support for it**: users have real festival sets already organized as
+  `<event>/<edition>/<day>/<stage>/<file>` (e.g. a whole day of one stage
+  recorded as a single file - not any specific DJ's set). Previously,
+  channel/stage was always derived from the *first* path segment
+  (`handleRecordings`, `handleRecordingMatchSuggestions`), which is right for
+  the live recorder's own flat `<source>/<file>` layout but wrong for a
+  nested one (it would read "stage" as the event name instead). Added
+  `channelFromPath` (`cmd/web/main.go`) - the immediate parent directory,
+  which is a no-op for the flat 1-level case and correctly resolves to the
+  stage folder for anything deeper - and switched both call sites to it.
+  - Added `folderEventHint`/`eventMatchesFolderHint`/`applyFolderEventHint`:
+    when Smart Match's normal per-set scoring comes back weak (confidence
+    "none" or "low" - i.e. nothing in an archived timetable actually
+    matches), it now falls back to parsing the folder path itself. A
+    year-shaped segment becomes the edition year; a weekday-name or
+    date-shaped segment (a day folder) is dropped rather than folded into
+    the name; whatever's left becomes the candidate event name. If an
+    existing `LibraryEvent` matches by name (and year, if both sides have
+    one), the suggestion files straight into it; otherwise it proposes
+    *creating* that event - new `MatchSuggestion.NewEventName`/
+    `NewEventYear` fields - left for the user to approve like every other
+    suggestion, never applied silently. Deliberately never guesses an
+    artist/set for these: a whole-day/stage recording isn't one DJ's set,
+    and a real archived-timetable match is always preferred when one scores
+    well enough on its own.
+  - Frontend (`app.js`): the Smart Match list now shows "New event: X" for a
+    folder-only suggestion and its Approve button reads "Create Event &
+    Approve"; approving it calls `POST /api/events` first (using the
+    existing create-event endpoint) and folds the new ID into the normal
+    `PUT /api/recordings/meta` call. That call now also forwards
+    `guessedTime` as `start` unconditionally (harmless for a real
+    set-match, since `handleRecordingMeta` overwrites `Start`/`End` from the
+    matched set when `setId` is present anyway) so a folder/filename-only
+    match still buckets into the right day in the library view instead of
+    falling back to file mtime.
+  - **In-app documentation**: a "Folder Layout" button next to Smart Match
+    (and one in the File Explorer toolbar - same modal, `#lib-folder-help-overlay`)
+    opens a plain-language explanation of the recommended layout with a
+    genericized example (no real festival names, per the no-bundled-festival-
+    data constraint). Mirrored in a new README section, "Recordings Library &
+    Smart Match".
+  - Tests: `TestChannelFromPath`, `TestFolderEventHint`,
+    `TestBestMatchSuggestion_WholeStageFolderConvention` (both the
+    matches-existing-event and proposes-new-event branches) in
+    `match_test.go`.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

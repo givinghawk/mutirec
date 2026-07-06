@@ -39,6 +39,8 @@ add any source you like.
 - [Auto-Reconnect](#auto-reconnect)
 - [Progressive Web App](#progressive-web-app)
 - [Storage](#storage)
+- [Recordings Library & Smart Match](#recordings-library--smart-match)
+- [File Explorer](#file-explorer)
 - [Backups](#backups)
 - [Notifications](#notifications)
 - [Peer Sharing (P2P)](#peer-sharing-p2p)
@@ -66,7 +68,8 @@ add any source you like.
 - Events tab: Organisations → Festivals → yearly editions, so old recordings stay tied to the right franchise across years.
 - Preset Packs: bundled, ready-to-add sources for well-known DJs/streamers/events — one click, no URLs to hand-type.
 - Peer-to-peer set sharing: bundle recordings (individual sets, whole events, or whole stages) plus their metadata and hand another instance a short share code to pull them directly. Transfers run in the background with hash-verified downloads, live progress, and a transfer log.
-- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
+- Recording thumbnails: video recordings get one auto-generated from a random frame when they finish; if a recording arrived some other way (File Explorer, a URL fetch, a P2P import) and has none yet, one is generated the first time it's viewed in the library. Audio-only recordings stay blank unless you upload one by hand. Either can be replaced, regenerated, or removed from the Organize modal.
+- File Explorer: browse, upload, zip/unzip, rename, and delete files under a configurable root (the recordings library by default); a "Fetch from URL" action downloads a direct link or a public ownCloud/Nextcloud-style share link (TransIP Stack included) straight into it, in the background.
 
 **Accounts & security**
 
@@ -323,6 +326,63 @@ volumes:
 Host mounting is the most predictable approach across Linux, macOS, Windows,
 NAS systems, and Docker Desktop.
 
+## Recordings Library & Smart Match
+
+Recordings the app makes itself land in a flat `<source>/<file>` folder
+automatically - nothing to configure there. If you're adding sets you
+already have (via the File Explorer, a URL fetch, or just copying files onto
+the disk), organize them like this so **Smart Match** can file them
+automatically instead of one-by-one by hand:
+
+```
+recordings/<Event>/<Edition or year>/<Day>/<Stage>/<Event> <year>, <Stage> (<Day>, <date>).mp4
+
+e.g.
+recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturday, 2026-07-04).mp4
+```
+
+- Only the last two levels are required: the **stage** folder (the file's
+  immediate parent) and at least one folder above it. The edition/year and
+  day folders are optional - include whichever you have.
+- A `YYYY-MM-DD`-shaped date and/or a weekday name, in the filename or a day
+  folder, lets Smart Match sort a recording onto the right day even with no
+  archived timetable to match against.
+- This convention is meant for a whole day or a whole stage recorded as a
+  single file, not one DJ's set - Smart Match won't invent an artist for it.
+  If you've imported an archived timetable for the event, Smart Match still
+  prefers a real per-set match (time window + artist name) over a
+  folder-based guess.
+- Run **Smart Match** (in the Recordings toolbar) after adding files: it
+  reads this layout, offers to file each recording under the matching event
+  and stage - creating the event first if it doesn't already exist - and
+  applies nothing until you approve it. The same explanation is available
+  in-app via the **Folder Layout** button next to Smart Match (and in the
+  File Explorer toolbar).
+
+## File Explorer
+
+The **Explorer** tab is a general-purpose file manager rooted at
+**Settings → Recorder → File explorer root** - leave it blank (recommended)
+and it browses your recordings library; point it at a different folder (or
+the whole data root) if you want broader access. This is admin-only and the
+same trust level as source stream/ffmpeg args - treat it as equivalent to
+shell access to that folder.
+
+From it you can create folders, rename/delete entries, upload files, download
+a file or a whole folder (multiple selected entries download together as one
+zip, built on the fly), and zip/unzip in place.
+
+**Fetch from URL** downloads straight into the current folder as a
+background job (progress, speed, and a live log, same as a peer-sharing
+import) instead of tying up the browser tab. It works with:
+
+- A direct download link.
+- A public share link from an ownCloud/Nextcloud-based host - **TransIP
+  Stack** (and several other self-hosted "share a folder" tools people use to
+  hand out sets) is built on this, so a link like `https://host/s/<token>`
+  works, password included if the share is protected. A zip is
+  auto-extracted into a sibling folder once it finishes downloading.
+
 ## Backups
 
 The image includes `rclone`. Mount an `rclone.conf`, enable backups in the UI,
@@ -371,6 +431,14 @@ actually routes to this instance (catching typos and misconfigured proxies);
 it also warns if the URL looks like a LAN/loopback address that outside
 instances won't reach. Sharing stays disabled until a URL verifies.
 
+If the check fails but you've already confirmed the URL works from outside,
+tick **Skip verification (enable anyway)** before clicking Verify & enable.
+This matters because the check only proves *this instance* can reach its own
+URL — on some network setups (e.g. a VPN-gated firewall) that succeeds even
+though real outside clients hit a different path and can't connect at all, so
+the check can't actually catch that class of problem. Sharing enabled this
+way is flagged as unverified in the event log and in the Settings panel.
+
 ### Sending
 
 In **Recordings → Share Sets**, tick the recordings you want (individually, or
@@ -397,6 +465,17 @@ download. Files you already have are skipped rather than overwritten.
 
 Sharing setup, share creation, and importing are all admin-only; share tokens
 are never exposed to viewer accounts.
+
+### Outbound proxy
+
+If this instance's network can only reach other MutiRec instances through a
+proxy (a SOCKS tunnel, a corporate/VPN-only egress path, etc.), set
+**Settings → Peer Sharing → Outbound proxy** to an `http://`, `https://`,
+`socks5://`, `socks4://`, or `socks4a://` URL (`user:pass@` credentials are
+supported for `http(s)`/`socks5`). It's used for every outbound sharing
+request this instance makes: the self-verification ping, previewing a
+share code, and downloading files during an import. It can be saved on its
+own with **Save proxy**, independently of enabling/disabling sharing.
 
 ## Hardware Transcoding
 

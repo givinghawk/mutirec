@@ -34,6 +34,7 @@
         <button data-view="events-tab" class="nav">Events</button>
         <button data-view="sources" class="nav">Sources</button>
         <button data-view="recordings" class="nav">Recordings</button>
+        <button data-view="explorer" class="nav">Explorer</button>
         <button data-view="timetable" class="nav">Timetable</button>
         <button data-view="settings" class="nav">Settings</button>
         <button data-view="diagnostics" class="nav">Diagnostics</button>
@@ -341,6 +342,7 @@
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <input id="lib-search" class="input max-w-xs" placeholder="Search artist, channel, or filename" style="margin:0">
+            <button type="button" id="lib-folder-help-open" class="btn" title="Recommended folder layout for adding recordings by hand">Folder Layout</button>
             <button type="button" id="lib-match-open" class="btn">Smart Match</button>
             <button type="button" id="lib-matchfile-export" class="btn" title="Download a shareable match file for everything you've organized">Export Match File</button>
             <button type="button" id="lib-matchfile-import" class="btn" title="Apply an exact-match file someone else exported">Import Match File</button>
@@ -453,6 +455,29 @@
           <div id="lib-channel-rows" class="space-y-6"></div>
         </div>
       </section>
+
+      <div id="lib-folder-help-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Recommended folder layout</h2>
+            <button type="button" id="lib-folder-help-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Recordings made by this app land in a flat <code>&lt;source&gt;/&lt;file&gt;</code> folder automatically - no action needed there. When you're dropping in sets you already have (via the File Explorer, a URL fetch, or just copying files onto the disk), organize them like this so Smart Match can sort them into the right event and stage on its own:</p>
+          <pre class="codebox mb-2 overflow-x-auto text-xs">recordings/&lt;Event&gt;/&lt;Edition or year&gt;/&lt;Day&gt;/&lt;Stage&gt;/&lt;Event&gt; &lt;year&gt;, &lt;Stage&gt; (&lt;Day&gt;, &lt;date&gt;).mp4
+
+e.g.
+recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturday, 2026-07-04).mp4</pre>
+          <ul class="mb-2 list-disc space-y-1 pl-5 text-sm text-zinc-400">
+            <li>Only the last two levels are required - the <b>stage</b> folder (the file's immediate parent) and at least one folder above it. The edition/year and day folders are optional; include whichever you have.</li>
+            <li>A <code>YYYY-MM-DD</code> (or similar) date and/or a weekday name in the filename or a day folder lets recordings sort into the right day even without a specific timetable set.</li>
+            <li>This is for a whole day or whole stage recorded as one file, not a single DJ's set - Smart Match won't guess an artist for it. If you've imported an archived timetable, Smart Match still prefers a real per-set match over a folder-based guess.</li>
+            <li>Run <b>Smart Match</b> (above) after adding files: it reads this layout, offers to file each recording under the matching event and stage, and creates the event first if it doesn't exist yet - nothing happens until you approve it.</li>
+          </ul>
+          <div class="mt-3 flex justify-end">
+            <button type="button" class="btn" id="lib-folder-help-close-2">Close</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Event create/edit modal -->
       <div id="event-editor-overlay" class="modal-overlay hidden">
@@ -637,6 +662,68 @@
         </div>
       </div>
 
+      <section id="explorer" class="view hidden space-y-4">
+        <div class="panel flex flex-wrap items-center justify-between gap-3">
+          <div class="flex min-w-0 items-center gap-2">
+            <h2 class="text-base font-semibold">File Explorer</h2>
+            <span id="explorer-breadcrumb" class="truncate text-sm text-zinc-400"></span>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <button type="button" id="explorer-mkdir" class="btn">New Folder</button>
+            <button type="button" id="explorer-upload-btn" class="btn">Upload</button>
+            <input type="file" id="explorer-upload-input" class="hidden" multiple>
+            <button type="button" id="explorer-zip-selected" class="btn" disabled>Zip Selected</button>
+            <button type="button" id="explorer-download-selected" class="btn" disabled>Download Selected</button>
+            <button type="button" id="explorer-fetch-open" class="btn primary">Fetch from URL</button>
+            <button type="button" id="explorer-folder-help-open" class="btn" title="Recommended folder layout for sets you add by hand">Folder Layout</button>
+            <button type="button" id="explorer-refresh" class="btn">Refresh</button>
+          </div>
+        </div>
+        <div class="panel">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-zinc-400">
+                <th class="w-8"><input type="checkbox" id="explorer-select-all"></th>
+                <th>Name</th>
+                <th class="w-24">Size</th>
+                <th class="w-40">Modified</th>
+                <th class="w-40"></th>
+              </tr>
+            </thead>
+            <tbody id="explorer-rows"></tbody>
+          </table>
+          <p id="explorer-empty" class="hidden py-4 text-sm text-zinc-400">This folder is empty.</p>
+        </div>
+      </section>
+
+      <!-- Fetch-from-URL modal (File Explorer) -->
+      <div id="explorer-fetch-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Fetch from URL</h2>
+            <button type="button" id="explorer-fetch-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Downloads directly into the current folder, in the background. Works with a direct download link, or a public share link from an ownCloud/Nextcloud-based host (TransIP Stack included) - a zip is auto-extracted once it finishes.</p>
+          <label>URL<input id="explorer-fetch-url" class="input" placeholder="https://stack.example.com/s/xxxxx or a direct link"></label>
+          <label>Share password <span class="text-xs text-zinc-500">(only if the link is protected)</span><input id="explorer-fetch-password" type="password" class="input"></label>
+          <p id="explorer-fetch-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" id="explorer-fetch-cancel">Close</button>
+            <button type="button" class="btn primary" id="explorer-fetch-start">Start download</button>
+          </div>
+          <div id="explorer-fetch-job-box" class="mt-4 hidden">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span id="explorer-fetch-job-title" class="text-sm font-medium"></span>
+              <span id="explorer-fetch-job-stats" class="text-xs text-zinc-400"></span>
+            </div>
+            <div class="storage-bar-track">
+              <div id="explorer-fetch-job-bar" class="storage-bar-fill" style="width:0%"></div>
+            </div>
+            <pre id="explorer-fetch-job-log" class="codebox mt-2 h-32 overflow-y-auto text-xs"></pre>
+          </div>
+        </div>
+      </div>
+
       <section id="timetable" class="view hidden space-y-4">
         <div class="panel">
           <div class="panel-head">
@@ -711,6 +798,8 @@
             <label>Warning free bytes<input id="warnFreeBytes" type="number" class="input"></label>
             <label>Live rewind window (seconds)<input id="liveRewindWindowSeconds" type="number" class="input"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">How far back viewers can scrub on a live, in-progress recording. Only applies to sources with "Live rewind" enabled below.</p>
+            <label>File explorer root <span class="text-xs text-zinc-500">(optional)</span><input id="fileExplorerRoot" class="input" placeholder="defaults to the Finished directory above"></label>
+            <p class="-mt-2 mb-3 text-xs text-zinc-500">Which folder the Explorer tab browses. Leaving this blank (recommended) scopes it to your recordings library; pointing it at a wider folder (or the data root) gives Explorer access to whatever's inside - the same trust level as source stream/ffmpeg args, so only change this if you understand that.</p>
             <div class="mt-3 flex flex-wrap gap-4 text-sm">
               <label class="inline-flex items-center gap-2"><input id="enableNfo" type="checkbox" class="accent-red-500"> Save NFO</label>
               <label class="inline-flex items-center gap-2"><input id="enableWaveform" type="checkbox" class="accent-red-500"> Waveform default</label>
@@ -816,12 +905,20 @@
             </div>
             <p class="mb-3 text-sm text-zinc-400">Let another MutiRec instance pull recordings straight from this one. This instance must be reachable at a public URL — set it below and verify it before sharing (the check confirms the URL routes back here). Once verified, use <span class="font-medium">Recordings → Share Sets</span> to generate a code.</p>
             <label>Public URL<input id="share-public-url" class="input" placeholder="https://your-domain-or-tunnel"></label>
+            <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="share-force" type="checkbox" class="accent-red-500"> Skip verification (enable anyway)</label>
+            <p class="-mt-1 mb-2 text-xs text-zinc-500">Use this if the reachability check fails but you've already confirmed the URL works from outside - this can happen when this instance's own network (e.g. a VPN-gated firewall) reaches itself just fine while real outside clients hit a different path and can't. The check simply can't tell the two cases apart.</p>
             <div class="flex flex-wrap items-center gap-2">
               <button type="button" id="share-verify" class="btn primary">Verify &amp; enable</button>
               <button type="button" id="share-disable" class="btn hidden">Disable sharing</button>
               <span id="share-verify-status" class="text-sm text-zinc-400"></span>
             </div>
             <p class="mt-2 text-xs text-zinc-500">Expose this instance publicly however you like — a reverse proxy, a Cloudflare/ngrok tunnel, or a port forward. Share tokens are unguessable and each only exposes the exact files you put in that share; revoke a share any time from Recordings → Share Sets.</p>
+            <label class="mt-3">Outbound proxy <span class="text-xs text-zinc-500">(optional - routes verification, preview, and downloads through it)</span>
+              <input id="share-proxy-url" class="input" placeholder="http://host:port, socks5://[user:pass@]host:port, or socks4(a)://host:port"></label>
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" id="share-proxy-save" class="btn">Save proxy</button>
+              <span id="share-proxy-status" class="text-sm text-zinc-400"></span>
+            </div>
           </div>
         </div>
         <button id="save-settings" class="btn primary mt-4" data-admin-only>Save Settings</button>

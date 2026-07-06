@@ -182,6 +182,77 @@ func TestBestMatchSuggestion_FestivalScoping(t *testing.T) {
 	}
 }
 
+func TestChannelFromPath(t *testing.T) {
+	cases := []struct{ rel, want string }{
+		{"BLUE/recording.20260625-143000.mkv", "BLUE"},
+		{"MyFestival/2026/Saturday/MainStage/set.mp4", "MainStage"},
+		{"file-with-no-folder.mp4", ""},
+	}
+	for _, c := range cases {
+		if got := channelFromPath(c.rel); got != c.want {
+			t.Errorf("channelFromPath(%q) = %q, want %q", c.rel, got, c.want)
+		}
+	}
+}
+
+func TestFolderEventHint(t *testing.T) {
+	cases := []struct {
+		rel       string
+		wantName  string
+		wantYear  int
+		wantStage string
+		wantOK    bool
+	}{
+		{"BLUE/recording.mp4", "", 0, "", false}, // single level - the flat live-recorder layout, not a hint
+		{"MyFestival/MainStage/day.mp4", "MyFestival", 0, "MainStage", true},
+		{"MyFestival/2026/MainStage/day.mp4", "MyFestival", 2026, "MainStage", true},
+		{"MyFestival/2026/Saturday/MainStage/day.mp4", "MyFestival", 2026, "MainStage", true},
+		{"My Festival/2026/2026-07-04/MainStage/day.mp4", "My Festival", 2026, "MainStage", true},
+	}
+	for _, c := range cases {
+		name, year, stage, ok := folderEventHint(c.rel)
+		if ok != c.wantOK || name != c.wantName || year != c.wantYear || stage != c.wantStage {
+			t.Errorf("folderEventHint(%q) = (%q, %d, %q, %v), want (%q, %d, %q, %v)",
+				c.rel, name, year, stage, ok, c.wantName, c.wantYear, c.wantStage, c.wantOK)
+		}
+	}
+}
+
+// TestBestMatchSuggestion_WholeStageFolderConvention covers the case the
+// user reported: a whole day of one stage recorded as a single file, dropped
+// in under the recommended <event>/<edition>/<day>/<stage>/<file> layout,
+// with no archived timetable set to match (it's not a specific DJ's set).
+func TestBestMatchSuggestion_WholeStageFolderConvention(t *testing.T) {
+	name := "MyFestival 2026, MainStage (Saturday, 2026-07-04).mp4"
+	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
+	rel := "MyFestival/2026/Saturday/MainStage/" + name
+
+	t.Run("matches an existing event by name and year", func(t *testing.T) {
+		cfg := AppConfig{LibraryEvents: []LibraryEvent{{ID: "ev1", Name: "MyFestival", Year: 2026}}}
+		got := bestMatchSuggestion(cfg, rel, name, "MainStage", guessed, fromName, hasTOD)
+		if got.EventID != "ev1" {
+			t.Fatalf("expected EventID=ev1, got %q (reason: %s)", got.EventID, got.Reason)
+		}
+		if got.SetID != "" || got.Artist != "" {
+			t.Errorf("expected no set/artist guess for a whole-stage recording, got SetID=%q Artist=%q", got.SetID, got.Artist)
+		}
+		if got.Confidence != "medium" {
+			t.Errorf("expected medium confidence, got %q", got.Confidence)
+		}
+	})
+
+	t.Run("proposes creating the event when none exists", func(t *testing.T) {
+		cfg := AppConfig{}
+		got := bestMatchSuggestion(cfg, rel, name, "MainStage", guessed, fromName, hasTOD)
+		if got.EventID != "" {
+			t.Fatalf("expected no existing EventID, got %q", got.EventID)
+		}
+		if got.NewEventName != "MyFestival" || got.NewEventYear != 2026 {
+			t.Errorf("expected NewEventName=MyFestival NewEventYear=2026, got NewEventName=%q NewEventYear=%d", got.NewEventName, got.NewEventYear)
+		}
+	})
+}
+
 // TestFlagSharedSetCandidates covers the scenario introduced by
 // auto-reconnect: a dropped stream produces two separate recording files for
 // what was originally one continuous set, and both independently match the

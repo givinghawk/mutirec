@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +163,124 @@ func TestPutShareJobEvictsOldest(t *testing.T) {
 	}
 	if _, ok := a.getShareJob(fmt.Sprintf("job-%02d", n-1)); !ok {
 		t.Fatal("expected the most recent job to still be present")
+	}
+}
+
+func newTestShareApp(t *testing.T) *App {
+	t.Helper()
+	return &App{
+		config:      filepath.Join(t.TempDir(), "config.json"),
+		shareNonces: map[string]time.Time{},
+	}
+}
+
+func adminRequest(method, path string, body string) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	admin := User{ID: "admin", Username: "admin", Role: RoleAdmin}
+	return req.WithContext(context.WithValue(req.Context(), userContextKey{}, admin))
+}
+
+func TestHandleShareVerifyForceSkipsReachabilityCheck(t *testing.T) {
+	a := newTestShareApp(t)
+	// No fake sender is running at this address at all - a normal verify
+	// would fail to connect. Force must skip that check entirely.
+	body := `{"publicUrl":"http://127.0.0.1:1","force":true}`
+	req := adminRequest(http.MethodPost, "/api/share/verify", body)
+	rec := httptest.NewRecorder()
+	a.handleShareVerify(rec, req)
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON response: %v (body=%s)", err, rec.Body.String())
+	}
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("expected force verify to succeed, got %+v", resp)
+	}
+	if v, _ := resp["verified"].(bool); v {
+		t.Fatal("expected verified=false for a forced enable")
+	}
+	if f, _ := resp["forced"].(bool); !f {
+		t.Fatal("expected forced=true in the response")
+	}
+
+	cfg := a.snapshotConfig()
+	if !cfg.Settings.Sharing.Enabled || !cfg.Settings.Sharing.Forced {
+		t.Fatalf("expected sharing to be enabled and marked forced: %+v", cfg.Settings.Sharing)
+	}
+	if cfg.Settings.Sharing.VerifiedAt != "" {
+		t.Fatal("a forced enable must not claim a VerifiedAt timestamp")
+	}
+}
+
+func TestHandleShareVerifyNormalPathStillChecksReachability(t *testing.T) {
+	a := newTestShareApp(t)
+	body := `{"publicUrl":"http://127.0.0.1:1","force":false}`
+	req := adminRequest(http.MethodPost, "/api/share/verify", body)
+	rec := httptest.NewRecorder()
+	a.handleShareVerify(rec, req)
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON response: %v", err)
+	}
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatal("expected the unreachable URL to fail verification without force")
+	}
+	cfg := a.snapshotConfig()
+	if cfg.Settings.Sharing.Enabled {
+		t.Fatal("a failed verification must not enable sharing")
+	}
+}
+
+func TestHandleShareVerifyRejectsBadProxyURL(t *testing.T) {
+	a := newTestShareApp(t)
+	body := `{"publicUrl":"http://example.com","proxyUrl":"ftp://nope","force":true}`
+	req := adminRequest(http.MethodPost, "/api/share/verify", body)
+	rec := httptest.NewRecorder()
+	a.handleShareVerify(rec, req)
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad JSON response: %v", err)
+	}
+	if ok, _ := resp["ok"].(bool); ok {
+		t.Fatal("expected an unsupported proxy scheme to be rejected even with force")
+	}
+	if a.snapshotConfig().Settings.Sharing.Enabled {
+		t.Fatal("sharing must not be enabled when the proxy URL is invalid")
+	}
+}
+
+func TestHandleShareConfigProxyUpdateDoesNotClobberEnabled(t *testing.T) {
+	a := newTestShareApp(t)
+	a.mu.Lock()
+	a.cfg.Settings.Sharing = SharingConfig{Enabled: true, PublicURL: "http://example.com", VerifiedAt: "sometime"}
+	a.mu.Unlock()
+
+	body := `{"enabled":true,"proxyUrl":"socks5://127.0.0.1:1080"}`
+	req := adminRequest(http.MethodPost, "/api/share/config", body)
+	rec := httptest.NewRecorder()
+	a.handleShareConfig(rec, req)
+
+	cfg := a.snapshotConfig()
+	if !cfg.Settings.Sharing.Enabled {
+		t.Fatal("expected sharing to remain enabled")
+	}
+	if cfg.Settings.Sharing.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("expected the proxy URL to be saved, got %q", cfg.Settings.Sharing.ProxyURL)
+	}
+
+	// Disabling via {enabled:false} with no proxyUrl key must not wipe the
+	// saved proxy - the frontend's Disable button only sends {enabled:false}.
+	req2 := adminRequest(http.MethodPost, "/api/share/config", `{"enabled":false}`)
+	rec2 := httptest.NewRecorder()
+	a.handleShareConfig(rec2, req2)
+	cfg2 := a.snapshotConfig()
+	if cfg2.Settings.Sharing.Enabled {
+		t.Fatal("expected sharing to now be disabled")
+	}
+	if cfg2.Settings.Sharing.ProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("expected the proxy URL to survive a disable-only request, got %q", cfg2.Settings.Sharing.ProxyURL)
 	}
 }
 

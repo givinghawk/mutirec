@@ -816,6 +816,8 @@ func redactSecrets(cfg *AppConfig) {
 	cfg.Settings.Notifications.DiscordWebhook = ""
 	cfg.Settings.DiscordOAuth.ClientSecret = ""
 	cfg.Settings.Backup.RcloneArgs = nil
+	// A configured proxy URL can carry embedded credentials (user:pass@host).
+	cfg.Settings.Sharing.ProxyURL = ""
 	// Share tokens are bearer credentials - never expose them (or the list of
 	// what's being shared) to a non-admin.
 	cfg.Shares = nil
