@@ -357,6 +357,9 @@ type App struct {
 	hashMu    sync.Mutex
 	hashCache map[string]hashCacheEntry
 
+	thumbGenMu      sync.Mutex
+	thumbGenerating map[string]chan struct{}
+
 	sourcePresets []SourcePreset
 }
 

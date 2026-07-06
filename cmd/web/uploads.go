@@ -163,8 +163,16 @@ func (a *App) handleRecordingThumbnail(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		p, ok := a.findThumbnail(relPath)
 		if !ok {
-			http.NotFound(w, r)
-			return
+			// No thumbnail yet - this is the normal case for anything that
+			// didn't arrive through the live recording pipeline (files
+			// dropped in via the File Explorer, a URL fetch, a P2P import,
+			// or recordings made before this feature existed). Generate one
+			// on demand rather than leaving the card blank forever.
+			p, ok = a.generateThumbnailOnDemand(relPath)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
 		}
 		// Thumbnails change when a set is re-generated or re-uploaded but
 		// keep the same URL (it's derived from the recording path, not
@@ -240,6 +248,43 @@ func (a *App) handleRecordingThumbnailRegenerate(w http.ResponseWriter, r *http.
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// generateThumbnailOnDemand resolves relPath safely against FinishedDir and,
+// if it's an existing file with no thumbnail yet, generates one synchronously
+// (a single ffmpeg frame grab is fast enough to do inline with the GET that
+// discovered it's missing). Concurrent requests for the same recording are
+// deduplicated so a burst of card renders can't spawn a pile of redundant
+// ffmpeg processes.
+func (a *App) generateThumbnailOnDemand(relPath string) (string, bool) {
+	cfg := a.snapshotConfig()
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	abs := filepath.Clean(filepath.Join(root, filepath.FromSlash(relPath)))
+	if !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		return "", false
+	}
+	if info, err := os.Stat(abs); err != nil || info.IsDir() {
+		return "", false
+	}
+
+	a.thumbGenMu.Lock()
+	if a.thumbGenerating == nil {
+		a.thumbGenerating = map[string]chan struct{}{}
+	}
+	if wait, inFlight := a.thumbGenerating[relPath]; inFlight {
+		a.thumbGenMu.Unlock()
+		<-wait
+	} else {
+		done := make(chan struct{})
+		a.thumbGenerating[relPath] = done
+		a.thumbGenMu.Unlock()
+		a.generateThumbnail(abs, relPath, false)
+		a.thumbGenMu.Lock()
+		delete(a.thumbGenerating, relPath)
+		a.thumbGenMu.Unlock()
+		close(done)
+	}
+	return a.findThumbnail(relPath)
 }
 
 // generateThumbnail grabs a single frame from a random point in a finished
