@@ -944,6 +944,20 @@
     above is the strongest available substitute; anyone bringing up two real
     installs on their own machines gets full ffmpeg-backed verification for
     free the first time they use it.
+  - **Hardening pass** (same feature, follow-up): the public token-authed
+    mark endpoint is reachable by a whole crowd sharing one token, so
+    `addEvent` now bounds each session at `maxLiveCutEvents` (5000 - far
+    above any real session) and returns 429 past it instead of growing
+    memory unbounded; hosted sessions are bounded at `maxLiveCutSessions`
+    (100) via a new `putLiveCutSession` that evicts the least-useful session
+    first (closed before open, oldest among equals - mirroring
+    `putShareJob`); and starting a session twice for the same source now
+    returns the existing open one (`openLiveCutSessionForSource`) instead of
+    spawning a duplicate that competes for the same recording. Covered by
+    `TestLiveCutSessionCapsEvents`, `TestHandleLiveCutHostMarkRejectsPastCap`,
+    `TestHandleLiveCutSessionsReusesOpenSessionForSource`, and
+    `TestPutLiveCutSessionEvictsClosedFirst`; the locking changes are
+    `go test -race` clean.
 
 ## Remaining (in suggested order)
 

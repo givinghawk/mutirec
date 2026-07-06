@@ -44,6 +44,14 @@ type LiveCutEvent struct {
 	Username     string `json:"username,omitempty"`
 }
 
+// maxLiveCutEvents bounds how many marks a single session will retain. The
+// mark endpoint is public (token-authed, but that token is deliberately
+// shared with a whole crowd), so without a ceiling one buggy or hostile
+// participant could grow a session's Events without limit. The cap is set
+// far above any plausible real session - even a marathon set marked once a
+// second for hours stays well under it - so a legitimate crowd never hits it.
+const maxLiveCutEvents = 5000
+
 // LiveCutSession is one crowdsourced live-cut session, hosted by this
 // instance. Guarded by its own mutex (not AppConfig's) since it's a
 // high-frequency, ephemeral structure - go vet's copylocks check means this
@@ -96,13 +104,19 @@ func (s *LiveCutSession) close() {
 	}
 }
 
-func (s *LiveCutSession) addEvent(instanceID, instanceName, username string) LiveCutEvent {
+// addEvent records one mark. ok is false when the session has already hit
+// maxLiveCutEvents, so a caller can reject the mark rather than let a public
+// endpoint grow memory without bound.
+func (s *LiveCutSession) addEvent(instanceID, instanceName, username string) (ev LiveCutEvent, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.Events) >= maxLiveCutEvents {
+		return LiveCutEvent{}, false
+	}
 	s.nextSeq++
-	ev := LiveCutEvent{Seq: s.nextSeq, Ts: time.Now().UnixMilli(), InstanceID: instanceID, InstanceName: instanceName, Username: username}
+	ev = LiveCutEvent{Seq: s.nextSeq, Ts: time.Now().UnixMilli(), InstanceID: instanceID, InstanceName: instanceName, Username: username}
 	s.Events = append(s.Events, ev)
-	return ev
+	return ev, true
 }
 
 // eventsSince returns every event with Seq > since, in order, plus whether
@@ -129,11 +143,59 @@ type joinedLiveCut struct {
 	JoinedAt time.Time `json:"joinedAt"`
 }
 
+// maxLiveCutSessions bounds how many hosted sessions this instance retains at
+// once, so a long-lived host that starts a session per set across a whole
+// festival doesn't accumulate them (and their events) without limit.
+const maxLiveCutSessions = 100
+
 func (a *App) getLiveCutSession(token string) (*LiveCutSession, bool) {
 	a.liveCutMu.Lock()
 	defer a.liveCutMu.Unlock()
 	s, ok := a.liveCutSessions[token]
 	return s, ok
+}
+
+// openLiveCutSessionForSource returns this instance's existing, still-open
+// session for a source, if any - so starting a session twice for the same
+// source hands back the one already running instead of silently creating a
+// duplicate.
+func (a *App) openLiveCutSessionForSource(sourceID string) (*LiveCutSession, bool) {
+	a.liveCutMu.Lock()
+	defer a.liveCutMu.Unlock()
+	for _, s := range a.liveCutSessions {
+		if s.SourceID == sourceID && !s.isClosed() {
+			return s, true
+		}
+	}
+	return nil, false
+}
+
+// putLiveCutSession stores a session, evicting the least-useful existing one
+// first when over the cap - closed sessions go before open ones, and among
+// equals the oldest goes - mirroring putShareJob's bounded-history approach.
+func (a *App) putLiveCutSession(session *LiveCutSession) {
+	a.liveCutMu.Lock()
+	defer a.liveCutMu.Unlock()
+	if len(a.liveCutSessions) >= maxLiveCutSessions {
+		var victimToken string
+		var victimClosed bool
+		var victimCreated time.Time
+		for token, s := range a.liveCutSessions {
+			s.mu.Lock()
+			closed := !s.ClosedAt.IsZero()
+			created := s.CreatedAt
+			s.mu.Unlock()
+			// Prefer evicting a closed session; among the same closed-ness,
+			// evict the oldest.
+			if victimToken == "" || (closed && !victimClosed) || (closed == victimClosed && created.Before(victimCreated)) {
+				victimToken, victimClosed, victimCreated = token, closed, created
+			}
+		}
+		if victimToken != "" {
+			delete(a.liveCutSessions, victimToken)
+		}
+	}
+	a.liveCutSessions[session.Token] = session
 }
 
 // handleLiveCutSessions lists (GET) this instance's own hosted sessions, or
@@ -183,6 +245,13 @@ func (a *App) handleLiveCutSessions(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown source", http.StatusBadRequest)
 			return
 		}
+		// Starting again for a source that already has an open session just
+		// hands back that one, so a double-click (or two admins) can't spawn
+		// duplicate sessions competing for the same recording.
+		if existing, ok := a.openLiveCutSessionForSource(src.ID); ok {
+			writeJSON(w, existing.view(encodeShareCode(cfg.Settings.Sharing.PublicURL, existing.Token)))
+			return
+		}
 		var startedAtMs int64
 		a.mu.RLock()
 		if rec, ok := a.active[req.SourceID]; ok {
@@ -194,9 +263,7 @@ func (a *App) handleLiveCutSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session := &LiveCutSession{Token: shortToken(), SourceID: src.ID, SourceName: src.Name, StartedAtMs: startedAtMs, CreatedAt: time.Now()}
-		a.liveCutMu.Lock()
-		a.liveCutSessions[session.Token] = session
-		a.liveCutMu.Unlock()
+		a.putLiveCutSession(session)
 		a.event("info", fmt.Sprintf("Started a Live Cut Session for %q", src.Name))
 		writeJSON(w, session.view(encodeShareCode(cfg.Settings.Sharing.PublicURL, session.Token)))
 	default:
@@ -254,7 +321,11 @@ func (a *App) handleLiveCutSessionItem(w http.ResponseWriter, r *http.Request) {
 		}
 		u, _ := userFromContext(r)
 		cfg := a.snapshotConfig()
-		ev := session.addEvent(cfg.InstanceID, cfg.UI.AppName, u.Username)
+		ev, ok := session.addEvent(cfg.InstanceID, cfg.UI.AppName, u.Username)
+		if !ok {
+			http.Error(w, "this session has reached its mark limit", http.StatusTooManyRequests)
+			return
+		}
 		writeJSON(w, ev)
 	case "import":
 		if r.Method != http.MethodPost {
@@ -364,7 +435,11 @@ func (a *App) handleLiveCutHostMark(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "this session has been closed", http.StatusGone)
 		return
 	}
-	ev := session.addEvent(req.InstanceID, req.InstanceName, req.Username)
+	ev, ok := session.addEvent(req.InstanceID, req.InstanceName, req.Username)
+	if !ok {
+		http.Error(w, "this session has reached its mark limit", http.StatusTooManyRequests)
+		return
+	}
 	writeJSON(w, ev)
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -276,5 +277,115 @@ func TestHandleLiveCutJoinAndProxy(t *testing.T) {
 	}
 	if len(feed.Events) != 1 || feed.Events[0].InstanceID != guest.cfg.InstanceID {
 		t.Fatalf("expected the proxied feed to show the guest's own mark, got %+v", feed.Events)
+	}
+}
+
+func TestLiveCutSessionCapsEvents(t *testing.T) {
+	s := &LiveCutSession{Token: "tok"}
+	for i := 0; i < maxLiveCutEvents; i++ {
+		if _, ok := s.addEvent("inst", "Inst", "user"); !ok {
+			t.Fatalf("mark %d should have been accepted (under the cap)", i)
+		}
+	}
+	// One past the ceiling must be rejected rather than grow the slice.
+	if _, ok := s.addEvent("inst", "Inst", "user"); ok {
+		t.Fatal("expected the mark past maxLiveCutEvents to be rejected")
+	}
+	all, _ := s.eventsSince(0)
+	if len(all) != maxLiveCutEvents {
+		t.Fatalf("expected the session to retain exactly %d events, got %d", maxLiveCutEvents, len(all))
+	}
+}
+
+// The public mark endpoint must surface the cap as a 429 rather than silently
+// growing memory - it's the one mark path a remote crowd can hit directly.
+func TestHandleLiveCutHostMarkRejectsPastCap(t *testing.T) {
+	a := newTestLiveCutApp(t)
+	session := &LiveCutSession{Token: "tok123"}
+	for i := 0; i < maxLiveCutEvents; i++ {
+		session.addEvent("inst", "Inst", "user")
+	}
+	a.liveCutSessions[session.Token] = session
+
+	req := httptest.NewRequest(http.MethodPost, "/api/livecut/host/mark", strings.NewReader(`{"token":"tok123"}`))
+	rec := httptest.NewRecorder()
+	a.handleLiveCutHostMark(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 once a session is at its mark limit, got %d", rec.Code)
+	}
+}
+
+// Starting a session twice for the same source returns the first one instead
+// of spawning a duplicate that competes for the same recording.
+func TestHandleLiveCutSessionsReusesOpenSessionForSource(t *testing.T) {
+	a := newTestLiveCutApp(t)
+	a.cfg.Sources = []Source{{ID: "src1", Name: "Mainstage"}}
+	a.active["src1"] = &recording{startedAt: time.Now()}
+
+	post := func() LiveCutSessionView {
+		req := adminRequest(http.MethodPost, "/api/livecut/sessions", `{"sourceId":"src1"}`)
+		rec := httptest.NewRecorder()
+		a.handleLiveCutSessions(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var v LiveCutSessionView
+		if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	first := post()
+	second := post()
+	if first.Token != second.Token {
+		t.Fatalf("expected the second start to reuse the first session's token, got %q then %q", first.Token, second.Token)
+	}
+	a.liveCutMu.Lock()
+	n := len(a.liveCutSessions)
+	a.liveCutMu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected exactly 1 stored session, got %d", n)
+	}
+
+	// After the first is closed, a fresh start makes a genuinely new session.
+	first.Token = ""
+	if s, ok := a.getLiveCutSession(second.Token); ok {
+		s.close()
+	}
+	third := post()
+	if third.Token == second.Token {
+		t.Fatal("expected a new session once the previous one was closed")
+	}
+}
+
+func TestPutLiveCutSessionEvictsClosedFirst(t *testing.T) {
+	a := newTestLiveCutApp(t)
+	// Fill to the cap: one open, the rest closed and older.
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < maxLiveCutSessions; i++ {
+		s := &LiveCutSession{Token: fmt.Sprintf("closed-%03d", i), CreatedAt: base.Add(time.Duration(i) * time.Second)}
+		s.close()
+		a.liveCutSessions[s.Token] = s
+	}
+	openOne := &LiveCutSession{Token: "open-keep", CreatedAt: time.Now()}
+	// Replace one closed slot with the open one so we're exactly at the cap.
+	delete(a.liveCutSessions, "closed-000")
+	a.liveCutSessions[openOne.Token] = openOne
+
+	// Adding one more must evict a closed session, never the open one.
+	a.putLiveCutSession(&LiveCutSession{Token: "newcomer", CreatedAt: time.Now()})
+
+	if _, ok := a.getLiveCutSession("open-keep"); !ok {
+		t.Fatal("the open session must not be evicted while closed ones exist")
+	}
+	if _, ok := a.getLiveCutSession("newcomer"); !ok {
+		t.Fatal("the newly added session should be present")
+	}
+	a.liveCutMu.Lock()
+	n := len(a.liveCutSessions)
+	a.liveCutMu.Unlock()
+	if n > maxLiveCutSessions {
+		t.Fatalf("expected the map to stay bounded at %d, got %d", maxLiveCutSessions, n)
 	}
 }
