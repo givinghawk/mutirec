@@ -649,6 +649,49 @@
     with silence-threshold sliders under Advanced options) and a general
     mass-transcode tool for bulk re-encoding recordings.
 
+- **Mass Transcode** (`cmd/web/transcode.go`, new file, plus a "Mass
+  Transcode" view in the Library tab). Bulk re-encode a batch of recordings
+  - video or audio - in one background job, following the same
+  handler-starts-a-goroutine-returns-a-job-ID shape as every other
+  long-running operation (`URLFetchJob`/`ShareJob`/`CutterJob`).
+  - `TranscodeOptions`: target container (blank keeps the source's own),
+    video codec (`copy`/`h264`/`h265`/`none` for audio-only extraction from a
+    video source), audio codec (`copy`/`aac`/`opus`/`mp3`/`flac`), CRF and
+    audio bitrate (both default sensibly when unset), hardware accel (same
+    values as a Source's `HardwareAccel`), and `Replace` (overwrite the
+    original in place vs. write a new `-transcoded` file alongside it).
+  - `POST /api/transcode/start` (admin only) validates every path resolves
+    under `FinishedDir`, starts a `TranscodeJob`, and returns its ID
+    immediately; `GET /api/transcode/jobs/<id>` polls per-file progress
+    (done/failed counts + a log line per file). Files are processed
+    **sequentially, not in parallel** - re-encoding is CPU/GPU-bound, so a
+    batch of concurrent ffmpeg processes would just contend with each other
+    (and with any live recording in progress) rather than finish faster.
+  - `transcodeOneFile` writes to a `.transcoding.tmp` path first and only
+    replaces/places the final file after ffmpeg succeeds - a failed file
+    never touches the original. If a container change means the output path
+    differs from the input, the old file is removed and its `RecordingMeta`
+    entry migrated to the new path (`migrateRecordingMeta`) so the library
+    assignment survives the encode. `rewriteSidecarsAfterTranscode` carries
+    forward whatever timing metadata the old `.timecode.json` had (the
+    recording's real wall-clock start doesn't change just because it was
+    re-encoded) and regenerates the waveform + a thumbnail against the new
+    file.
+  - Frontend mirrors the existing "Share Sets" view almost exactly (same
+    group-by-channel checkbox list, filter box, select-all/clear) since it's
+    the same "pick some recordings" interaction - a new `<select>`-based
+    options form above it, then a progress bar + log reused from the
+    Receive-a-share job box pattern.
+  - Tests in `cmd/web/transcode_test.go`: codec/encoder/container-extension
+    mapping, ffmpeg argument construction (copy defaults, a full re-encode
+    with hardware accel, audio-only extraction), and the start/poll HTTP
+    handlers (admin-only enforcement, empty-paths rejection, a real
+    start→poll round trip).
+  - Verified end-to-end against a running instance (no ffmpeg installed in
+    that sandbox, so the job correctly records a per-file error instead of
+    silently succeeding) plus a Playwright screenshot confirming the Mass
+    Transcode view renders and its selection checkboxes wire up correctly.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

@@ -1859,6 +1859,7 @@ async function openMatchView() {
   $('lib-search-results').classList.add('hidden');
   $('lib-share-view').classList.add('hidden');
   $('lib-receive-view').classList.add('hidden');
+  $('lib-transcode-view').classList.add('hidden');
   $('lib-back').classList.add('hidden');
   $('lib-match-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -1932,7 +1933,7 @@ $('lib-matchfile-input').addEventListener('change', async () => {
 let shareSelected = new Set(); // recording paths chosen to share
 
 function openShareView() {
-  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view']
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-receive-view', 'lib-transcode-view']
     .forEach(id => $(id) && $(id).classList.add('hidden'));
   $('lib-share-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -2051,7 +2052,7 @@ let receiveManifest = null;
 let receiveSelected = new Set();
 
 function openReceiveView() {
-  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view']
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view', 'lib-transcode-view']
     .forEach(id => $(id) && $(id).classList.add('hidden'));
   $('lib-receive-view').classList.remove('hidden');
   $('lib-title').textContent = 'Recordings Library';
@@ -2258,7 +2259,7 @@ function libEventDates(e) {
 function renderLibrary() {
   // The Smart Match / Share / Receive overlays sit alongside the library views;
   // rendering the normal library always dismisses them.
-  ['lib-match-view', 'lib-share-view', 'lib-receive-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
+  ['lib-match-view', 'lib-share-view', 'lib-receive-view', 'lib-transcode-view'].forEach(id => $(id) && $(id).classList.add('hidden'));
   const term = ($('lib-search').value || '').trim().toLowerCase();
   if (term) {
     renderLibrarySearch(term);
@@ -4022,6 +4023,135 @@ $('cutter-export').onclick = async () => {
     }
   }, 2000);
 };
+
+// ─── Mass Transcode ──────────────────────────────────────────────────────────
+// Bulk re-encode a batch of recordings in one background job. Mirrors the
+// Share Sets view's selection UI (group-by-channel checkboxes, filter,
+// select-all/clear) since it's the same "pick some recordings" interaction.
+
+let transcodeSelected = new Set();
+let transcodeJobPollTimer = null;
+
+function openTranscodeView() {
+  ['lib-home', 'lib-event-view', 'lib-search-results', 'lib-back', 'lib-match-view', 'lib-share-view', 'lib-receive-view']
+    .forEach(id => $(id) && $(id).classList.add('hidden'));
+  $('lib-transcode-view').classList.remove('hidden');
+  $('lib-title').textContent = 'Recordings Library';
+  transcodeSelected = new Set();
+  $('lib-transcode-filter').value = '';
+  $('lib-transcode-job-box').classList.add('hidden');
+  if (transcodeJobPollTimer) { clearTimeout(transcodeJobPollTimer); transcodeJobPollTimer = null; }
+  renderTranscodeList();
+}
+function closeTranscodeView() { $('lib-transcode-view').classList.add('hidden'); reloadLibraryData(); }
+
+function updateTranscodeSelCount() { $('lib-transcode-selcount').textContent = `${transcodeSelected.size} selected`; }
+
+function transcodeFilteredRecordings() {
+  const q = $('lib-transcode-filter').value.trim().toLowerCase();
+  let list = recordings || [];
+  if (q) list = list.filter(r => `${r.name} ${r.channel || ''} ${r.artist || ''}`.toLowerCase().includes(q));
+  return list;
+}
+
+function renderTranscodeList() {
+  const list = transcodeFilteredRecordings();
+  if (!list.length) {
+    $('lib-transcode-list').innerHTML = '<p class="text-zinc-400">No recordings to transcode yet.</p>';
+    updateTranscodeSelCount();
+    return;
+  }
+  const groups = new Map();
+  list.forEach(r => { const ch = r.channel || 'Unsorted'; if (!groups.has(ch)) groups.set(ch, []); groups.get(ch).push(r); });
+  $('lib-transcode-list').innerHTML = [...groups.entries()].map(([ch, items]) => `
+    <div class="source-group open">
+      <div class="source-group-head">
+        <label class="flex items-center gap-2 font-semibold"><input type="checkbox" class="tc-group-check" data-ch="${escapeAttr(ch)}"> ${escapeHtml(ch)}</label>
+        <span class="pill">${items.length}</span>
+      </div>
+      <div class="source-group-body space-y-1">
+        ${items.map(r => `
+          <label class="flex items-center justify-between gap-2 rounded border border-white/10 px-2 py-1">
+            <span class="flex min-w-0 items-center gap-2">
+              <input type="checkbox" class="tc-item-check" data-path="${escapeAttr(r.path)}" ${transcodeSelected.has(r.path) ? 'checked' : ''}>
+              <span class="truncate">${escapeHtml(libDisplayTitle(r))}</span>
+            </span>
+            <span class="flex-shrink-0 text-xs text-zinc-500">${formatBytes(r.size)}</span>
+          </label>`).join('')}
+      </div>
+    </div>`).join('');
+  $('lib-transcode-list').querySelectorAll('.tc-item-check').forEach(cb => cb.addEventListener('change', () => {
+    if (cb.checked) transcodeSelected.add(cb.dataset.path); else transcodeSelected.delete(cb.dataset.path);
+    updateTranscodeSelCount();
+  }));
+  $('lib-transcode-list').querySelectorAll('.tc-group-check').forEach(cb => cb.addEventListener('change', () => {
+    const ch = cb.dataset.ch;
+    (groups.get(ch) || []).forEach(r => { if (cb.checked) transcodeSelected.add(r.path); else transcodeSelected.delete(r.path); });
+    renderTranscodeList(); updateTranscodeSelCount();
+  }));
+  updateTranscodeSelCount();
+}
+
+$('lib-transcode-open').onclick = openTranscodeView;
+$('lib-transcode-close').onclick = closeTranscodeView;
+$('lib-transcode-filter').addEventListener('input', renderTranscodeList);
+$('lib-transcode-selectall').onclick = () => { transcodeFilteredRecordings().forEach(r => transcodeSelected.add(r.path)); renderTranscodeList(); };
+$('lib-transcode-clear').onclick = () => { transcodeSelected = new Set(); renderTranscodeList(); };
+
+$('lib-transcode-start').onclick = async () => {
+  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
+  const options = {
+    container: $('tc-container').value,
+    videoCodec: $('tc-video-codec').value,
+    audioCodec: $('tc-audio-codec').value,
+    crf: parseInt($('tc-crf').value, 10) || 0,
+    audioBitrateKbps: parseInt($('tc-bitrate').value, 10) || 0,
+    hardwareAccel: $('tc-hwaccel').value,
+    replace: $('tc-replace').checked,
+  };
+  $('lib-transcode-start').disabled = true;
+  let result;
+  try {
+    result = await api('/api/transcode/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [...transcodeSelected], options }),
+    });
+  } catch (e) { $('lib-transcode-start').disabled = false; return; }
+  $('lib-transcode-job-box').classList.remove('hidden');
+  pollTranscodeJob(result.jobId);
+};
+
+function stopTranscodeJobPoll() {
+  if (transcodeJobPollTimer) { clearTimeout(transcodeJobPollTimer); transcodeJobPollTimer = null; }
+}
+
+async function pollTranscodeJob(jobId) {
+  stopTranscodeJobPoll();
+  let job;
+  try {
+    job = await api(`/api/transcode/jobs/${encodeURIComponent(jobId)}`);
+  } catch (e) {
+    transcodeJobPollTimer = setTimeout(() => pollTranscodeJob(jobId), 2000);
+    return;
+  }
+  renderTranscodeJob(job);
+  if (job.status === 'running') {
+    transcodeJobPollTimer = setTimeout(() => pollTranscodeJob(jobId), 1500);
+  } else {
+    $('lib-transcode-start').disabled = false;
+    toast(`Transcode finished: ${job.done} done, ${job.failed} failed`, job.failed > 0 ? 'error' : 'info');
+    await refresh();
+  }
+}
+
+function renderTranscodeJob(job) {
+  const pct = job.totalFiles > 0 ? Math.min(100, Math.round((job.done + job.failed) / job.totalFiles * 100)) : 0;
+  $('lib-transcode-job-title').textContent = job.status === 'running' ? 'Transcoding...' : 'Transcode finished';
+  $('lib-transcode-job-stats').textContent = `${job.done + job.failed}/${job.totalFiles} files · ${job.done} done · ${job.failed} failed`;
+  $('lib-transcode-job-bar').style.width = `${pct}%`;
+  $('lib-transcode-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('lib-transcode-job-log').scrollTop = $('lib-transcode-job-log').scrollHeight;
+}
 
 setupCustomDropdowns();
 setupImageUploadFields();

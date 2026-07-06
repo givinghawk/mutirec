@@ -366,6 +366,9 @@ type App struct {
 	cutterJobsMu sync.Mutex
 	cutterJobs   map[string]*CutterJob
 
+	transcodeJobsMu sync.Mutex
+	transcodeJobs   map[string]*TranscodeJob
+
 	sourcePresets []SourcePreset
 }
 
@@ -436,6 +439,7 @@ func NewApp(configPath string) (*App, error) {
 		shareJobs:     map[string]*ShareJob{},
 		fetchJobs:     map[string]*URLFetchJob{},
 		cutterJobs:    map[string]*CutterJob{},
+		transcodeJobs: map[string]*TranscodeJob{},
 		sourcePresets: loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -512,6 +516,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cutter/preview", a.handleCutterPreview)
 	mux.HandleFunc("/api/cutter/export", a.handleCutterExport)
 	mux.HandleFunc("/api/cutter/jobs/", a.handleCutterJobItem)
+	mux.HandleFunc("/api/transcode/start", a.handleTranscodeStart)
+	mux.HandleFunc("/api/transcode/jobs/", a.handleTranscodeJobItem)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).

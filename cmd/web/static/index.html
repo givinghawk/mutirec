@@ -349,6 +349,7 @@
             <input type="file" id="lib-matchfile-input" accept="application/json" class="hidden">
             <button type="button" id="lib-share-open" class="btn" data-admin-only title="Select recordings and generate a share code to send to another MutiRec instance">Share Sets</button>
             <button type="button" id="lib-receive-open" class="btn" data-admin-only title="Paste a share code to pull recordings from another MutiRec instance">Receive</button>
+            <button type="button" id="lib-transcode-open" class="btn" data-admin-only title="Bulk re-encode selected recordings to a different container/codec">Mass Transcode</button>
             <button type="button" id="lib-new-event" class="btn primary">+ New Event</button>
           </div>
         </div>
@@ -428,6 +429,70 @@
             <p id="lib-receive-job-current" class="mt-1 text-xs text-zinc-500"></p>
             <pre id="lib-receive-job-log" class="codebox mt-2 h-40 overflow-y-auto text-xs"></pre>
           </div>
+        </div>
+
+        <div id="lib-transcode-view" class="panel hidden">
+          <div class="panel-head">
+            <h2>Mass Transcode</h2>
+            <div class="flex items-center gap-2">
+              <span id="lib-transcode-selcount" class="pill">0 selected</span>
+              <button type="button" id="lib-transcode-close" class="btn">Back to Library</button>
+            </div>
+          </div>
+          <p class="mb-3 text-sm text-zinc-400">Bulk re-encode selected recordings - change container, drop to a smaller video codec, extract audio-only from a video source, or normalize everything to one format. Runs in the background; you can navigate away while it works.</p>
+
+          <div class="grid gap-3 md:grid-cols-2 mb-3">
+            <label>Container<select id="tc-container" class="input">
+              <option value="">Keep source</option>
+              <option value="mkv">MKV</option>
+              <option value="mp4">MP4</option>
+              <option value="mp3">MP3 (audio only)</option>
+              <option value="m4a">M4A (audio only)</option>
+              <option value="opus">Opus (audio only)</option>
+            </select></label>
+            <label>Video codec<select id="tc-video-codec" class="input">
+              <option value="copy">Keep as-is (stream copy)</option>
+              <option value="h264">Re-encode to H.264</option>
+              <option value="h265">Re-encode to H.265/HEVC</option>
+              <option value="none">Strip video (audio-only extraction)</option>
+            </select></label>
+            <label>Audio codec<select id="tc-audio-codec" class="input">
+              <option value="copy">Keep as-is (stream copy)</option>
+              <option value="aac">AAC</option>
+              <option value="opus">Opus</option>
+              <option value="mp3">MP3</option>
+              <option value="flac">FLAC</option>
+            </select></label>
+            <label>Hardware acceleration<select id="tc-hwaccel" class="input">
+              <option value="">None (CPU)</option>
+              <option value="cuda">NVIDIA (NVENC)</option>
+              <option value="qsv">Intel Quick Sync</option>
+              <option value="vaapi">VAAPI</option>
+            </select></label>
+            <label>Video quality (CRF, lower = better) <span class="text-xs text-zinc-500">only used when re-encoding video</span><input id="tc-crf" type="number" class="input" placeholder="23" min="0" max="51"></label>
+            <label>Audio bitrate (kbps) <span class="text-xs text-zinc-500">only used when re-encoding audio</span><input id="tc-bitrate" type="number" class="input" placeholder="192" min="32" max="512"></label>
+          </div>
+          <label class="mb-3 inline-flex items-center gap-2 text-sm"><input id="tc-replace" type="checkbox" class="accent-red-500"> Replace original files (unchecked: saves alongside as "-transcoded")</label>
+
+          <div class="mb-3 flex flex-wrap items-center gap-2">
+            <input id="lib-transcode-filter" class="input max-w-xs" placeholder="Filter list…" style="margin:0">
+            <button type="button" id="lib-transcode-selectall" class="btn">Select all shown</button>
+            <button type="button" id="lib-transcode-clear" class="btn">Clear</button>
+            <button type="button" id="lib-transcode-start" class="btn primary">Start Transcode</button>
+          </div>
+
+          <div id="lib-transcode-job-box" class="mb-4 hidden">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span id="lib-transcode-job-title" class="text-sm font-medium"></span>
+              <span id="lib-transcode-job-stats" class="text-xs text-zinc-400"></span>
+            </div>
+            <div class="storage-bar-track">
+              <div id="lib-transcode-job-bar" class="storage-bar-fill" style="width:0%"></div>
+            </div>
+            <pre id="lib-transcode-job-log" class="codebox mt-2 h-40 overflow-y-auto text-xs"></pre>
+          </div>
+
+          <div id="lib-transcode-list" class="space-y-3 text-sm"></div>
         </div>
 
         <div id="lib-home">
