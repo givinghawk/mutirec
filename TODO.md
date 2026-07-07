@@ -1045,6 +1045,48 @@
   at a closed port produced the expected connection-refused error, rendered
   in the UI, not just logged.
 
+## Done (this session, part 13) - Visual Timetable: midnight grouping, vertical layout, hidden empty stages
+
+- **The "midnight thing" was a display bug, not an import bug.** The earlier
+  fix (part-of-a-prior-session, `combineDateTime`) already dates an
+  early-morning afterparty set to the correct *next* calendar day when
+  importing - but the Timetable tab's visual grid then grouped sets by that
+  literal ISO date, which put the afterparty on the *next* day's tab as a
+  disconnected early-morning blip instead of keeping it attached to the
+  festival day it's actually part of (a "Friday" program that runs to
+  4am Saturday should still all show under Friday). Added
+  `festivalDayOf`/`festivalMinutes` (`app.js`) mirroring the backend's
+  `festivalDayRolloverHour` convention (before 08:00 belongs to the
+  *previous* festival day) and used them for both `timetableDays()` and the
+  set-to-day grouping/positioning that used to key everything off `sp.date`
+  directly. Verified in a real browser: a stage with a 20:00-23:00 main set
+  and a genuinely-next-calendar-day 01:00-04:00 afterparty set now produces
+  exactly one day tab, with the afterparty sorted after the main set and
+  displayed as "01:00–04:00", not a phantom second day.
+- **Stages with no sets on the selected day are hidden by default**, with a
+  small "+N stage(s) with no sets today" button to reveal them (and "Hide N
+  empty stage(s)" once shown). Deliberately per-day, not "ever had zero sets
+  globally" - a stage can be fully programmed for Friday and still have
+  nothing entered for Saturday yet, and hiding it there shouldn't make it
+  vanish permanently. Also deliberately never hides *everything*: if no stage
+  has a set on the selected day at all, every stage still shows (with its
+  "+ Set" button) so there's still a way to add the day's first set - a
+  global hide would otherwise be a dead end, since new stages are only ever
+  created via the raw JSON/import path (there's no separate "add stage" UI).
+- **Side-by-side stage columns for 4 or fewer stages** (`maxVerticalStages`
+  in `app.js`, new `.tt-col*` rules in `app.css`). Compressing a whole
+  festival day into a handful of thin horizontal timeline tracks (the
+  existing layout, still used above the threshold) reads poorly and wastes
+  most of the panel as empty space when there are only 1-4 stages - each
+  stage is now a column, its sets listed top-to-bottom in chronological
+  order with real clock times, like a printed festival day-schedule poster.
+  Reuses the exact same `editTimetableSet`/`addTimetableSet`/`toggleFavorite`
+  handlers as the row layout, so nothing about *editing* a set differs
+  between the two - only how they're arranged. The 4-vs-5 boundary is based
+  on stages actually visible that day (after the empty-stage hiding above),
+  not the timetable's total stage count. Verified in a real browser: exactly
+  4 stages-with-sets renders `.tt-cols`, a 5th flips it back to `.tt-row`.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

@@ -1826,9 +1826,42 @@ function parseIso(iso) {
   return { date: m[1], minutes: parseInt(m[2], 10) * 60 + parseInt(m[3], 10) };
 }
 
+// festivalDayRolloverMin mirrors the backend's festivalDayRolloverHour
+// (main.go): festival timetables group a program that runs from the
+// afternoon/evening into the small hours of the following morning all under
+// one day label, so a set that starts at, say, 01:00 is really the tail end
+// of the *previous* festival day's night, not the start of a new one - the
+// same set the backend's combineDateTime already dates as the next calendar
+// day when importing. Grouping sets by their literal ISO date (instead of
+// this festival-day convention) is what used to put a 1am afterparty set on
+// the wrong day's tab entirely, as an odd early-morning blip disconnected
+// from the day it was actually part of.
+const festivalDayRolloverMin = 8 * 60;
+
+// festivalDayOf returns which festival "day" a parsed timestamp belongs to
+// for display/grouping purposes: its own calendar date, unless it's before
+// the rollover hour, in which case it belongs to the previous calendar day.
+function festivalDayOf(p) {
+  if (!p) return null;
+  if (p.minutes >= festivalDayRolloverMin) return p.date;
+  const d = new Date(p.date + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// festivalMinutes returns how many minutes after midnight of `day` a parsed
+// timestamp falls - possibly past 24:00 (or negative) when its own calendar
+// date differs from `day`, so a set that runs into the small hours of the
+// next calendar date still positions/sorts correctly as part of `day`'s
+// timeline instead of snapping back to the start of it.
+function festivalMinutes(p, day) {
+  const dayDiff = Math.round((Date.parse(p.date + 'T00:00:00Z') - Date.parse(day + 'T00:00:00Z')) / 86400000);
+  return p.minutes + dayDiff * 24 * 60;
+}
+
 function timetableDays() {
   const days = new Set();
-  (config.timetable || []).forEach(st => (st.sets || []).forEach(s => { const p = parseIso(s.start); if (p) days.add(p.date); }));
+  (config.timetable || []).forEach(st => (st.sets || []).forEach(s => { const p = parseIso(s.start); if (p) days.add(festivalDayOf(p)); }));
   return [...days].sort();
 }
 
@@ -1858,6 +1891,30 @@ function updateStageDatalist() {
   $('timetable-stage-names').innerHTML = stages.map(s => `<option value="${escapeAttr(s)}">`).join('');
 }
 
+// maxVerticalStages: at or below this many *visible* stages for the selected
+// day, the timetable renders as side-by-side columns (sets listed
+// top-to-bottom, chronologically, like a printed festival day-schedule)
+// instead of the horizontal per-stage timeline used above it - a handful of
+// stages compressed into thin horizontal tracks reads poorly and wastes most
+// of the panel as empty space, while a few columns of readable set cards fit
+// comfortably.
+const maxVerticalStages = 4;
+
+// showEmptyTtStages toggles whether stages with no sets on the selected day
+// are included - see the reveal button built in renderVisualTimetable.
+let showEmptyTtStages = false;
+function toggleEmptyTtStages() { showEmptyTtStages = !showEmptyTtStages; renderVisualTimetable(); }
+
+// formatTtMinutes renders minutes-of-day back to a plain "HH:MM" wall-clock
+// label - festivalMinutes may have pushed the value past 24*60 for an
+// after-midnight set, so it's normalized back into 0..23:59 for display
+// (nobody wants to read "26:30" on a set card).
+function formatTtMinutes(minutes) {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 function renderVisualTimetable() {
   updateStageDatalist();
   const days = timetableDays();
@@ -1873,46 +1930,95 @@ function renderVisualTimetable() {
   }
 
   const favIds = new Set(config.settings.favoriteSetIds || []);
-  // endMinutes: returns the end time as minutes from midnight of selectedTimetableDay,
-  // rolling an end on the *next* calendar day forward by 24*60 so afterparties
-  // that run past midnight are displayed as extending beyond 24:00 on the
-  // current day's grid rather than snapping back to before the start time.
-  function endMinutes(sp, ep) {
-    if (!ep) return sp.minutes + 60;
-    if (ep.date > selectedTimetableDay) return ep.minutes + 24 * 60;
-    return ep.minutes;
-  }
-  let minMin = 24 * 60, maxMin = 0, any = false;
-  config.timetable.forEach(st => (st.sets || []).forEach(s => {
-    const sp = parseIso(s.start), ep = parseIso(s.end);
-    if (sp && sp.date === selectedTimetableDay) {
-      any = true;
-      minMin = Math.min(minMin, sp.minutes);
-      maxMin = Math.max(maxMin, endMinutes(sp, ep));
+  const day = selectedTimetableDay;
+
+  // Each stage's sets that fall on the selected festival day (see
+  // festivalDayOf), sorted chronologically - a set is grouped by which
+  // festival day it belongs to, not its literal calendar date, so a 1am
+  // afterparty stays attached to the night before it, not the next day's tab.
+  const stageEntries = config.timetable.map((st, si) => {
+    const sets = (st.sets || [])
+      .map((set, seti) => ({ set, seti, sp: parseIso(set.start), ep: parseIso(set.end) }))
+      .filter(x => x.sp && festivalDayOf(x.sp) === day)
+      .sort((a, b) => festivalMinutes(a.sp, day) - festivalMinutes(b.sp, day));
+    return { st, si, sets };
+  });
+
+  const withSets = stageEntries.filter(e => e.sets.length > 0);
+  const emptyCount = stageEntries.length - withSets.length;
+  let visible, toggleHtml = '';
+  if (withSets.length === 0) {
+    // Nothing has a set today yet on any stage - show every stage anyway, or
+    // there'd be no way left to add the day's first set.
+    visible = stageEntries;
+  } else if (showEmptyTtStages) {
+    visible = stageEntries;
+    toggleHtml = `<button type="button" class="btn text-xs mb-2" onclick="toggleEmptyTtStages()">Hide ${emptyCount} empty stage${emptyCount === 1 ? '' : 's'}</button>`;
+  } else {
+    visible = withSets;
+    if (emptyCount > 0) {
+      toggleHtml = `<button type="button" class="btn text-xs mb-2" onclick="toggleEmptyTtStages()">+ ${emptyCount} stage${emptyCount === 1 ? '' : 's'} with no sets today</button>`;
     }
+  }
+
+  const useColumns = visible.length > 0 && visible.length <= maxVerticalStages;
+
+  if (useColumns) {
+    const colHtml = (e) => {
+      const color = e.st.color || stagePalette(e.st.stage);
+      const items = e.sets.map(x => {
+        const spMin = festivalMinutes(x.sp, day);
+        const starred = x.set.id && favIds.has(x.set.id);
+        const timeLabel = x.ep ? `${formatTtMinutes(spMin)}–${formatTtMinutes(festivalMinutes(x.ep, day))}` : formatTtMinutes(spMin);
+        return `<div class="tt-col-item" style="background:${color}">
+          <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${x.set.id || ''}')">&#9733;</button>
+          <div onclick="editTimetableSet(${e.si},${x.seti})">
+            <div class="tt-col-time">${timeLabel}</div>
+            <div class="tt-col-name">${escapeHtml(x.set.name)}</div>
+          </div>
+        </div>`;
+      }).join('') || '<p class="text-xs text-zinc-500">No sets yet.</p>';
+      return `<div class="tt-col">
+        <div class="tt-col-header" style="color:${color};border-color:${color}" title="${escapeAttr(e.st.stage)}">${escapeHtml(e.st.stage)}</div>
+        ${items}
+        <button type="button" class="btn w-full mt-1" onclick="addTimetableSet(${e.si})">+ Set</button>
+      </div>`;
+    };
+    $('timetable-visual').innerHTML = toggleHtml + `<div class="tt-cols">${visible.map(colHtml).join('')}</div>`;
+    return;
+  }
+
+  let minMin = 24 * 60, maxMin = 0, any = false;
+  visible.forEach(e => e.sets.forEach(x => {
+    any = true;
+    const spMin = festivalMinutes(x.sp, day);
+    const epMin = x.ep ? festivalMinutes(x.ep, day) : spMin + 60;
+    minMin = Math.min(minMin, spMin);
+    maxMin = Math.max(maxMin, epMin);
   }));
   if (!any) { minMin = 12 * 60; maxMin = 24 * 60; }
   const span = Math.max(60, maxMin - minMin);
 
-  $('timetable-visual').innerHTML = config.timetable.map((st, si) => {
-    const color = st.color || stagePalette(st.stage);
-    const blocks = (st.sets || []).map((set, seti) => {
-      const sp = parseIso(set.start), ep = parseIso(set.end);
-      if (!sp || sp.date !== selectedTimetableDay) return '';
-      const left = ((sp.minutes - minMin) / span) * 100;
-      const width = Math.max(3, ((endMinutes(sp, ep) - sp.minutes) / span) * 100);
-      const starred = set.id && favIds.has(set.id);
-      return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(set.name)}">
-        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id || ''}')">&#9733;</button>
-        <span onclick="editTimetableSet(${si},${seti})">${escapeHtml(set.name)}</span>
+  const rowHtml = (e) => {
+    const color = e.st.color || stagePalette(e.st.stage);
+    const blocks = e.sets.map(x => {
+      const spMin = festivalMinutes(x.sp, day);
+      const epMin = x.ep ? festivalMinutes(x.ep, day) : spMin + 60;
+      const left = ((spMin - minMin) / span) * 100;
+      const width = Math.max(3, ((epMin - spMin) / span) * 100);
+      const starred = x.set.id && favIds.has(x.set.id);
+      return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(x.set.name)}">
+        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${x.set.id || ''}')">&#9733;</button>
+        <span onclick="editTimetableSet(${e.si},${x.seti})">${escapeHtml(x.set.name)}</span>
       </div>`;
     }).join('');
     return `<div class="tt-row">
-      <div class="tt-row-label" style="color:${color}" title="${escapeAttr(st.stage)}">${escapeHtml(st.stage)}</div>
+      <div class="tt-row-label" style="color:${color}" title="${escapeAttr(e.st.stage)}">${escapeHtml(e.st.stage)}</div>
       <div class="tt-row-track">${blocks}</div>
-      <button type="button" class="btn" onclick="addTimetableSet(${si})">+ Set</button>
+      <button type="button" class="btn" onclick="addTimetableSet(${e.si})">+ Set</button>
     </div>`;
-  }).join('');
+  };
+  $('timetable-visual').innerHTML = toggleHtml + visible.map(rowHtml).join('');
 }
 
 function selectTimetableDay(day) { selectedTimetableDay = day; renderVisualTimetable(); }
