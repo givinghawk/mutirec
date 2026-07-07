@@ -170,6 +170,11 @@ func (a *App) handleRecordingThumbnail(w http.ResponseWriter, r *http.Request) {
 			// on demand rather than leaving the card blank forever.
 			p, ok = a.generateThumbnailOnDemand(relPath)
 			if !ok {
+				// Never let a browser cache this 404: a recording with no
+				// thumbnail yet can get one later (uploaded, or generated for
+				// a video once ffmpeg is available), and a cached miss would
+				// keep the card blank until a hard refresh.
+				w.Header().Set("Cache-Control", "no-store")
 				http.NotFound(w, r)
 				return
 			}

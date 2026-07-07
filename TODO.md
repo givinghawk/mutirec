@@ -944,6 +944,148 @@
     above is the strongest available substitute; anyone bringing up two real
     installs on their own machines gets full ffmpeg-backed verification for
     free the first time they use it.
+  - **Hardening pass** (same feature, follow-up): the public token-authed
+    mark endpoint is reachable by a whole crowd sharing one token, so
+    `addEvent` now bounds each session at `maxLiveCutEvents` (5000 - far
+    above any real session) and returns 429 past it instead of growing
+    memory unbounded; hosted sessions are bounded at `maxLiveCutSessions`
+    (100) via a new `putLiveCutSession` that evicts the least-useful session
+    first (closed before open, oldest among equals - mirroring
+    `putShareJob`); and starting a session twice for the same source now
+    returns the existing open one (`openLiveCutSessionForSource`) instead of
+    spawning a duplicate that competes for the same recording. Covered by
+    `TestLiveCutSessionCapsEvents`, `TestHandleLiveCutHostMarkRejectsPastCap`,
+    `TestHandleLiveCutSessionsReusesOpenSessionForSource`, and
+    `TestPutLiveCutSessionEvictsClosedFirst`; the locking changes are
+    `go test -race` clean.
+
+## Done (this session, part 11) - Recordings tab polish
+
+- **Recording thumbnails now actually show when set** (`app.js`,
+  `uploads.go`). The library set cards used `loading="lazy"` on an `<img>`
+  that started with the `hidden` class and only removed `hidden` in its
+  `onload` handler - a deadlock: a `display:none` image never enters the
+  viewport, so native lazy-loading never fetches it, so `onload` never fires,
+  so it's never revealed. (This was masked in dev because Tailwind's CDN
+  `.hidden` is what makes it `display:none`; the bug only bites where Tailwind
+  is present, i.e. production.) Replaced with an `IntersectionObserver`-based
+  lazy loader: cards render `data-thumb` (no `src`), and `observeThumbnails()`
+  assigns the real `src` only when the card scrolls into view - reliable in
+  the horizontal scroll rows where native lazy-loading is flaky, no hidden
+  state to get stuck in, and the `onerror` fallback uses an inline style
+  rather than depending on Tailwind's `.hidden`. Also made the "no thumbnail
+  yet" 404 `Cache-Control: no-store` so a later-uploaded thumbnail shows
+  without a hard refresh. Verified end-to-end in a real browser (image
+  requested, 200, `naturalWidth>0`).
+- **Smart Match now uses filename/folder keywords** (`main.go`,
+  `match_test.go`). Previously it scored only stage, parsed time, guessed
+  artist, and the source's manually-linked Festival - so two editions (or two
+  different festivals) that reuse the same stage name and a touring artist on
+  the same day were a coin flip. Added two keyword signals extracted from the
+  whole path + filename: an event-name match (fraction of the event's
+  identifying words present, e.g. a festival name and stage colour -
+  generic filler, single chars, and bare years are dropped) worth +45, and a
+  year match/conflict (±25) that settles which edition. These need no manual
+  Festival linking, so they help the common case. Confidence/reason are
+  enriched: a recording that literally names its event reads more trustworthy,
+  and a named year that contradicts the matched edition knocks a "high" down
+  to "medium" with a warning. New tests cover the helpers plus two
+  disambiguation scenarios (festival-name keyword breaking a stage+artist tie;
+  year keyword picking the right edition when the filename carries no date) -
+  all placeholder names per the no-real-festival-data rule.
+- **Live Cut Sessions frontend cleanup** (`app.js`, following up the earlier
+  backend hardening): `livecutFeeds` (per-token event state) is now pruned
+  each poll tick to only the sessions this instance is actually hosting or
+  joined to, so switching sources or closing sessions no longer leaks their
+  event lists for the life of the Watch tab; closing a hosted session clears
+  its feed immediately; and the host code field is only rewritten when it
+  changes, so the ~1.5s poll re-render no longer clobbers a manual
+  text-selection mid-copy.
+
+## Done (this session, part 12) - Notifications hardening + a test button
+
+- **Fixed two real correctness bugs in `notify()`** (`main.go`). (1) The two
+  call sites on the recording-finish path (`runRecording`) called
+  `a.notify(...)` synchronously - a hanging Discord webhook or SMTP server
+  would delay finishing a recording (and delay the `a.lastFinished` map
+  write other features, like Live Cut Session import, read). Both now go
+  through `go a.notify(...)`, matching the reminder call site's existing
+  pattern. (2) The Discord webhook send checked neither the HTTP error nor
+  the response status code - a deleted/rate-limited/misconfigured webhook
+  failed completely silently, with nothing in the event log, unlike the SMTP
+  path right next to it which already logged failures. Both channels are now
+  sent concurrently (`sync.WaitGroup`) with a 15s timeout on the Discord
+  client (`http.DefaultClient` has none), and both log failures to the event
+  feed the same way via a shared `sendDiscordWebhook` helper.
+- **Discord content-limit truncation**: a long body (e.g. a full
+  ffmpeg/streamlink error message passed straight through) could exceed
+  Discord's ~2000-character webhook content limit, which Discord rejects
+  outright with a 400 - previously exactly the kind of failure point 1 above
+  swallowed silently, so the notification would just vanish. Truncated by
+  rune (not byte - a byte-slice both risks cutting a multi-byte rune in half
+  and, since the "…" marker itself is multi-byte, could push the byte length
+  past the limit even after "truncating") to exactly the limit.
+- **New `POST /api/notifications/test` + "Send test notification" button**
+  (Settings → Notifications). Tests whatever is currently typed into the
+  Discord webhook / SMTP fields - not necessarily saved yet, the same
+  "test before you save" convention `handleSourceTest` already established
+  for sources - and reports each configured channel's result separately
+  (`{tested, ok, error}` per channel), so a user can verify their setup
+  immediately instead of waiting for a real recording or timetable reminder.
+  Admin-only, matching every other settings-mutating action.
+- Tests in `cmd/web/notifications_test.go`: webhook success/failure/
+  truncation (including the rune-vs-byte truncation bug found while writing
+  the test), the test endpoint's "nothing configured" case, a Discord-only
+  test leaving SMTP untested, and admin-only enforcement. `go test -race`
+  clean (the new `sync.WaitGroup` in `notify()`).
+- Verified end-to-end in a real browser against a real running instance: a
+  small local HTTP server standing in for a Discord webhook (since this
+  sandbox has no network access to a real Discord webhook) received the
+  exact POST body the button sent and returned success; pointing the field
+  at a closed port produced the expected connection-refused error, rendered
+  in the UI, not just logged.
+
+## Done (this session, part 13) - Visual Timetable: midnight grouping, vertical layout, hidden empty stages
+
+- **The "midnight thing" was a display bug, not an import bug.** The earlier
+  fix (part-of-a-prior-session, `combineDateTime`) already dates an
+  early-morning afterparty set to the correct *next* calendar day when
+  importing - but the Timetable tab's visual grid then grouped sets by that
+  literal ISO date, which put the afterparty on the *next* day's tab as a
+  disconnected early-morning blip instead of keeping it attached to the
+  festival day it's actually part of (a "Friday" program that runs to
+  4am Saturday should still all show under Friday). Added
+  `festivalDayOf`/`festivalMinutes` (`app.js`) mirroring the backend's
+  `festivalDayRolloverHour` convention (before 08:00 belongs to the
+  *previous* festival day) and used them for both `timetableDays()` and the
+  set-to-day grouping/positioning that used to key everything off `sp.date`
+  directly. Verified in a real browser: a stage with a 20:00-23:00 main set
+  and a genuinely-next-calendar-day 01:00-04:00 afterparty set now produces
+  exactly one day tab, with the afterparty sorted after the main set and
+  displayed as "01:00–04:00", not a phantom second day.
+- **Stages with no sets on the selected day are hidden by default**, with a
+  small "+N stage(s) with no sets today" button to reveal them (and "Hide N
+  empty stage(s)" once shown). Deliberately per-day, not "ever had zero sets
+  globally" - a stage can be fully programmed for Friday and still have
+  nothing entered for Saturday yet, and hiding it there shouldn't make it
+  vanish permanently. Also deliberately never hides *everything*: if no stage
+  has a set on the selected day at all, every stage still shows (with its
+  "+ Set" button) so there's still a way to add the day's first set - a
+  global hide would otherwise be a dead end, since new stages are only ever
+  created via the raw JSON/import path (there's no separate "add stage" UI).
+- **Side-by-side stage columns for 4 or fewer stages** (`maxVerticalStages`
+  in `app.js`, new `.tt-col*` rules in `app.css`). Compressing a whole
+  festival day into a handful of thin horizontal timeline tracks (the
+  existing layout, still used above the threshold) reads poorly and wastes
+  most of the panel as empty space when there are only 1-4 stages - each
+  stage is now a column, its sets listed top-to-bottom in chronological
+  order with real clock times, like a printed festival day-schedule poster.
+  Reuses the exact same `editTimetableSet`/`addTimetableSet`/`toggleFavorite`
+  handlers as the row layout, so nothing about *editing* a set differs
+  between the two - only how they're arranged. The 4-vs-5 boundary is based
+  on stages actually visible that day (after the empty-stage hiding above),
+  not the timetable's total stage count. Verified in a real browser: exactly
+  4 stages-with-sets renders `.tt-cols`, a 5th flips it back to `.tt-row`.
 
 ## Remaining (in suggested order)
 

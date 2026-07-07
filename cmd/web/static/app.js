@@ -883,6 +883,37 @@ async function saveConfig() {
   await refresh();
 }
 
+// Tests whatever is currently typed into the Notifications panel - not
+// necessarily saved yet - the same "test before you save" convention the
+// Sources tab's "Test Stream" button already established.
+$('notif-test-btn').onclick = async () => {
+  const resultEl = $('notif-test-result');
+  const btn = $('notif-test-btn');
+  btn.disabled = true;
+  resultEl.classList.add('hidden');
+  const body = {
+    discordWebhook: $('discordWebhook').value,
+    smtp: { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value },
+  };
+  let result;
+  try {
+    result = await api('/api/notifications/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch {
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  if (result.error) { toast(result.error, 'error'); return; }
+  const lines = [];
+  if (result.discord.tested) lines.push(result.discord.ok ? 'Discord: sent ✓' : `Discord failed: ${result.discord.error}`);
+  if (result.smtp.tested) lines.push(result.smtp.ok ? 'Email: sent ✓' : `Email failed: ${result.smtp.error}`);
+  resultEl.textContent = lines.join(' · ');
+  const anyFailed = (result.discord.tested && !result.discord.ok) || (result.smtp.tested && !result.smtp.ok);
+  resultEl.className = anyFailed ? 'mt-2 text-xs text-red-400' : 'mt-2 text-xs text-emerald-400';
+  resultEl.classList.remove('hidden');
+  lines.forEach(l => toast(l, l.includes('failed') ? 'error' : 'info'));
+};
+
 async function loadAccount() {
   let acct;
   try {
@@ -1358,6 +1389,19 @@ function livecutPollTick() {
   livecutRefreshHostSessions();
   if (livecutHostSession) livecutPollFeed('host', livecutHostSession.token);
   livecutJoined.forEach(j => livecutPollFeed('joined', j.token));
+  livecutPruneFeeds();
+}
+
+// Drops accumulated feed state for any session this instance is no longer
+// hosting or joined to - otherwise switching sources or closing sessions
+// leaves their (potentially large) event lists in memory for the life of the
+// Watch tab. A session still in the joined list keeps its feed even after its
+// host closes it, so the final marks stay visible until the user leaves.
+function livecutPruneFeeds() {
+  const active = new Set();
+  if (livecutHostSession) active.add(livecutHostSession.token);
+  livecutJoined.forEach(j => active.add(j.token));
+  Object.keys(livecutFeeds).forEach(token => { if (!active.has(token)) delete livecutFeeds[token]; });
 }
 
 function startLivecutPoll() {
@@ -1416,7 +1460,10 @@ function renderLivecutPanel() {
   if (watchSourceId && src) {
     if (livecutHostSession) {
       $('livecut-host').classList.remove('hidden');
-      $('livecut-host-code').value = livecutHostSession.code;
+      // Only rewrite the code field when it actually changes - this render
+      // runs on every ~1.5s poll tick, and blindly reassigning .value would
+      // clobber a manual text-selection the user is making to copy the code.
+      if ($('livecut-host-code').value !== livecutHostSession.code) $('livecut-host-code').value = livecutHostSession.code;
       renderLivecutFeed('host', livecutHostSession.token);
     } else {
       $('livecut-start').classList.remove('hidden');
@@ -1442,6 +1489,7 @@ async function livecutCloseHost() {
   if (!livecutHostSession) return;
   if (!confirm('Close this Live Cut Session? Anyone still connected will stop being able to mark.')) return;
   try { await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}`, { method: 'DELETE' }); } catch { return; }
+  delete livecutFeeds[livecutHostSession.token];
   livecutHostSession = null;
   renderLivecutPanel();
 }
@@ -1778,9 +1826,42 @@ function parseIso(iso) {
   return { date: m[1], minutes: parseInt(m[2], 10) * 60 + parseInt(m[3], 10) };
 }
 
+// festivalDayRolloverMin mirrors the backend's festivalDayRolloverHour
+// (main.go): festival timetables group a program that runs from the
+// afternoon/evening into the small hours of the following morning all under
+// one day label, so a set that starts at, say, 01:00 is really the tail end
+// of the *previous* festival day's night, not the start of a new one - the
+// same set the backend's combineDateTime already dates as the next calendar
+// day when importing. Grouping sets by their literal ISO date (instead of
+// this festival-day convention) is what used to put a 1am afterparty set on
+// the wrong day's tab entirely, as an odd early-morning blip disconnected
+// from the day it was actually part of.
+const festivalDayRolloverMin = 8 * 60;
+
+// festivalDayOf returns which festival "day" a parsed timestamp belongs to
+// for display/grouping purposes: its own calendar date, unless it's before
+// the rollover hour, in which case it belongs to the previous calendar day.
+function festivalDayOf(p) {
+  if (!p) return null;
+  if (p.minutes >= festivalDayRolloverMin) return p.date;
+  const d = new Date(p.date + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// festivalMinutes returns how many minutes after midnight of `day` a parsed
+// timestamp falls - possibly past 24:00 (or negative) when its own calendar
+// date differs from `day`, so a set that runs into the small hours of the
+// next calendar date still positions/sorts correctly as part of `day`'s
+// timeline instead of snapping back to the start of it.
+function festivalMinutes(p, day) {
+  const dayDiff = Math.round((Date.parse(p.date + 'T00:00:00Z') - Date.parse(day + 'T00:00:00Z')) / 86400000);
+  return p.minutes + dayDiff * 24 * 60;
+}
+
 function timetableDays() {
   const days = new Set();
-  (config.timetable || []).forEach(st => (st.sets || []).forEach(s => { const p = parseIso(s.start); if (p) days.add(p.date); }));
+  (config.timetable || []).forEach(st => (st.sets || []).forEach(s => { const p = parseIso(s.start); if (p) days.add(festivalDayOf(p)); }));
   return [...days].sort();
 }
 
@@ -1810,6 +1891,30 @@ function updateStageDatalist() {
   $('timetable-stage-names').innerHTML = stages.map(s => `<option value="${escapeAttr(s)}">`).join('');
 }
 
+// maxVerticalStages: at or below this many *visible* stages for the selected
+// day, the timetable renders as side-by-side columns (sets listed
+// top-to-bottom, chronologically, like a printed festival day-schedule)
+// instead of the horizontal per-stage timeline used above it - a handful of
+// stages compressed into thin horizontal tracks reads poorly and wastes most
+// of the panel as empty space, while a few columns of readable set cards fit
+// comfortably.
+const maxVerticalStages = 4;
+
+// showEmptyTtStages toggles whether stages with no sets on the selected day
+// are included - see the reveal button built in renderVisualTimetable.
+let showEmptyTtStages = false;
+function toggleEmptyTtStages() { showEmptyTtStages = !showEmptyTtStages; renderVisualTimetable(); }
+
+// formatTtMinutes renders minutes-of-day back to a plain "HH:MM" wall-clock
+// label - festivalMinutes may have pushed the value past 24*60 for an
+// after-midnight set, so it's normalized back into 0..23:59 for display
+// (nobody wants to read "26:30" on a set card).
+function formatTtMinutes(minutes) {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 function renderVisualTimetable() {
   updateStageDatalist();
   const days = timetableDays();
@@ -1825,46 +1930,95 @@ function renderVisualTimetable() {
   }
 
   const favIds = new Set(config.settings.favoriteSetIds || []);
-  // endMinutes: returns the end time as minutes from midnight of selectedTimetableDay,
-  // rolling an end on the *next* calendar day forward by 24*60 so afterparties
-  // that run past midnight are displayed as extending beyond 24:00 on the
-  // current day's grid rather than snapping back to before the start time.
-  function endMinutes(sp, ep) {
-    if (!ep) return sp.minutes + 60;
-    if (ep.date > selectedTimetableDay) return ep.minutes + 24 * 60;
-    return ep.minutes;
-  }
-  let minMin = 24 * 60, maxMin = 0, any = false;
-  config.timetable.forEach(st => (st.sets || []).forEach(s => {
-    const sp = parseIso(s.start), ep = parseIso(s.end);
-    if (sp && sp.date === selectedTimetableDay) {
-      any = true;
-      minMin = Math.min(minMin, sp.minutes);
-      maxMin = Math.max(maxMin, endMinutes(sp, ep));
+  const day = selectedTimetableDay;
+
+  // Each stage's sets that fall on the selected festival day (see
+  // festivalDayOf), sorted chronologically - a set is grouped by which
+  // festival day it belongs to, not its literal calendar date, so a 1am
+  // afterparty stays attached to the night before it, not the next day's tab.
+  const stageEntries = config.timetable.map((st, si) => {
+    const sets = (st.sets || [])
+      .map((set, seti) => ({ set, seti, sp: parseIso(set.start), ep: parseIso(set.end) }))
+      .filter(x => x.sp && festivalDayOf(x.sp) === day)
+      .sort((a, b) => festivalMinutes(a.sp, day) - festivalMinutes(b.sp, day));
+    return { st, si, sets };
+  });
+
+  const withSets = stageEntries.filter(e => e.sets.length > 0);
+  const emptyCount = stageEntries.length - withSets.length;
+  let visible, toggleHtml = '';
+  if (withSets.length === 0) {
+    // Nothing has a set today yet on any stage - show every stage anyway, or
+    // there'd be no way left to add the day's first set.
+    visible = stageEntries;
+  } else if (showEmptyTtStages) {
+    visible = stageEntries;
+    toggleHtml = `<button type="button" class="btn text-xs mb-2" onclick="toggleEmptyTtStages()">Hide ${emptyCount} empty stage${emptyCount === 1 ? '' : 's'}</button>`;
+  } else {
+    visible = withSets;
+    if (emptyCount > 0) {
+      toggleHtml = `<button type="button" class="btn text-xs mb-2" onclick="toggleEmptyTtStages()">+ ${emptyCount} stage${emptyCount === 1 ? '' : 's'} with no sets today</button>`;
     }
+  }
+
+  const useColumns = visible.length > 0 && visible.length <= maxVerticalStages;
+
+  if (useColumns) {
+    const colHtml = (e) => {
+      const color = e.st.color || stagePalette(e.st.stage);
+      const items = e.sets.map(x => {
+        const spMin = festivalMinutes(x.sp, day);
+        const starred = x.set.id && favIds.has(x.set.id);
+        const timeLabel = x.ep ? `${formatTtMinutes(spMin)}–${formatTtMinutes(festivalMinutes(x.ep, day))}` : formatTtMinutes(spMin);
+        return `<div class="tt-col-item" style="background:${color}">
+          <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${x.set.id || ''}')">&#9733;</button>
+          <div onclick="editTimetableSet(${e.si},${x.seti})">
+            <div class="tt-col-time">${timeLabel}</div>
+            <div class="tt-col-name">${escapeHtml(x.set.name)}</div>
+          </div>
+        </div>`;
+      }).join('') || '<p class="text-xs text-zinc-500">No sets yet.</p>';
+      return `<div class="tt-col">
+        <div class="tt-col-header" style="color:${color};border-color:${color}" title="${escapeAttr(e.st.stage)}">${escapeHtml(e.st.stage)}</div>
+        ${items}
+        <button type="button" class="btn w-full mt-1" onclick="addTimetableSet(${e.si})">+ Set</button>
+      </div>`;
+    };
+    $('timetable-visual').innerHTML = toggleHtml + `<div class="tt-cols">${visible.map(colHtml).join('')}</div>`;
+    return;
+  }
+
+  let minMin = 24 * 60, maxMin = 0, any = false;
+  visible.forEach(e => e.sets.forEach(x => {
+    any = true;
+    const spMin = festivalMinutes(x.sp, day);
+    const epMin = x.ep ? festivalMinutes(x.ep, day) : spMin + 60;
+    minMin = Math.min(minMin, spMin);
+    maxMin = Math.max(maxMin, epMin);
   }));
   if (!any) { minMin = 12 * 60; maxMin = 24 * 60; }
   const span = Math.max(60, maxMin - minMin);
 
-  $('timetable-visual').innerHTML = config.timetable.map((st, si) => {
-    const color = st.color || stagePalette(st.stage);
-    const blocks = (st.sets || []).map((set, seti) => {
-      const sp = parseIso(set.start), ep = parseIso(set.end);
-      if (!sp || sp.date !== selectedTimetableDay) return '';
-      const left = ((sp.minutes - minMin) / span) * 100;
-      const width = Math.max(3, ((endMinutes(sp, ep) - sp.minutes) / span) * 100);
-      const starred = set.id && favIds.has(set.id);
-      return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(set.name)}">
-        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${set.id || ''}')">&#9733;</button>
-        <span onclick="editTimetableSet(${si},${seti})">${escapeHtml(set.name)}</span>
+  const rowHtml = (e) => {
+    const color = e.st.color || stagePalette(e.st.stage);
+    const blocks = e.sets.map(x => {
+      const spMin = festivalMinutes(x.sp, day);
+      const epMin = x.ep ? festivalMinutes(x.ep, day) : spMin + 60;
+      const left = ((spMin - minMin) / span) * 100;
+      const width = Math.max(3, ((epMin - spMin) / span) * 100);
+      const starred = x.set.id && favIds.has(x.set.id);
+      return `<div class="tt-block" style="left:${left}%;width:${width}%;background:${color}" title="${escapeAttr(x.set.name)}">
+        <button type="button" class="tt-star-btn ${starred ? 'active' : ''}" onclick="event.stopPropagation();toggleFavorite('${x.set.id || ''}')">&#9733;</button>
+        <span onclick="editTimetableSet(${e.si},${x.seti})">${escapeHtml(x.set.name)}</span>
       </div>`;
     }).join('');
     return `<div class="tt-row">
-      <div class="tt-row-label" style="color:${color}" title="${escapeAttr(st.stage)}">${escapeHtml(st.stage)}</div>
+      <div class="tt-row-label" style="color:${color}" title="${escapeAttr(e.st.stage)}">${escapeHtml(e.st.stage)}</div>
       <div class="tt-row-track">${blocks}</div>
-      <button type="button" class="btn" onclick="addTimetableSet(${si})">+ Set</button>
+      <button type="button" class="btn" onclick="addTimetableSet(${e.si})">+ Set</button>
     </div>`;
-  }).join('');
+  };
+  $('timetable-visual').innerHTML = toggleHtml + visible.map(rowHtml).join('');
 }
 
 function selectTimetableDay(day) { selectedTimetableDay = day; renderVisualTimetable(); }
@@ -2595,6 +2749,7 @@ function renderLibraryEventView(id) {
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(r); });
     card.querySelector('.lib-set-cut').addEventListener('click', (e) => { e.stopPropagation(); openCutterModal(r); });
   });
+  observeThumbnails($('lib-channel-rows'));
 }
 
 function libSetCardHtml(r) {
@@ -2605,7 +2760,7 @@ function libSetCardHtml(r) {
   return `
     <div class="lib-set-card" data-path="${escapeAttr(r.path)}">
       <div class="lib-set-thumb lib-set-play">
-        <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
+        <img class="lib-set-thumb-img" data-thumb="${thumbnailUrl(r.path)}" alt="" onerror="this.style.display='none'">
         <span class="lib-set-play-icon">&#9658;</span>
         <button type="button" class="lib-set-cut" title="Set Cutter" aria-label="Set Cutter">&#9986;</button>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
@@ -3042,6 +3197,7 @@ function renderRecordingRecommendations(r) {
     card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(rec.path, libDisplayTitle(rec)));
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(rec); });
   });
+  observeThumbnails(list);
   panel.classList.remove('hidden');
 }
 
@@ -3398,6 +3554,37 @@ function forecastText(forecast) {
   return `~${rate} — about ${remaining} of storage left at this rate`;
 }
 function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
+
+// Recording thumbnails load lazily via IntersectionObserver, not the native
+// loading="lazy" attribute. A card image that starts hidden (or sits off to
+// the side of a horizontal scroll row) never satisfies native lazy-loading's
+// viewport check, so the old "start hidden, reveal on onload" approach could
+// deadlock — the image never loads, so onload never fires, so it's never
+// revealed. Here the real src is only assigned once the card actually scrolls
+// into view; there's no hidden state to get stuck in, and onerror falls back
+// to the card's gradient background without depending on the Tailwind
+// `.hidden` utility (which isn't guaranteed to be present offline).
+const thumbObserver = ('IntersectionObserver' in window)
+  ? new IntersectionObserver((entries, obs) => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const img = entry.target;
+        obs.unobserve(img);
+        if (img.dataset.thumb) { img.src = img.dataset.thumb; delete img.dataset.thumb; }
+      });
+    }, { rootMargin: '300px' })
+  : null;
+
+// Attaches the lazy loader to any freshly-rendered thumbnail images under
+// root (default: whole document). Call after setting innerHTML on a card
+// list. Without IntersectionObserver support, loads them eagerly instead.
+function observeThumbnails(root) {
+  const imgs = (root || document).querySelectorAll('.lib-set-thumb-img[data-thumb]');
+  imgs.forEach(img => {
+    if (thumbObserver) thumbObserver.observe(img);
+    else { img.src = img.dataset.thumb; delete img.dataset.thumb; }
+  });
+}
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 

@@ -315,6 +315,18 @@ label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 
 .tt-star-btn.active { color: #facc15; }
 .tt-day-tab.active { background: var(--accent); border-color: transparent; color: #fff; }
 
+/* A handful of stages (see maxVerticalStages in app.js) render as side-by-side
+   columns instead of horizontal timeline rows - sets stack top-to-bottom in
+   chronological order, like a printed festival day-schedule. */
+.tt-cols { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; }
+.tt-col { flex: 1 1 200px; min-width: 180px; border-radius: var(--radius); background: var(--surface-1); border: 1px solid var(--border); padding: 10px; }
+.tt-col-header { font-size: 13px; font-weight: 680; padding-bottom: 6px; margin-bottom: 8px; border-bottom: 2px solid; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-col-item { position: relative; border-radius: 6px; padding: 6px 26px 6px 8px; margin-bottom: 6px; color: #0a0a0a; cursor: pointer; box-shadow: 0 1px 4px rgb(0 0 0 / .4); transition: transform .12s var(--ease), box-shadow .12s var(--ease); }
+.tt-col-item:hover { outline: 2px solid #fff; outline-offset: -2px; transform: translateY(-1px); box-shadow: 0 4px 12px rgb(0 0 0 / .5); }
+.tt-col-item:last-of-type { margin-bottom: 0; }
+.tt-col-time { font-size: 11px; font-weight: 600; opacity: .8; }
+.tt-col-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---- modals / wizard ----------------------------------------------------- */
 
 .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / .66); padding: 16px; backdrop-filter: blur(4px); animation: overlay-in .18s var(--ease); }

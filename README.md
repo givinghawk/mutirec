@@ -225,6 +225,17 @@ use RFC3339 timestamps:
 `id` is optional on manual entries - one is assigned automatically on save if
 missing, and it's what favoriting/reminders key off internally.
 
+With 4 or fewer stages showing sets on the selected day, the layout switches
+to side-by-side columns (sets listed top-to-bottom, like a printed
+day-schedule) instead of the horizontal per-stage timeline used for larger
+lineups. A stage with no sets on the selected day is hidden by default - a
+"+N stage(s) with no sets today" button reveals them again. A set whose
+wall-clock time is before 08:00 is treated as the previous festival day's
+late-night tail (an afterparty), not the start of a new day, both when
+importing and in this display - so a "Friday" program that runs to 4am
+Saturday stays under Friday's tab instead of appearing as a disconnected
+early-morning entry on Saturday's.
+
 ### Importing from timetable.lol (optional)
 
 The Timetable tab can look up a festival on
@@ -430,8 +441,18 @@ The WebUI supports:
 - Discord webhook notifications.
 - SMTP notifications.
 
-Notifications are sent when recordings finish. Backup failures are written to
-the app event log.
+Notifications are sent when recordings finish (and for starred timetable set
+reminders - see [Timetable](#timetable)). Both channels can be configured
+independently or together; sending happens off the recording-finish path
+(a slow or unreachable webhook/SMTP server never delays saving a recording)
+and each channel is attempted regardless of whether the other one fails.
+
+In **Settings → Notifications**, use **Send test notification** to check a
+Discord webhook and/or SMTP setup right away instead of waiting for a real
+recording to finish - it tests whatever is currently typed into the form
+(no need to save first), and reports each channel's result separately. A
+failed send (bad webhook URL, wrong SMTP credentials, etc.) is also always
+written to the app event log, not just shown silently as "nothing happened."
 
 ## Peer Sharing (P2P)
 
