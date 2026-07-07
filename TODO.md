@@ -1002,6 +1002,49 @@
   changes, so the ~1.5s poll re-render no longer clobbers a manual
   text-selection mid-copy.
 
+## Done (this session, part 12) - Notifications hardening + a test button
+
+- **Fixed two real correctness bugs in `notify()`** (`main.go`). (1) The two
+  call sites on the recording-finish path (`runRecording`) called
+  `a.notify(...)` synchronously - a hanging Discord webhook or SMTP server
+  would delay finishing a recording (and delay the `a.lastFinished` map
+  write other features, like Live Cut Session import, read). Both now go
+  through `go a.notify(...)`, matching the reminder call site's existing
+  pattern. (2) The Discord webhook send checked neither the HTTP error nor
+  the response status code - a deleted/rate-limited/misconfigured webhook
+  failed completely silently, with nothing in the event log, unlike the SMTP
+  path right next to it which already logged failures. Both channels are now
+  sent concurrently (`sync.WaitGroup`) with a 15s timeout on the Discord
+  client (`http.DefaultClient` has none), and both log failures to the event
+  feed the same way via a shared `sendDiscordWebhook` helper.
+- **Discord content-limit truncation**: a long body (e.g. a full
+  ffmpeg/streamlink error message passed straight through) could exceed
+  Discord's ~2000-character webhook content limit, which Discord rejects
+  outright with a 400 - previously exactly the kind of failure point 1 above
+  swallowed silently, so the notification would just vanish. Truncated by
+  rune (not byte - a byte-slice both risks cutting a multi-byte rune in half
+  and, since the "…" marker itself is multi-byte, could push the byte length
+  past the limit even after "truncating") to exactly the limit.
+- **New `POST /api/notifications/test` + "Send test notification" button**
+  (Settings → Notifications). Tests whatever is currently typed into the
+  Discord webhook / SMTP fields - not necessarily saved yet, the same
+  "test before you save" convention `handleSourceTest` already established
+  for sources - and reports each configured channel's result separately
+  (`{tested, ok, error}` per channel), so a user can verify their setup
+  immediately instead of waiting for a real recording or timetable reminder.
+  Admin-only, matching every other settings-mutating action.
+- Tests in `cmd/web/notifications_test.go`: webhook success/failure/
+  truncation (including the rune-vs-byte truncation bug found while writing
+  the test), the test endpoint's "nothing configured" case, a Discord-only
+  test leaving SMTP untested, and admin-only enforcement. `go test -race`
+  clean (the new `sync.WaitGroup` in `notify()`).
+- Verified end-to-end in a real browser against a real running instance: a
+  small local HTTP server standing in for a Discord webhook (since this
+  sandbox has no network access to a real Discord webhook) received the
+  exact POST body the button sent and returned success; pointing the field
+  at a closed port produced the expected connection-refused error, rendered
+  in the UI, not just logged.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

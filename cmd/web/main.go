@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -560,6 +561,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/presets", a.handlePresets)
 	mux.HandleFunc("/api/sources", a.handleSources)
 	mux.HandleFunc("/api/sources/test", a.handleSourceTest)
+	mux.HandleFunc("/api/notifications/test", a.handleNotificationsTest)
 	mux.HandleFunc("/api/sources/", a.handleSourceItem)
 	mux.HandleFunc("/api/timetable", a.handleTimetable)
 	mux.HandleFunc("/api/timetable/import", a.handleTimetableImport)
@@ -972,10 +974,10 @@ func (a *App) runRecording(rec *recording) {
 			// Real content was captured before the error hit (e.g. a network
 			// drop partway through a long recording) - worth keeping, but
 			// flagged rather than reported as a clean finish.
-			a.notify(fmt.Sprintf("%s stopped early", rec.source.Name), rec.finalPath)
+			go a.notify(fmt.Sprintf("%s stopped early", rec.source.Name), rec.finalPath)
 			a.event("warn", fmt.Sprintf("[%s] saved %s despite an error - it may be incomplete", rec.source.Name, rec.finalPath))
 		} else {
-			a.notify(fmt.Sprintf("%s finished", rec.source.Name), rec.finalPath)
+			go a.notify(fmt.Sprintf("%s finished", rec.source.Name), rec.finalPath)
 			a.event("info", fmt.Sprintf("[%s] saved %s", rec.source.Name, rec.finalPath))
 		}
 		a.mu.Lock()
@@ -3736,21 +3738,145 @@ func (a *App) backup(rec *recording) {
 	a.event("info", fmt.Sprintf("[%s] backup complete", rec.source.Name))
 }
 
+// notify sends subject/body to whichever channels are configured (Discord
+// webhook, SMTP, both, or neither). Always call this via `go a.notify(...)`
+// from a recording-lifecycle path - a slow or hanging webhook/SMTP server
+// must never delay finishing a recording. Both channels are attempted
+// concurrently so one being slow doesn't delay the other, and every failure
+// is logged to the event feed the same way, so a silently-misconfigured
+// webhook doesn't just look like "nothing happened."
 func (a *App) notify(subject, body string) {
 	cfg := a.snapshotConfig()
+	var wg sync.WaitGroup
 	if cfg.Settings.Notifications.DiscordWebhook != "" {
-		payload := strings.NewReader(fmt.Sprintf(`{"content":%q}`, subject+"\n"+body))
-		resp, err := http.Post(cfg.Settings.Notifications.DiscordWebhook, "application/json", payload)
-		if err == nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sendDiscordWebhook(cfg.Settings.Notifications.DiscordWebhook, subject, body); err != nil {
+				a.event("error", fmt.Sprintf("Discord notification failed: %s", err))
+			}
+		}()
 	}
 	s := cfg.Settings.Notifications.SMTP
 	if s.Enabled && s.Host != "" && s.To != "" {
-		if err := sendSMTP(s, subject, body); err != nil {
-			a.event("error", fmt.Sprintf("email notification failed: %s", err))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sendSMTP(s, subject, body); err != nil {
+				a.event("error", fmt.Sprintf("email notification failed: %s", err))
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// discordContentLimit is Discord's hard cap on a webhook message's "content"
+// field. A notification body built from a file path is normally tiny, but a
+// long ffmpeg/streamlink error message (passed straight through by callers
+// like execute()) could exceed it - Discord would otherwise reject the whole
+// message with a 400 and the notification would silently vanish.
+const discordContentLimit = 2000
+
+var discordWebhookClient = &http.Client{Timeout: 15 * time.Second}
+
+// sendDiscordWebhook posts a plain-content message to a Discord webhook URL,
+// used by both notify() and the Settings "send test notification" button so
+// there's exactly one place that builds/truncates/validates the payload.
+func sendDiscordWebhook(webhookURL, subject, body string) error {
+	content := subject
+	if body != "" {
+		content += "\n" + body
+	}
+	// Truncate by rune, not byte - Discord's limit is a character count, and
+	// slicing by byte could both cut a multi-byte rune in half and, since the
+	// "…" marker itself is multi-byte, push the result past the limit anyway.
+	if runes := []rune(content); len(runes) > discordContentLimit {
+		content = string(runes[:discordContentLimit-1]) + "…"
+	}
+	data, err := json.Marshal(map[string]string{"content": content})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := discordWebhookClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return fmt.Errorf("webhook responded with %s: %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
+// notificationTestResult is one channel's outcome from
+// handleNotificationsTest: Tested is false when that channel wasn't
+// configured at all (nothing to report), as opposed to Ok=false which means
+// it was configured and attempted but failed.
+type notificationTestResult struct {
+	Tested bool   `json:"tested"`
+	Ok     bool   `json:"ok"`
+	Error  string `json:"error,omitempty"`
+}
+
+// handleNotificationsTest sends a small test message through whichever
+// channel(s) are filled in on the request - the Settings page's current form
+// values, not necessarily what's saved yet, the same "test before you save"
+// convention handleSourceTest already established for sources (an admin's
+// GET /api/config returns the real SMTP password unredacted, so the form
+// already holds it - no masked-placeholder handling is needed here).
+func (a *App) handleNotificationsTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.isAdminReq(r) {
+		http.Error(w, "admin only", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		DiscordWebhook string     `json:"discordWebhook"`
+		SMTP           SMTPConfig `json:"smtp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	const subject = "MutiRec test notification"
+	const body = "If you're reading this, notifications are configured correctly."
+
+	out := struct {
+		Discord notificationTestResult `json:"discord"`
+		SMTP    notificationTestResult `json:"smtp"`
+	}{}
+
+	if webhook := strings.TrimSpace(req.DiscordWebhook); webhook != "" {
+		out.Discord.Tested = true
+		if err := sendDiscordWebhook(webhook, subject, body); err != nil {
+			out.Discord.Error = err.Error()
+		} else {
+			out.Discord.Ok = true
 		}
 	}
+	if req.SMTP.Enabled && req.SMTP.Host != "" && req.SMTP.To != "" {
+		out.SMTP.Tested = true
+		if err := sendSMTP(req.SMTP, subject, body); err != nil {
+			out.SMTP.Error = err.Error()
+		} else {
+			out.SMTP.Ok = true
+		}
+	}
+	if !out.Discord.Tested && !out.SMTP.Tested {
+		writeJSON(w, map[string]any{"error": "nothing to test - fill in a Discord webhook URL or enable SMTP with a host and recipient first"})
+		return
+	}
+	writeJSON(w, out)
 }
 
 // sendSMTP delivers a plain-text email, supporting both STARTTLS (typically

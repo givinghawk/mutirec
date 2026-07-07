@@ -883,6 +883,37 @@ async function saveConfig() {
   await refresh();
 }
 
+// Tests whatever is currently typed into the Notifications panel - not
+// necessarily saved yet - the same "test before you save" convention the
+// Sources tab's "Test Stream" button already established.
+$('notif-test-btn').onclick = async () => {
+  const resultEl = $('notif-test-result');
+  const btn = $('notif-test-btn');
+  btn.disabled = true;
+  resultEl.classList.add('hidden');
+  const body = {
+    discordWebhook: $('discordWebhook').value,
+    smtp: { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value },
+  };
+  let result;
+  try {
+    result = await api('/api/notifications/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch {
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  if (result.error) { toast(result.error, 'error'); return; }
+  const lines = [];
+  if (result.discord.tested) lines.push(result.discord.ok ? 'Discord: sent ✓' : `Discord failed: ${result.discord.error}`);
+  if (result.smtp.tested) lines.push(result.smtp.ok ? 'Email: sent ✓' : `Email failed: ${result.smtp.error}`);
+  resultEl.textContent = lines.join(' · ');
+  const anyFailed = (result.discord.tested && !result.discord.ok) || (result.smtp.tested && !result.smtp.ok);
+  resultEl.className = anyFailed ? 'mt-2 text-xs text-red-400' : 'mt-2 text-xs text-emerald-400';
+  resultEl.classList.remove('hidden');
+  lines.forEach(l => toast(l, l.includes('failed') ? 'error' : 'info'));
+};
+
 async function loadAccount() {
   let acct;
   try {

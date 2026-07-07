@@ -430,8 +430,18 @@ The WebUI supports:
 - Discord webhook notifications.
 - SMTP notifications.
 
-Notifications are sent when recordings finish. Backup failures are written to
-the app event log.
+Notifications are sent when recordings finish (and for starred timetable set
+reminders - see [Timetable](#timetable)). Both channels can be configured
+independently or together; sending happens off the recording-finish path
+(a slow or unreachable webhook/SMTP server never delays saving a recording)
+and each channel is attempted regardless of whether the other one fails.
+
+In **Settings → Notifications**, use **Send test notification** to check a
+Discord webhook and/or SMTP setup right away instead of waiting for a real
+recording to finish - it tests whatever is currently typed into the form
+(no need to save first), and reports each channel's result separately. A
+failed send (bad webhook URL, wrong SMTP credentials, etc.) is also always
+written to the app event log, not just shown silently as "nothing happened."
 
 ## Peer Sharing (P2P)
 
