@@ -959,6 +959,49 @@
     `TestPutLiveCutSessionEvictsClosedFirst`; the locking changes are
     `go test -race` clean.
 
+## Done (this session, part 11) - Recordings tab polish
+
+- **Recording thumbnails now actually show when set** (`app.js`,
+  `uploads.go`). The library set cards used `loading="lazy"` on an `<img>`
+  that started with the `hidden` class and only removed `hidden` in its
+  `onload` handler - a deadlock: a `display:none` image never enters the
+  viewport, so native lazy-loading never fetches it, so `onload` never fires,
+  so it's never revealed. (This was masked in dev because Tailwind's CDN
+  `.hidden` is what makes it `display:none`; the bug only bites where Tailwind
+  is present, i.e. production.) Replaced with an `IntersectionObserver`-based
+  lazy loader: cards render `data-thumb` (no `src`), and `observeThumbnails()`
+  assigns the real `src` only when the card scrolls into view - reliable in
+  the horizontal scroll rows where native lazy-loading is flaky, no hidden
+  state to get stuck in, and the `onerror` fallback uses an inline style
+  rather than depending on Tailwind's `.hidden`. Also made the "no thumbnail
+  yet" 404 `Cache-Control: no-store` so a later-uploaded thumbnail shows
+  without a hard refresh. Verified end-to-end in a real browser (image
+  requested, 200, `naturalWidth>0`).
+- **Smart Match now uses filename/folder keywords** (`main.go`,
+  `match_test.go`). Previously it scored only stage, parsed time, guessed
+  artist, and the source's manually-linked Festival - so two editions (or two
+  different festivals) that reuse the same stage name and a touring artist on
+  the same day were a coin flip. Added two keyword signals extracted from the
+  whole path + filename: an event-name match (fraction of the event's
+  identifying words present, e.g. a festival name and stage colour -
+  generic filler, single chars, and bare years are dropped) worth +45, and a
+  year match/conflict (±25) that settles which edition. These need no manual
+  Festival linking, so they help the common case. Confidence/reason are
+  enriched: a recording that literally names its event reads more trustworthy,
+  and a named year that contradicts the matched edition knocks a "high" down
+  to "medium" with a warning. New tests cover the helpers plus two
+  disambiguation scenarios (festival-name keyword breaking a stage+artist tie;
+  year keyword picking the right edition when the filename carries no date) -
+  all placeholder names per the no-real-festival-data rule.
+- **Live Cut Sessions frontend cleanup** (`app.js`, following up the earlier
+  backend hardening): `livecutFeeds` (per-token event state) is now pruned
+  each poll tick to only the sessions this instance is actually hosting or
+  joined to, so switching sources or closing sessions no longer leaks their
+  event lists for the life of the Watch tab; closing a hosted session clears
+  its feed immediately; and the host code field is only rewritten when it
+  changes, so the ~1.5s poll re-render no longer clobbers a manual
+  text-selection mid-copy.
+
 ## Remaining (in suggested order)
 
 ### 1. Organisation linking from the Sources tab

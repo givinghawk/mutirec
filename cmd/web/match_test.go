@@ -279,3 +279,94 @@ func TestFlagSharedSetCandidates(t *testing.T) {
 		t.Errorf("suggestion 3 has no set match and should not be flagged, got reason: %q", suggestions[3].Reason)
 	}
 }
+
+func TestKeywordTokenList(t *testing.T) {
+	got := keywordTokenList("Aurora Nights - The BLUE Stage (2022) DJ")
+	want := map[string]bool{"aurora": true, "nights": true, "blue": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want keys %v", got, want)
+	}
+	for _, tok := range got {
+		if !want[tok] {
+			t.Errorf("unexpected token %q (stopwords, single chars, and years should be dropped): %v", tok, got)
+		}
+	}
+}
+
+func TestEventNameKeywordScoreAndYears(t *testing.T) {
+	hay := keywordTokenSet("BLUE/Vertex_BLUE_Aurora_Nights_2022.mp4")
+	if s := eventNameKeywordScore("Aurora Nights", hay); s != 1.0 {
+		t.Errorf("expected full event-name coverage, got %v", s)
+	}
+	if s := eventNameKeywordScore("Borealis Open Air", hay); s != 0.0 {
+		t.Errorf("expected no coverage for an unrelated event, got %v", s)
+	}
+	years := keywordYears("BLUE/Vertex_BLUE_Aurora_Nights_2022.mp4")
+	if !years[2022] || len(years) != 1 {
+		t.Errorf("expected exactly {2022}, got %v", years)
+	}
+}
+
+// TestBestMatchSuggestion_EventNameKeyword covers two *different* festivals
+// that reuse the same stage name and even the same touring artist on the same
+// day, with no Source.FestivalID link configured. The recording whose
+// filename names one of the festivals should match that one - the event-name
+// keyword breaks a tie the stage+artist+day signals leave dead even.
+func TestBestMatchSuggestion_EventNameKeyword(t *testing.T) {
+	cfg := AppConfig{
+		LibraryEvents: []LibraryEvent{
+			{
+				ID: "ev-borealis", Name: "Borealis Open Air",
+				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
+					{ID: "b1", Name: "Nightcaster", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+				}}},
+			},
+			{
+				ID: "ev-aurora", Name: "Aurora Nights",
+				Timetable: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{
+					{ID: "a1", Name: "Nightcaster", Start: "2026-06-25T14:00:00Z", End: "2026-06-25T15:00:00Z"},
+				}}},
+			},
+		},
+	}
+	name := "Nightcaster_RED_25_06_2026_Aurora_Nights.mp4"
+	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
+	got := bestMatchSuggestion(cfg, "RED/"+name, name, "RED", guessed, fromName, hasTOD)
+	if got.EventID != "ev-aurora" {
+		t.Fatalf("expected the event the filename names (ev-aurora) to win, got EventID=%q Reason=%q", got.EventID, got.Reason)
+	}
+}
+
+// TestBestMatchSuggestion_YearKeywordPicksEdition covers two editions of the
+// same festival that share a stage and artist, where the filename carries no
+// parseable date - only the edition year. The year keyword should pick the
+// matching edition and penalize the one whose year is contradicted.
+func TestBestMatchSuggestion_YearKeywordPicksEdition(t *testing.T) {
+	cfg := AppConfig{
+		LibraryEvents: []LibraryEvent{
+			{
+				ID: "ev-2021", Name: "Aurora Nights", Year: 2021,
+				Timetable: []StageSchedule{{Stage: "BLUE", Sets: []ScheduleSet{
+					{ID: "s21", Name: "Vertex", Start: "2021-06-25T14:00:00Z", End: "2021-06-25T15:00:00Z"},
+				}}},
+			},
+			{
+				ID: "ev-2022", Name: "Aurora Nights", Year: 2022,
+				Timetable: []StageSchedule{{Stage: "BLUE", Sets: []ScheduleSet{
+					{ID: "s22", Name: "Vertex", Start: "2022-06-25T14:00:00Z", End: "2022-06-25T15:00:00Z"},
+				}}},
+			},
+		},
+	}
+	// No day/month in the name, so the date signals stay neutral and only the
+	// year keyword (2022) distinguishes the two editions.
+	name := "Vertex_BLUE_Aurora_Nights_2022.mp4"
+	guessed, fromName, hasTOD := guessTimeFromName(name, time.Now())
+	if fromName {
+		t.Fatal("test setup expects no parseable date in the filename")
+	}
+	got := bestMatchSuggestion(cfg, "BLUE/"+name, name, "BLUE", guessed, fromName, hasTOD)
+	if got.EventID != "ev-2022" {
+		t.Fatalf("expected the 2022 edition to win on the year keyword, got EventID=%q Reason=%q", got.EventID, got.Reason)
+	}
+}

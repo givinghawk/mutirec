@@ -1841,6 +1841,78 @@ var nonWordCharRe = regexp.MustCompile(`[_\-. ]+`)
 // way that's tolerant of case and punctuation/spacing differences.
 var nonAlnumRe = regexp.MustCompile(`[^a-z0-9]+`)
 
+// yearWordRe matches a token that is exactly a 4-digit year, and yearScanRe
+// finds years anywhere in a string. Years are matched as their own Smart
+// Match signal (keywordYears), so they're excluded from the identifying name
+// keywords - otherwise "2026" in a filename would spuriously "match" every
+// event whose name happens to end in that year.
+var yearWordRe = regexp.MustCompile(`^(19|20)\d{2}$`)
+var yearScanRe = regexp.MustCompile(`(19|20)\d{2}`)
+
+// matchStopwords are words too generic to identify a specific event - they
+// appear across many festivals, so counting them as keyword matches would
+// create spurious event matches.
+var matchStopwords = map[string]bool{
+	"the": true, "festival": true, "fest": true, "live": true, "stage": true,
+	"set": true, "dj": true, "official": true, "full": true, "vs": true, "b2b": true,
+}
+
+// keywordTokenList splits a string into lowercased alphanumeric keyword
+// tokens, dropping single characters, bare years, and generic filler. Used to
+// match a recording's filename/folder against an event's name by shared
+// keywords (e.g. a festival name and a stage colour), which disambiguates
+// editions/festivals that reuse the same stage names and touring artists far
+// better than stage+artist alone.
+func keywordTokenList(s string) []string {
+	raw := nonAlnumRe.ReplaceAllString(strings.ToLower(s), " ")
+	var out []string
+	for _, w := range strings.Fields(raw) {
+		if len(w) < 2 || matchStopwords[w] || yearWordRe.MatchString(w) {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+func keywordTokenSet(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, w := range keywordTokenList(s) {
+		set[w] = true
+	}
+	return set
+}
+
+// eventNameKeywordScore returns the fraction (0..1) of an event's identifying
+// name tokens that appear as keywords in a recording's filename/folder. 1.0
+// means every significant word of the event name is present.
+func eventNameKeywordScore(eventName string, haystack map[string]bool) float64 {
+	toks := keywordTokenList(eventName)
+	if len(toks) == 0 {
+		return 0
+	}
+	found := 0
+	for _, t := range toks {
+		if haystack[t] {
+			found++
+		}
+	}
+	return float64(found) / float64(len(toks))
+}
+
+// keywordYears extracts every 4-digit year mentioned in a recording's
+// filename/folder, so the matcher can prefer the festival edition whose year
+// the recording actually names.
+func keywordYears(s string) map[int]bool {
+	out := map[int]bool{}
+	for _, m := range yearScanRe.FindAllString(s, -1) {
+		if y, err := strconv.Atoi(m); err == nil {
+			out[y] = true
+		}
+	}
+	return out
+}
+
 // channelFromPath derives a recording's channel/stage from its path relative
 // to FinishedDir: the name of its immediate parent directory. For the flat
 // `<source>/<file>` layout the live recorder itself uses, that's the same as
@@ -2156,10 +2228,16 @@ func flagSharedSetCandidates(suggestions []MatchSuggestion) {
 // match for a recording, scored by candidateScore.
 type matchCandidate struct {
 	eventID, eventName, setID, stage, artist string
+	eventYear                                int
 	delta                                    time.Duration
 	contained, stageMatch, sameDay           bool
 	artistScore                              float64
 	festivalMatch, festivalConflict          bool
+	// Keyword signals: how much of the event's name appears in the
+	// recording's filename/folder, and whether the year it names agrees with
+	// (or contradicts) this event's edition year.
+	eventNameScore          float64
+	yearMatch, yearConflict bool
 }
 
 // candidateScore combines every signal available for one candidate set into
@@ -2193,6 +2271,18 @@ func candidateScore(c matchCandidate, hasTimeOfDay bool) float64 {
 		score += 30
 	}
 	score += c.artistScore * 70
+	// Keyword signals. The event-name match is a strong, festival-link-free
+	// disambiguator (the recording literally names the event), and the year
+	// keyword settles which edition when several reuse the same stages and
+	// artists. A named year that contradicts the event's edition year is a
+	// negative signal, like a festival conflict.
+	score += c.eventNameScore * 45
+	if c.yearMatch {
+		score += 25
+	}
+	if c.yearConflict {
+		score -= 25
+	}
 	if hasTimeOfDay && !c.contained {
 		hours := c.delta.Hours()
 		if hours < 0 {
@@ -2240,12 +2330,21 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 
 	sourceFestivalID := festivalIDForChannel(cfg, channel)
 
+	// Keyword signals are computed once from the whole path + filename: the
+	// set of identifying keywords the recording carries, and any years it
+	// names. Both are matched per-candidate below.
+	haystack := keywordTokenSet(path + " " + name)
+	namedYears := keywordYears(path + " " + name)
+
 	var best *matchCandidate
 	var bestScore float64
 
 	for _, ev := range cfg.LibraryEvents {
 		festivalMatch := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID == sourceFestivalID
 		festivalConflict := sourceFestivalID != "" && ev.FestivalID != "" && ev.FestivalID != sourceFestivalID
+		eventNameScore := eventNameKeywordScore(ev.Name, haystack)
+		yearMatch := ev.Year != 0 && namedYears[ev.Year]
+		yearConflict := ev.Year != 0 && len(namedYears) > 0 && !namedYears[ev.Year]
 		for _, stage := range ev.Timetable {
 			stageMatch := channel != "" && (strings.EqualFold(stage.Stage, channel) || strings.Contains(strings.ToLower(stage.Stage), strings.ToLower(channel)) || strings.Contains(strings.ToLower(channel), strings.ToLower(stage.Stage)))
 			for _, set := range stage.Sets {
@@ -2274,9 +2373,10 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 					artistScore = artistSimilarity(guessedArtist, set.Name)
 				}
 				cand := matchCandidate{
-					eventID: ev.ID, eventName: ev.Name, setID: set.ID, stage: stage.Stage, artist: set.Name,
+					eventID: ev.ID, eventName: ev.Name, eventYear: ev.Year, setID: set.ID, stage: stage.Stage, artist: set.Name,
 					delta: delta, contained: contained, stageMatch: stageMatch, sameDay: sameDay, artistScore: artistScore,
 					festivalMatch: festivalMatch, festivalConflict: festivalConflict,
+					eventNameScore: eventNameScore, yearMatch: yearMatch, yearConflict: yearConflict,
 				}
 				if score := candidateScore(cand, hasTimeOfDay); best == nil || score > bestScore {
 					c := cand
@@ -2332,6 +2432,23 @@ func bestMatchSuggestion(cfg AppConfig, path, name, channel string, guessed time
 		} else {
 			base.Reason = fmt.Sprintf("Closest guess: %s on %s - verify before approving.", best.artist, best.stage)
 		}
+	}
+	// Keyword post-processing: a recording that literally names its event (and,
+	// ideally, the right year) is more trustworthy than the time/stage signals
+	// alone suggest; one that names a *different* year is less so.
+	if best.eventNameScore >= 1 && best.stageMatch {
+		if base.Confidence == "low" {
+			base.Confidence = "medium"
+		}
+		yearNote := ""
+		if best.yearMatch && best.eventYear != 0 {
+			yearNote = fmt.Sprintf(" (%d)", best.eventYear)
+		}
+		base.Reason += fmt.Sprintf(" The filename also names this event%s.", yearNote)
+	}
+	if best.yearConflict && base.Confidence == "high" {
+		base.Confidence = "medium"
+		base.Reason += fmt.Sprintf(" Note: the filename/folder names a different year than %q's edition - check this is the right year.", best.eventName)
 	}
 	if base.Confidence == "none" || base.Confidence == "low" {
 		return applyFolderEventHint(cfg, base, path)

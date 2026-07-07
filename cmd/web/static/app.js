@@ -1358,6 +1358,19 @@ function livecutPollTick() {
   livecutRefreshHostSessions();
   if (livecutHostSession) livecutPollFeed('host', livecutHostSession.token);
   livecutJoined.forEach(j => livecutPollFeed('joined', j.token));
+  livecutPruneFeeds();
+}
+
+// Drops accumulated feed state for any session this instance is no longer
+// hosting or joined to - otherwise switching sources or closing sessions
+// leaves their (potentially large) event lists in memory for the life of the
+// Watch tab. A session still in the joined list keeps its feed even after its
+// host closes it, so the final marks stay visible until the user leaves.
+function livecutPruneFeeds() {
+  const active = new Set();
+  if (livecutHostSession) active.add(livecutHostSession.token);
+  livecutJoined.forEach(j => active.add(j.token));
+  Object.keys(livecutFeeds).forEach(token => { if (!active.has(token)) delete livecutFeeds[token]; });
 }
 
 function startLivecutPoll() {
@@ -1416,7 +1429,10 @@ function renderLivecutPanel() {
   if (watchSourceId && src) {
     if (livecutHostSession) {
       $('livecut-host').classList.remove('hidden');
-      $('livecut-host-code').value = livecutHostSession.code;
+      // Only rewrite the code field when it actually changes - this render
+      // runs on every ~1.5s poll tick, and blindly reassigning .value would
+      // clobber a manual text-selection the user is making to copy the code.
+      if ($('livecut-host-code').value !== livecutHostSession.code) $('livecut-host-code').value = livecutHostSession.code;
       renderLivecutFeed('host', livecutHostSession.token);
     } else {
       $('livecut-start').classList.remove('hidden');
@@ -1442,6 +1458,7 @@ async function livecutCloseHost() {
   if (!livecutHostSession) return;
   if (!confirm('Close this Live Cut Session? Anyone still connected will stop being able to mark.')) return;
   try { await api(`/api/livecut/sessions/${encodeURIComponent(livecutHostSession.token)}`, { method: 'DELETE' }); } catch { return; }
+  delete livecutFeeds[livecutHostSession.token];
   livecutHostSession = null;
   renderLivecutPanel();
 }
@@ -2595,6 +2612,7 @@ function renderLibraryEventView(id) {
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(r); });
     card.querySelector('.lib-set-cut').addEventListener('click', (e) => { e.stopPropagation(); openCutterModal(r); });
   });
+  observeThumbnails($('lib-channel-rows'));
 }
 
 function libSetCardHtml(r) {
@@ -2605,7 +2623,7 @@ function libSetCardHtml(r) {
   return `
     <div class="lib-set-card" data-path="${escapeAttr(r.path)}">
       <div class="lib-set-thumb lib-set-play">
-        <img class="lib-set-thumb-img hidden" loading="lazy" src="${thumbnailUrl(r.path)}" onerror="this.classList.add('hidden')" onload="this.classList.remove('hidden')">
+        <img class="lib-set-thumb-img" data-thumb="${thumbnailUrl(r.path)}" alt="" onerror="this.style.display='none'">
         <span class="lib-set-play-icon">&#9658;</span>
         <button type="button" class="lib-set-cut" title="Set Cutter" aria-label="Set Cutter">&#9986;</button>
         <button type="button" class="lib-set-organize" title="Organize" aria-label="Organize">&#8942;</button>
@@ -3042,6 +3060,7 @@ function renderRecordingRecommendations(r) {
     card.querySelector('.lib-set-play').addEventListener('click', () => openRecordingPlayer(rec.path, libDisplayTitle(rec)));
     card.querySelector('.lib-set-organize').addEventListener('click', (e) => { e.stopPropagation(); openAssignModal(rec); });
   });
+  observeThumbnails(list);
   panel.classList.remove('hidden');
 }
 
@@ -3398,6 +3417,37 @@ function forecastText(forecast) {
   return `~${rate} — about ${remaining} of storage left at this rate`;
 }
 function thumbnailUrl(path) { return `/api/recordings/thumbnail?path=${encodeURIComponent(path)}`; }
+
+// Recording thumbnails load lazily via IntersectionObserver, not the native
+// loading="lazy" attribute. A card image that starts hidden (or sits off to
+// the side of a horizontal scroll row) never satisfies native lazy-loading's
+// viewport check, so the old "start hidden, reveal on onload" approach could
+// deadlock — the image never loads, so onload never fires, so it's never
+// revealed. Here the real src is only assigned once the card actually scrolls
+// into view; there's no hidden state to get stuck in, and onerror falls back
+// to the card's gradient background without depending on the Tailwind
+// `.hidden` utility (which isn't guaranteed to be present offline).
+const thumbObserver = ('IntersectionObserver' in window)
+  ? new IntersectionObserver((entries, obs) => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        const img = entry.target;
+        obs.unobserve(img);
+        if (img.dataset.thumb) { img.src = img.dataset.thumb; delete img.dataset.thumb; }
+      });
+    }, { rootMargin: '300px' })
+  : null;
+
+// Attaches the lazy loader to any freshly-rendered thumbnail images under
+// root (default: whole document). Call after setting innerHTML on a card
+// list. Without IntersectionObserver support, loads them eagerly instead.
+function observeThumbnails(root) {
+  const imgs = (root || document).querySelectorAll('.lib-set-thumb-img[data-thumb]');
+  imgs.forEach(img => {
+    if (thumbObserver) thumbObserver.observe(img);
+    else { img.src = img.dataset.thumb; delete img.dataset.thumb; }
+  });
+}
 function escapeHtml(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 
