@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -224,10 +227,22 @@ func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root s
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}}
 
+	// A Stack (stackstorage) share URL that already names a specific folder
+	// (.../s/<token>/<locale>/files/<nodeID>) is unambiguous - go straight to
+	// the Stack v2 API rather than the ownCloud/Nextcloud "/download" guess,
+	// which just returns that share's single-page-app HTML shell on Stack.
+	if u, err := url.Parse(rawURL); err == nil {
+		if token, nodeID, ok := parseStackFilesURL(u); ok && nodeID != "" {
+			a.runStackShareDownload(job, u.Scheme, u.Host, token, nodeID, destDir, root)
+			return
+		}
+	}
+
 	fetchURL := rawURL
-	var basicUser, basicPass string
+	var basicUser, basicPass, shareToken string
 	if u, err := url.Parse(rawURL); err == nil {
 		if token, ok := looksLikeOwncloudShare(u); ok {
+			shareToken = token
 			job.logf("Detected an ownCloud/Nextcloud-style share link (token %s) - requesting the direct download", shortHash(token))
 			fetchURL = strings.TrimRight(rawURL, "/") + "/download"
 			if password != "" {
@@ -263,6 +278,17 @@ func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root s
 		err := fmt.Errorf("the server returned HTTP %d", resp.StatusCode)
 		job.logf("%s", err)
 		job.finish(err)
+		return
+	}
+	// Stack doesn't have a "/download" convenience URL like ownCloud/
+	// Nextcloud - that path just serves the same single-page-app HTML as
+	// the share page itself. Fall back to the Stack v2 listing API, which
+	// works from just the share token (best-effort at the share's root,
+	// since this bare "/s/<token>" URL didn't name a specific folder).
+	if shareToken != "" && strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		resp.Body.Close()
+		u, _ := url.Parse(rawURL)
+		a.runStackShareDownload(job, u.Scheme, u.Host, shareToken, "", destDir, root)
 		return
 	}
 
@@ -310,6 +336,232 @@ func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root s
 		} else {
 			job.logf("Extracted into %s", filepath.Base(extractTo))
 		}
+	}
+
+	job.finish(nil)
+}
+
+// ============================================================================
+// Stack (stackstorage) v2 share API. Unlike the ownCloud/Nextcloud share
+// convention above, Stack serves its share pages as a single-page app at
+// /s/<token>[/<locale>/files/<nodeID>] and doesn't expose a "/download"
+// shortcut - fetching that just returns the app's HTML shell. The actual
+// data lives behind a JSON API: GET .../api/v2/share/<token>/nodes lists a
+// folder's children (paginated, by parentID), and GET
+// .../api/v2/share/<token>/files/<id>/download/<name> streams a given
+// file's bytes. This mirrors that API to recursively walk and download a
+// shared folder (or single file) into the explorer tree.
+// ============================================================================
+
+var stackFilesURLPattern = regexp.MustCompile(`^/s/([^/]+)(?:/[A-Za-z]{2}(?:-[A-Za-z]+)?)?/files/(\d+)`)
+
+// parseStackFilesURL recognizes a Stack share URL that names a specific
+// folder or file, e.g. "/s/<token>/en/files/<nodeID>" (the locale segment
+// is optional and varies by the visitor's browser language).
+func parseStackFilesURL(u *url.URL) (token, nodeID string, ok bool) {
+	if m := stackFilesURLPattern.FindStringSubmatch(u.Path); m != nil {
+		return m[1], m[2], true
+	}
+	return "", "", false
+}
+
+var stackCSRFTokenPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)csrf-?token["']?\s*[:=]\s*["']([A-Za-z0-9_-]+)["']`),
+	regexp.MustCompile(`(?i)<meta[^>]+name=["']csrf-token["'][^>]+content=["']([^"']+)["']`),
+}
+
+// extractStackCSRFToken best-effort scrapes a CSRF token out of the share
+// page's HTML/inline JS, needed by the file-download endpoint (the node
+// listing endpoints work fine without it).
+func extractStackCSRFToken(html string) string {
+	for _, re := range stackCSRFTokenPatterns {
+		if m := re.FindStringSubmatch(html); len(m) > 1 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
+// stackNode is one entry (file or folder) from the Stack share nodes API.
+type stackNode struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Dir  bool   `json:"dir"`
+	Size int64  `json:"size"`
+}
+
+type stackNodesResponse struct {
+	Nodes []stackNode `json:"nodes"`
+	Total int         `json:"total"`
+}
+
+// listStackNodes fetches every child of parentID (paginated 100 at a time).
+func listStackNodes(client *http.Client, base, token, csrfToken, parentID string) ([]stackNode, error) {
+	var all []stackNode
+	for offset := 0; ; offset = len(all) {
+		q := url.Values{}
+		q.Set("limit", "100")
+		q.Set("offset", strconv.Itoa(offset))
+		q.Set("orderBy", "default")
+		q.Set("reverse", "false")
+		q.Set("parentID", parentID)
+		q.Set("search", "")
+		q.Set("mediaType", "all")
+		if csrfToken != "" {
+			q.Set("CSRF-Token", csrfToken)
+		}
+		reqURL := base + "/api/v2/share/" + url.PathEscape(token) + "/nodes?" + q.Encode()
+		resp, err := client.Get(reqURL)
+		if err != nil {
+			return nil, err
+		}
+		var page stackNodesResponse
+		decErr := json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("listing folder contents returned HTTP %d", resp.StatusCode)
+		}
+		if decErr != nil {
+			return nil, fmt.Errorf("could not parse the folder listing: %w", decErr)
+		}
+		all = append(all, page.Nodes...)
+		if len(page.Nodes) == 0 || len(all) >= page.Total {
+			break
+		}
+	}
+	return all, nil
+}
+
+// sanitizeStackName strips path separators out of a name reported by the
+// Stack API so it can't escape the destination directory it's joined into.
+func sanitizeStackName(name string) string {
+	name = strings.NewReplacer("/", "-", "\\", "-").Replace(strings.TrimSpace(name))
+	if name == "" || name == "." || name == ".." {
+		return "file"
+	}
+	return name
+}
+
+// stackFileToGet is one file discovered while walking a share, with the
+// sanitized relative directory (under the download root) it belongs in.
+type stackFileToGet struct {
+	node   stackNode
+	relDir string
+}
+
+// gatherStackFiles recursively lists parentID and everything under it,
+// flattening the tree into a list of files to download.
+func gatherStackFiles(client *http.Client, base, token, csrfToken, parentID, relDir string) ([]stackFileToGet, error) {
+	nodes, err := listStackNodes(client, base, token, csrfToken, parentID)
+	if err != nil {
+		return nil, err
+	}
+	var files []stackFileToGet
+	for _, n := range nodes {
+		if n.Dir {
+			sub, err := gatherStackFiles(client, base, token, csrfToken, strconv.FormatInt(n.ID, 10), filepath.Join(relDir, sanitizeStackName(n.Name)))
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, sub...)
+			continue
+		}
+		files = append(files, stackFileToGet{node: n, relDir: relDir})
+	}
+	return files, nil
+}
+
+// downloadStackFile streams a single Stack-hosted file to dest.
+func downloadStackFile(client *http.Client, base, token, csrfToken string, node stackNode, dest string, job *URLFetchJob) error {
+	q := url.Values{"contentDisposition": {"1"}}
+	if csrfToken != "" {
+		q.Set("CSRF-Token", csrfToken)
+	}
+	reqURL := base + "/api/v2/share/" + url.PathEscape(token) + "/files/" + strconv.FormatInt(node.ID, 10) + "/download/" + url.PathEscape(node.Name) + "?" + q.Encode()
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+		return fmt.Errorf("server returned a web page instead of the file - the share may need a password, which isn't supported yet")
+	}
+	tmp := dest + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	w := io.MultiWriter(f, progressWriter(job.addBytes))
+	_, copyErr := io.Copy(w, resp.Body)
+	f.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmp)
+		return copyErr
+	}
+	return os.Rename(tmp, dest)
+}
+
+// runStackShareDownload downloads an entire Stack share (or the subfolder
+// named by startNodeID) into destDir, mirroring its folder structure.
+func (a *App) runStackShareDownload(job *URLFetchJob, scheme, host, token, startNodeID, destDir, root string) {
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar, Transport: &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}}
+	base := scheme + "://" + host
+
+	job.logf("Detected a Stack share (token %s) - using the Stack API to list and fetch files", shortHash(token))
+
+	csrfToken := ""
+	if resp, err := client.Get(base + "/s/" + url.PathEscape(token)); err == nil {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		csrfToken = extractStackCSRFToken(string(body))
+	}
+
+	job.logf("Listing share contents...")
+	files, err := gatherStackFiles(client, base, token, csrfToken, startNodeID, "")
+	if err != nil {
+		job.logf("Could not list share contents: %s", err)
+		job.finish(err)
+		return
+	}
+	if len(files) == 0 {
+		err := fmt.Errorf("no files found in that share (it may be empty, password-protected, or this link format isn't supported yet)")
+		job.logf("%s", err)
+		job.finish(err)
+		return
+	}
+
+	var total int64
+	for _, f := range files {
+		total += f.node.Size
+	}
+	job.mu.Lock()
+	job.totalBytes = total
+	job.destName = files[0].node.Name
+	job.mu.Unlock()
+	job.logf("Found %d file(s), %s total", len(files), formatBytesGo(total))
+
+	for _, f := range files {
+		destSubDir := filepath.Clean(filepath.Join(destDir, f.relDir))
+		if destSubDir != destDir && !strings.HasPrefix(destSubDir, destDir+string(os.PathSeparator)) {
+			job.logf("Skipping %s: path would escape the destination folder", f.node.Name)
+			continue
+		}
+		if err := os.MkdirAll(destSubDir, 0o755); err != nil {
+			job.logf("Could not create directory: %s", err)
+			job.finish(err)
+			return
+		}
+		dest := filepath.Join(destSubDir, sanitizeStackName(f.node.Name))
+		if err := downloadStackFile(client, base, token, csrfToken, f.node, dest, job); err != nil {
+			job.logf("Failed to download %s: %s", f.node.Name, err)
+			job.finish(err)
+			return
+		}
+		job.logf("Saved %s", f.node.Name)
 	}
 
 	job.finish(nil)

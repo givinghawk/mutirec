@@ -30,6 +30,46 @@ func TestLooksLikeOwncloudShare(t *testing.T) {
 	}
 }
 
+func TestParseStackFilesURL(t *testing.T) {
+	cases := []struct {
+		raw        string
+		wantToken  string
+		wantNodeID string
+		wantOK     bool
+	}{
+		{"https://stack.example.com/s/O9LJsSmxNLOgggau/en/files/63722", "O9LJsSmxNLOgggau", "63722", true},
+		{"https://stack.example.com/s/O9LJsSmxNLOgggau/files/63722", "O9LJsSmxNLOgggau", "63722", true},
+		{"https://stack.example.com/s/abc123", "", "", false},
+		{"https://example.com/some/random/path", "", "", false},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.raw)
+		if err != nil {
+			t.Fatalf("url.Parse(%q): %v", c.raw, err)
+		}
+		token, nodeID, ok := parseStackFilesURL(u)
+		if ok != c.wantOK || token != c.wantToken || nodeID != c.wantNodeID {
+			t.Errorf("parseStackFilesURL(%q) = (%q, %q, %v), want (%q, %q, %v)", c.raw, token, nodeID, ok, c.wantToken, c.wantNodeID, c.wantOK)
+		}
+	}
+}
+
+func TestSanitizeStackName(t *testing.T) {
+	cases := map[string]string{
+		"normal name.mp4":       "normal name.mp4",
+		"has/slash.mp4":         "has-slash.mp4",
+		"has\\backslash.mp4":    "has-backslash.mp4",
+		"..":                    "file",
+		"":                      "file",
+		"Cryex @ Set, 2022.m4a": "Cryex @ Set, 2022.m4a",
+	}
+	for in, want := range cases {
+		if got := sanitizeStackName(in); got != want {
+			t.Errorf("sanitizeStackName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestURLDownloadDestPrefersContentDisposition(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Disposition", `attachment; filename="My Set.mkv"`)

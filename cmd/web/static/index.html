@@ -1058,6 +1058,14 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/mutirec or gdrive:recordings"></label>
             <label>Extra rclone args, one per line<textarea id="rcloneArgs" class="codebox h-32"></textarea></label>
           </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>YouTube Auto-Upload</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Uploads finished recordings to YouTube for sources with "Auto-upload to YouTube" enabled (Sources tab), as private or unlisted by default. Create a Google Cloud OAuth client (youtube.googleapis.com, scope <code>youtube.upload</code>) and generate a refresh token for it ahead of time (e.g. via Google's OAuth 2.0 Playground), then paste all three values below.</p>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="youtubeEnabled" type="checkbox" class="accent-red-500"> Enabled</label>
+            <label>Client ID<input id="youtubeClientId" class="input"></label>
+            <label>Client Secret<input id="youtubeClientSecret" type="password" class="input"></label>
+            <label>Refresh Token<input id="youtubeRefreshToken" type="password" class="input"></label>
+          </div>
           <div class="panel">
             <div class="panel-head"><h2>Account</h2></div>
             <p id="account-note" class="mb-3 text-sm text-zinc-400"></p>
