@@ -243,7 +243,7 @@ func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root s
 	if u, err := url.Parse(rawURL); err == nil {
 		if token, ok := looksLikeOwncloudShare(u); ok {
 			shareToken = token
-			job.logf("Detected an ownCloud/Nextcloud-style share link (token %s) - requesting the direct download", shortHash(token))
+			job.logf("Detected an ownCloud/Nextcloud-style share link (token %s) - requesting the direct download", token)
 			fetchURL = strings.TrimRight(rawURL, "/") + "/download"
 			if password != "" {
 				basicUser, basicPass = token, password
@@ -511,7 +511,7 @@ func (a *App) runStackShareDownload(job *URLFetchJob, scheme, host, token, start
 	client := &http.Client{Jar: jar, Transport: &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}}
 	base := scheme + "://" + host
 
-	job.logf("Detected a Stack share (token %s) - using the Stack API to list and fetch files", shortHash(token))
+	job.logf("Detected a Stack share (token %s) - using the Stack API to list and fetch files", token)
 
 	csrfToken := ""
 	if resp, err := client.Get(base + "/s/" + url.PathEscape(token)); err == nil {
