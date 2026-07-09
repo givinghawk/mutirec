@@ -28,6 +28,7 @@ func TestIsSidecarPath(t *testing.T) {
 		"BLUE/DJ Set.NFO":               true,
 		"BLUE/DJ Set.timecode.json":     true,
 		"BLUE/DJ Set.markers.json":      true,
+		"BLUE/DJ Set.timetable.json":    true,
 		"BLUE/DJ Set.mkv.timecode.json": true,
 		"BLUE/some-other-file.json":     false,
 	}
@@ -45,6 +46,36 @@ func TestSidecarPathsSwapExtension(t *testing.T) {
 	}
 	if got, want := sidecarMarkersPath(final), "/data/finished/BLUE/DJ Set.20220623-180005.markers.json"; got != want {
 		t.Errorf("sidecarMarkersPath = %q, want %q", got, want)
+	}
+	if got, want := sidecarTimetablePath(final), "/data/finished/BLUE/DJ Set.20220623-180005.timetable.json"; got != want {
+		t.Errorf("sidecarTimetablePath = %q, want %q", got, want)
+	}
+}
+
+// TestSaveEventTimetableSidecarOnlyForFestivalSources confirms the
+// ".timetable.json" snapshot is only written for a source attached to an
+// event (FestivalID set) - a plain source with no event has nothing for the
+// Set Cutter to fall back to, so no file should appear.
+func TestSaveEventTimetableSidecarOnlyForFestivalSources(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "set.mkv")
+	tt := []StageSchedule{{Stage: "BLUE", Sets: []ScheduleSet{{Name: "Headliner", Start: "2026-06-25T22:00:00Z", End: "2026-06-25T23:30:00Z"}}}}
+
+	a := &App{cfg: AppConfig{Timetable: tt}}
+	rec := &recording{source: Source{Name: "no-event-source"}}
+	a.saveEventTimetableSidecar(rec, final)
+	if _, err := os.Stat(sidecarTimetablePath(final)); !os.IsNotExist(err) {
+		t.Fatalf("expected no sidecar for a source without FestivalID, stat err = %v", err)
+	}
+
+	rec2 := &recording{source: Source{Name: "event-source", FestivalID: "fest1"}}
+	a.saveEventTimetableSidecar(rec2, final)
+	got, err := readTimetableSidecar(sidecarTimetablePath(final))
+	if err != nil {
+		t.Fatalf("expected a sidecar for a source attached to an event: %v", err)
+	}
+	if len(got) != 1 || got[0].Stage != "BLUE" || len(got[0].Sets) != 1 || got[0].Sets[0].Name != "Headliner" {
+		t.Fatalf("sidecar content did not round-trip: %+v", got)
 	}
 }
 

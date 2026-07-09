@@ -516,6 +516,7 @@ function renderEditors() {
     loadShareConfig();
     renderVisualTimetable();
     renderLinkedBadge();
+    renderSavedTimetables();
     loadLolEvents();
   }
 }
@@ -2165,7 +2166,7 @@ $('tt-file-input').addEventListener('change', async () => {
   try { text = await file.text(); } catch { $('tt-file-status').textContent = 'Could not read that file.'; return; }
   let result;
   try {
-    result = await api('/api/timetable/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+    result = await api(`/api/timetable/import?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
   } catch {
     $('tt-file-status').textContent = 'Import failed — is it a valid timetable JSON file?';
     return;
@@ -2199,6 +2200,57 @@ function renderLinkedBadge() {
   badge.innerHTML = `Linked to <a href="${escapeAttr(link.sourceUrl)}" target="_blank" rel="noopener">${escapeHtml(link.eventTitle || link.eventSlug)}</a> · imported ${new Date(link.importedAt).toLocaleString()}`;
   $('tt-lol-resync').classList.remove('hidden');
   $('tt-lol-unlink').classList.remove('hidden');
+}
+
+// --- Saved timetables (snapshots taken on every import, so a previous one
+// can be switched back to instantly, and what the Set Cutter falls back to
+// for recordings from a source attached to an event) ---
+
+function renderSavedTimetables() {
+  const list = $('tt-saved-list');
+  const saved = config.savedTimetables || [];
+  if (!saved.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No saved timetables yet - every timetable.lol or file import is snapshotted here automatically.</p>';
+    return;
+  }
+  list.innerHTML = [...saved].reverse().map(s => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div>
+        <div class="font-medium">${escapeHtml(s.name)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(s.source || '')} · ${s.stages} stage(s), ${s.sets} set(s) · imported ${new Date(s.importedAt).toLocaleString()}</div>
+      </div>
+      <div class="flex gap-2">
+        <button type="button" class="btn primary tt-saved-activate" data-id="${escapeAttr(s.id)}">Switch to this</button>
+        <button type="button" class="btn tt-saved-delete" style="color:#fda4af" data-id="${escapeAttr(s.id)}">Delete</button>
+      </div>
+    </div>`).join('');
+
+  list.querySelectorAll('.tt-saved-activate').forEach(el => el.addEventListener('click', () => activateSavedTimetable(el.dataset.id)));
+  list.querySelectorAll('.tt-saved-delete').forEach(el => el.addEventListener('click', () => deleteSavedTimetable(el.dataset.id)));
+}
+
+async function activateSavedTimetable(id) {
+  const snap = (config.savedTimetables || []).find(s => s.id === id);
+  if (snap && config.timetable && config.timetable.length && !confirm(`Replace your current timetable with the saved "${snap.name}" snapshot?`)) return;
+  try {
+    await api(`/api/timetable/saved/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+  } catch {
+    return;
+  }
+  toast(`Switched to saved timetable "${snap ? snap.name : id}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+async function deleteSavedTimetable(id) {
+  if (!confirm('Delete this saved timetable snapshot? This does not affect the currently active timetable.')) return;
+  try {
+    await api(`/api/timetable/saved/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch {
+    return;
+  }
+  config.savedTimetables = (config.savedTimetables || []).filter(s => s.id !== id);
+  renderSavedTimetables();
 }
 
 // --- Recordings Library (Events -> Channels -> Sets) ---

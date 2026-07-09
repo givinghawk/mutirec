@@ -1164,6 +1164,34 @@
   `populateWatchSourceDropdown` and the source card button now only show for sources with
   `liveRewind` enabled, where the HLS rewind buffer actually gives something playable.
 
+## Done (this session, part 16) - Saved timetable snapshots + per-recording timetable sidecar
+- **Saved timetables** (`main.go`): every timetable import (file upload or timetable.lol, not the
+  raw JSON editor's plain save) now also snapshots the result into a new
+  `AppConfig.SavedTimetables []SavedTimetable` list via `snapshotTimetable`, capped at
+  `maxSavedTimetables` (30) oldest-first. Each entry keeps its own `Name`/`Source`/`ImportedAt`
+  plus precomputed stage/set counts and the full `Schedule`. New `POST
+  /api/timetable/saved/{id}/activate` switches the live timetable to a saved snapshot (preserving
+  existing per-stage URLs, same as every other import path) and `DELETE
+  /api/timetable/saved/{id}` forgets one (`handleTimetableSavedItem`) - both admin-only via the
+  existing centralized RBAC default. Timetable tab gets a new "Saved timetables" panel
+  (`index.html`/`app.js`: `renderSavedTimetables`/`activateSavedTimetable`/`deleteSavedTimetable`)
+  listing every snapshot with "Switch to this"/"Delete" buttons. File import now passes the
+  uploaded file's name as `?name=` so the snapshot has a sensible label instead of a timestamp.
+- **Per-recording timetable sidecar** (`cutter.go`): a source attached to an event
+  (`Source.FestivalID` set) now gets a `.timetable.json` sidecar written alongside its finished
+  recording (`saveEventTimetableSidecar`, called via `go` right after `finalizeRecordingSidecar`
+  in `runRecording`) - a frozen snapshot of whatever `AppConfig.Timetable` was active at the
+  moment the recording finished, since that timetable is live/mutable and can be re-imported or
+  hand-edited later. Follows the exact same "swap the extension" sidecar convention as
+  `.timecode.json`/`.markers.json` (`sidecarTimetablePath`, `readTimetableSidecar`,
+  `isSidecarPath` extended to skip it in the recordings scanner).
+- **Set Cutter uses it as a fallback**: `handleCutterDetect` (`assist.go`) previously required the
+  recording to already be organized into a `LibraryEvent` with a matching archived timetable
+  stage, hard-erroring otherwise ("organize this recording... before running auto-detect"). It now
+  falls back to the recording's own `.timetable.json` sidecar (matched by stage/channel name) when
+  there's no organized event or no matching stage there, so auto-detect works immediately for any
+  event-attached source's recording without requiring manual organizing first.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

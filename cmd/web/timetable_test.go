@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -156,6 +158,65 @@ func TestParseAnyTimetableJSON(t *testing.T) {
 
 	if _, err := parseAnyTimetableJSON([]byte(`{"not":"an array"}`)); err == nil {
 		t.Error("expected an error for input that is neither timetable shape")
+	}
+}
+
+// TestSnapshotTimetableCapsHistory confirms snapshotTimetable both records a
+// new entry (with computed stage/set counts) and drops the oldest one once
+// the cap is exceeded, so config.json doesn't grow forever across repeated
+// imports.
+func TestSnapshotTimetableCapsHistory(t *testing.T) {
+	cfg := &AppConfig{}
+	schedule := []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{{Name: "A"}, {Name: "B"}}}}
+	for i := 0; i < maxSavedTimetables+5; i++ {
+		snapshotTimetable(cfg, "import", "file upload", schedule)
+	}
+	if len(cfg.SavedTimetables) != maxSavedTimetables {
+		t.Fatalf("expected the saved-timetable list capped at %d, got %d", maxSavedTimetables, len(cfg.SavedTimetables))
+	}
+	last := cfg.SavedTimetables[len(cfg.SavedTimetables)-1]
+	if last.Stages != 1 || last.Sets != 2 {
+		t.Errorf("expected computed stages=1 sets=2, got stages=%d sets=%d", last.Stages, last.Sets)
+	}
+	if last.Source != "file upload" {
+		t.Errorf("expected source %q, got %q", "file upload", last.Source)
+	}
+}
+
+// TestHandleTimetableSavedItemActivateAndDelete covers switching the live
+// timetable to a saved snapshot (preserving any per-stage URL already
+// configured, same as every other import path) and deleting a snapshot.
+func TestHandleTimetableSavedItemActivateAndDelete(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{config: filepath.Join(dir, "config.json")}
+	a.cfg = AppConfig{
+		Timetable: []StageSchedule{{Stage: "RED", URL: "https://live/red"}},
+		SavedTimetables: []SavedTimetable{
+			{ID: "snap1", Name: "Old Import", Schedule: []StageSchedule{{Stage: "RED", Sets: []ScheduleSet{{Name: "Headliner"}}}}},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/timetable/saved/snap1/activate", nil)
+	a.handleTimetableSavedItem(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("activate: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(a.cfg.Timetable) != 1 || a.cfg.Timetable[0].Stage != "RED" || len(a.cfg.Timetable[0].Sets) != 1 {
+		t.Fatalf("activate did not switch the live timetable: %+v", a.cfg.Timetable)
+	}
+	if a.cfg.Timetable[0].URL != "https://live/red" {
+		t.Errorf("expected the existing stage URL to be preserved, got %q", a.cfg.Timetable[0].URL)
+	}
+
+	delRec := httptest.NewRecorder()
+	delReq := httptest.NewRequest("DELETE", "/api/timetable/saved/snap1", nil)
+	a.handleTimetableSavedItem(delRec, delReq)
+	if delRec.Code != 200 {
+		t.Fatalf("delete: expected 200, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+	if len(a.cfg.SavedTimetables) != 0 {
+		t.Fatalf("expected the saved snapshot to be removed, got %+v", a.cfg.SavedTimetables)
 	}
 }
 
