@@ -4422,6 +4422,7 @@ $('explorer-download-selected').onclick = () => {
 function openExplorerFetchModal() {
   $('explorer-fetch-url').value = '';
   $('explorer-fetch-password').value = '';
+  $('explorer-fetch-cookie').value = '';
   $('explorer-fetch-debug').checked = false;
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-job-box').classList.add('hidden');
@@ -4440,13 +4441,14 @@ $('explorer-fetch-overlay').addEventListener('click', (e) => { if (e.target.id =
 $('explorer-fetch-start').onclick = async () => {
   const url = $('explorer-fetch-url').value.trim();
   const password = $('explorer-fetch-password').value;
+  const cookie = $('explorer-fetch-cookie').value.trim();
   const debug = $('explorer-fetch-debug').checked;
   if (!url) { $('explorer-fetch-error').textContent = 'Enter a URL first'; $('explorer-fetch-error').classList.remove('hidden'); return; }
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-start').disabled = true;
   let result;
   try {
-    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, path: explorerPath, debug }) });
+    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, cookie, path: explorerPath, debug }) });
   } catch { $('explorer-fetch-start').disabled = false; return; }
   if (!result.ok) {
     $('explorer-fetch-error').textContent = result.error || 'Could not start that download.';
