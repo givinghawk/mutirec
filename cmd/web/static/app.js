@@ -241,7 +241,7 @@ function sourceCardHtml(src) {
       <div class="mt-3 flex flex-wrap gap-2">
         ${src.orphaned ? '' : `<button class="btn" ${src.status === 'recording' ? 'disabled' : ''} onclick="start('${src.id}')">Record</button>`}
         <button class="btn" ${src.status !== 'recording' ? 'disabled' : ''} onclick="stopRec('${src.id}', '${escapeAttr(src.name)}')">Stop</button>
-        ${src.orphaned ? '' : `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>`}
+        ${!src.orphaned && src.liveRewind ? `<button class="btn primary" onclick="playLive('${src.id}')">${src.liveRewindActive ? 'Watch Live (rewind)' : 'Watch Live'}</button>` : ''}
         ${src.mediaPath ? `<button class="btn" onclick="openSourceLatest('${src.id}')">Open latest</button>` : ''}
       </div>
     </article>`;
@@ -655,6 +655,18 @@ function drawSourceEditor() {
           <label class="inline-flex items-center gap-2"><input class="src-record" type="checkbox" ${s.record ? 'checked' : ''}> Auto record</label>
           <label class="inline-flex items-center gap-2"><input class="src-audio" type="checkbox" ${s.audioOnly ? 'checked' : ''}> Audio only</label>
           <label class="inline-flex items-center gap-2" title="Normalizes recorded volume to a consistent loudness (EBU R128). Forces audio to be re-encoded even if video is stream-copied."><input class="src-loudnorm" type="checkbox" ${s.loudnessNormalize ? 'checked' : ''}> Loudness normalize</label>
+          <label class="inline-flex items-center gap-2" title="Requires YouTube Auto-Upload to be configured in Settings."><input class="src-yt-upload" type="checkbox" ${s.youtubeUpload ? 'checked' : ''}> Auto-upload to YouTube</label>
+          <label>YouTube privacy
+            <div class="custom-dropdown">
+              <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">${escapeHtml(youtubePrivacyLabel(s.youtubePrivacy))}</span><span class="ml-auto">▼</span></button>
+              <div class="dropdown-menu hidden">
+                <div class="dropdown-option" data-value="unlisted"><div class="font-semibold">Unlisted</div></div>
+                <div class="dropdown-option" data-value="private"><div class="font-semibold">Private</div></div>
+                <div class="dropdown-option" data-value="public"><div class="font-semibold">Public</div></div>
+              </div>
+              <input type="hidden" class="src-yt-privacy" value="${escapeAttr(s.youtubePrivacy || 'unlisted')}">
+            </div>
+          </label>
         </div>
         <label class="mt-2 block" title="Only relevant for 'http' type sources whose stream needs an auth token/cookie/custom header - sent with both the recording (ffmpeg) and the live-preview proxy. One 'Key: Value' per line.">HTTP headers <span class="text-xs text-zinc-500">(token-gated HTTP streams only, one "Key: Value" per line)</span>
           <textarea class="input src-httpheaders codebox h-20" placeholder="Authorization: Bearer your-token-here">${escapeHtml((s.httpHeaders || []).join('\n'))}</textarea>
@@ -690,6 +702,10 @@ function drawSourceEditor() {
   }
 }
 
+function youtubePrivacyLabel(p) {
+  return p === 'private' ? 'Private' : p === 'public' ? 'Public' : 'Unlisted';
+}
+
 function markCardUnsaved(el) { el.querySelector('.save-hint').classList.remove('hidden'); }
 
 function readSourceCard(el) {
@@ -708,6 +724,8 @@ function readSourceCard(el) {
     loudnessNormalize: el.querySelector('.src-loudnorm').checked,
     transcode: el.querySelector('.src-transcode').value === 'yes',
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
+    youtubeUpload: el.querySelector('.src-yt-upload').checked,
+    youtubePrivacy: el.querySelector('.src-yt-privacy').value,
     timetableStage: el.querySelector('.src-ttstage').value,
     festivalId: el.querySelector('.src-festival').value,
     httpHeaders: el.querySelector('.src-httpheaders').value.split('\n').map(x => x.trim()).filter(Boolean)
@@ -859,6 +877,11 @@ function fillSettings() {
   $('discordOAuthClientId').value = d.clientId || '';
   $('discordOAuthClientSecret').value = d.clientSecret || '';
   $('discordOAuthRedirectUrl').value = d.redirectUrl || '';
+  const yt = s.youtube || {};
+  $('youtubeEnabled').checked = !!yt.enabled;
+  $('youtubeClientId').value = yt.clientId || '';
+  $('youtubeClientSecret').value = yt.clientSecret || '';
+  $('youtubeRefreshToken').value = yt.refreshToken || '';
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -879,6 +902,7 @@ function readSettings() {
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
   s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
   s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
+  s.youtube = { enabled: $('youtubeEnabled').checked, clientId: $('youtubeClientId').value, clientSecret: $('youtubeClientSecret').value, refreshToken: $('youtubeRefreshToken').value };
 }
 
 async function saveConfig() {
@@ -1138,7 +1162,10 @@ function initWatch() {
 }
 
 function populateWatchSourceDropdown() {
-  const sources = (state && state.sources) || [];
+  // Only sources with live rewind enabled actually stream something worth
+  // watching here - without it, "watch live" just resolves the raw
+  // streamlink URL, which usually isn't playable directly in a <video> tag.
+  const sources = ((state && state.sources) || []).filter(s => s.liveRewind);
   const groupFor = (s) => {
     const f = (config.festivals || []).find(f => f.id === s.festivalId);
     return f ? f.name : 'Ungrouped';
