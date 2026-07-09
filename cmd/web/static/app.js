@@ -516,6 +516,7 @@ function renderEditors() {
     loadShareConfig();
     renderVisualTimetable();
     renderLinkedBadge();
+    renderSavedTimetables();
     loadLolEvents();
   }
 }
@@ -2124,11 +2125,23 @@ async function toggleFavorite(id) {
 
 // --- timetable.lol integration (optional) ---
 
+// lolEventDateLabel prefers a real date (normalized server-side into
+// displayStartDate/displayEndDate, whatever field name timetable.lol
+// actually used) over just the year, so events from the same festival
+// franchise in different years - or on different days within one edition -
+// are distinguishable in the picker.
+function lolEventDateLabel(e) {
+  if (e.displayStartDate) {
+    return e.displayEndDate && e.displayEndDate !== e.displayStartDate ? `${e.displayStartDate} – ${e.displayEndDate}` : e.displayStartDate;
+  }
+  return e.year ? String(e.year) : '';
+}
+
 async function loadLolEvents() {
   try {
     const result = await api('/api/timetable/lol-events');
     lolEvents = result.events || [];
-    const options = lolEvents.map(e => ({ value: e.slug, label: `${e.title || e.slug}${e.year ? ' (' + e.year + ')' : ''}` }));
+    const options = lolEvents.map(e => ({ value: e.slug, label: `${e.title || e.slug}${lolEventDateLabel(e) ? ' (' + lolEventDateLabel(e) + ')' : ''}` }));
     setDropdownOptions('tt-lol-event', options, { value: options.length ? options[0].value : '', placeholder: 'No events found' });
     $('tt-lol-status').textContent = `${lolEvents.length} events available from timetable.lol.`;
   } catch {
@@ -2165,7 +2178,7 @@ $('tt-file-input').addEventListener('change', async () => {
   try { text = await file.text(); } catch { $('tt-file-status').textContent = 'Could not read that file.'; return; }
   let result;
   try {
-    result = await api('/api/timetable/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
+    result = await api(`/api/timetable/import?name=${encodeURIComponent(file.name)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: text });
   } catch {
     $('tt-file-status').textContent = 'Import failed — is it a valid timetable JSON file?';
     return;
@@ -2199,6 +2212,57 @@ function renderLinkedBadge() {
   badge.innerHTML = `Linked to <a href="${escapeAttr(link.sourceUrl)}" target="_blank" rel="noopener">${escapeHtml(link.eventTitle || link.eventSlug)}</a> · imported ${new Date(link.importedAt).toLocaleString()}`;
   $('tt-lol-resync').classList.remove('hidden');
   $('tt-lol-unlink').classList.remove('hidden');
+}
+
+// --- Saved timetables (snapshots taken on every import, so a previous one
+// can be switched back to instantly, and what the Set Cutter falls back to
+// for recordings from a source attached to an event) ---
+
+function renderSavedTimetables() {
+  const list = $('tt-saved-list');
+  const saved = config.savedTimetables || [];
+  if (!saved.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No saved timetables yet - every timetable.lol or file import is snapshotted here automatically.</p>';
+    return;
+  }
+  list.innerHTML = [...saved].reverse().map(s => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div>
+        <div class="font-medium">${escapeHtml(s.name)}</div>
+        <div class="text-xs text-zinc-400">${escapeHtml(s.source || '')} · ${s.stages} stage(s), ${s.sets} set(s) · imported ${new Date(s.importedAt).toLocaleString()}</div>
+      </div>
+      <div class="flex gap-2">
+        <button type="button" class="btn primary tt-saved-activate" data-id="${escapeAttr(s.id)}">Switch to this</button>
+        <button type="button" class="btn tt-saved-delete" style="color:#fda4af" data-id="${escapeAttr(s.id)}">Delete</button>
+      </div>
+    </div>`).join('');
+
+  list.querySelectorAll('.tt-saved-activate').forEach(el => el.addEventListener('click', () => activateSavedTimetable(el.dataset.id)));
+  list.querySelectorAll('.tt-saved-delete').forEach(el => el.addEventListener('click', () => deleteSavedTimetable(el.dataset.id)));
+}
+
+async function activateSavedTimetable(id) {
+  const snap = (config.savedTimetables || []).find(s => s.id === id);
+  if (snap && config.timetable && config.timetable.length && !confirm(`Replace your current timetable with the saved "${snap.name}" snapshot?`)) return;
+  try {
+    await api(`/api/timetable/saved/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+  } catch {
+    return;
+  }
+  toast(`Switched to saved timetable "${snap ? snap.name : id}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+async function deleteSavedTimetable(id) {
+  if (!confirm('Delete this saved timetable snapshot? This does not affect the currently active timetable.')) return;
+  try {
+    await api(`/api/timetable/saved/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch {
+    return;
+  }
+  config.savedTimetables = (config.savedTimetables || []).filter(s => s.id !== id);
+  renderSavedTimetables();
 }
 
 // --- Recordings Library (Events -> Channels -> Sets) ---
@@ -4358,6 +4422,7 @@ $('explorer-download-selected').onclick = () => {
 function openExplorerFetchModal() {
   $('explorer-fetch-url').value = '';
   $('explorer-fetch-password').value = '';
+  $('explorer-fetch-cookie').value = '';
   $('explorer-fetch-debug').checked = false;
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-job-box').classList.add('hidden');
@@ -4376,13 +4441,14 @@ $('explorer-fetch-overlay').addEventListener('click', (e) => { if (e.target.id =
 $('explorer-fetch-start').onclick = async () => {
   const url = $('explorer-fetch-url').value.trim();
   const password = $('explorer-fetch-password').value;
+  const cookie = $('explorer-fetch-cookie').value.trim();
   const debug = $('explorer-fetch-debug').checked;
   if (!url) { $('explorer-fetch-error').textContent = 'Enter a URL first'; $('explorer-fetch-error').classList.remove('hidden'); return; }
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-start').disabled = true;
   let result;
   try {
-    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, path: explorerPath, debug }) });
+    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, cookie, path: explorerPath, debug }) });
   } catch { $('explorer-fetch-start').disabled = false; return; }
   if (!result.ok) {
     $('explorer-fetch-error').textContent = result.error || 'Could not start that download.';

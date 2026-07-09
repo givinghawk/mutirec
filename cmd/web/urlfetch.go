@@ -46,6 +46,14 @@ type URLFetchJob struct {
 	startedAt  time.Time
 	finishedAt time.Time
 
+	// cookie, if set, is sent as the Cookie header on every request this job
+	// makes - pasted in by the user from their own browser's session for a
+	// share whose backend requires an authenticated session that a plain
+	// anonymous request never gets (some Stack instances do this even for a
+	// link that's otherwise a public share). Immutable after job creation,
+	// so it's safe to read without holding mu.
+	cookie string
+
 	totalBytes, transferredBytes int64
 	speedBps                     float64
 	errMsg                       string
@@ -170,14 +178,40 @@ func (j *URLFetchJob) debugf(format string, args ...any) {
 // creates should use - wrapped in a request/response logger when debug mode
 // is on, otherwise just the plain transport.
 func (j *URLFetchJob) httpTransport() http.RoundTripper {
-	base := &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
+	var rt http.RoundTripper = &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
 	j.debugMu.Lock()
 	enabled := j.debugFile != nil
 	j.debugMu.Unlock()
-	if !enabled {
-		return base
+	if enabled {
+		rt = &debugRoundTripper{inner: rt, job: j}
 	}
-	return &debugRoundTripper{inner: base, job: j}
+	// Cookie injection wraps outside the debug logger (not inside), so the
+	// debug log shows the request as actually sent - including a redacted
+	// Cookie line - rather than silently omitting it.
+	if j.cookie != "" {
+		rt = &cookieRoundTripper{inner: rt, cookie: j.cookie}
+	}
+	return rt
+}
+
+// cookieRoundTripper adds a fixed Cookie header to every request - used
+// when the user pastes their own browser session cookie for a share whose
+// backend requires an authenticated session that a plain anonymous request
+// never gets (some Stack instances 401 an otherwise-public share's folder
+// listing without one).
+type cookieRoundTripper struct {
+	inner  http.RoundTripper
+	cookie string
+}
+
+func (c *cookieRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	if existing := req.Header.Get("Cookie"); existing != "" {
+		req.Header.Set("Cookie", existing+"; "+c.cookie)
+	} else {
+		req.Header.Set("Cookie", c.cookie)
+	}
+	return c.inner.RoundTrip(req)
 }
 
 // debugBodyLogCap bounds how much of a textual response body gets copied
@@ -195,7 +229,7 @@ type debugRoundTripper struct {
 func (d *debugRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	d.job.debugf("--> %s %s", req.Method, req.URL.String())
 	for k, v := range req.Header {
-		if strings.EqualFold(k, "Authorization") {
+		if strings.EqualFold(k, "Authorization") || strings.EqualFold(k, "Cookie") {
 			d.job.debugf("    %s: [redacted]", k)
 			continue
 		}
@@ -308,6 +342,7 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Path     string `json:"path"`
 		Debug    bool   `json:"debug"`
+		Cookie   string `json:"cookie"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -326,7 +361,7 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := &URLFetchJob{id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now()}
+	job := &URLFetchJob{id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now(), cookie: strings.TrimSpace(req.Cookie)}
 	if req.Debug {
 		job.enableDebug(destDir)
 	}

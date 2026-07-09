@@ -82,7 +82,7 @@ type RecordingSidecar struct {
 // the existing ".nfo" exclusion, extended to cover the newer sidecar kinds).
 func isSidecarPath(p string) bool {
 	lower := strings.ToLower(p)
-	for _, suffix := range []string{".nfo", ".timecode.json", ".markers.json"} {
+	for _, suffix := range []string{".nfo", ".timecode.json", ".markers.json", ".timetable.json"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}
@@ -101,6 +101,29 @@ func sidecarTimecodePath(finalPath string) string {
 // the identical naming convention.
 func sidecarMarkersPath(finalPath string) string {
 	return strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + ".markers.json"
+}
+
+// sidecarTimetablePath derives the ".timetable.json" path for a recording -
+// a snapshot of the timetable active at record-finish time, written for
+// sources attached to an event (Source.FestivalID set) so the Set Cutter can
+// auto-detect set boundaries without requiring the recording to already be
+// organized into a LibraryEvent with its own archived timetable.
+func sidecarTimetablePath(finalPath string) string {
+	return strings.TrimSuffix(finalPath, filepath.Ext(finalPath)) + ".timetable.json"
+}
+
+// readTimetableSidecar reads back a ".timetable.json" sidecar written by
+// saveEventTimetableSidecar.
+func readTimetableSidecar(path string) ([]StageSchedule, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var tt []StageSchedule
+	if err := json.Unmarshal(data, &tt); err != nil {
+		return nil, err
+	}
+	return tt, nil
 }
 
 // worldTimeTimeout bounds the one-shot correction request so a slow or
@@ -298,6 +321,24 @@ func (a *App) finalizeRecordingSidecar(rec *recording, finalPath, relPath string
 	}
 	sc.WaveformAvailable = a.generateWaveform(finalPath, relPath)
 	_ = writeSidecarJSON(sidecarTimecodePath(finalPath), sc)
+}
+
+// saveEventTimetableSidecar writes a ".timetable.json" snapshot of the
+// currently active timetable alongside a finished recording, for sources
+// attached to an event (Source.FestivalID set). AppConfig.Timetable is
+// live and mutable - it can be re-imported or hand-edited at any time after
+// this recording finishes - so freezing a copy here means the Set Cutter can
+// still find "what was playing" for this specific recording even after the
+// live timetable has since moved on to a different event.
+func (a *App) saveEventTimetableSidecar(rec *recording, finalPath string) {
+	if rec.source.FestivalID == "" {
+		return
+	}
+	cfg := a.snapshotConfig()
+	if len(cfg.Timetable) == 0 {
+		return
+	}
+	_ = writeSidecarJSON(sidecarTimetablePath(finalPath), cfg.Timetable)
 }
 
 // writeSidecarJSON marshals v and writes it to path, matching the plain

@@ -163,6 +163,45 @@ func TestURLFetchJobDebugDisabledByDefault(t *testing.T) {
 	}
 }
 
+// TestURLFetchJobSendsCookieHeader confirms a pasted-in session cookie is
+// sent on every request the job makes, and that the debug log redacts it
+// rather than writing the live session token to disk in plain text.
+func TestURLFetchJobSendsCookieHeader(t *testing.T) {
+	var gotCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	job := &URLFetchJob{id: "cookietest", status: "running", cookie: "session=abc123"}
+	job.enableDebug(dir)
+
+	client := &http.Client{Transport: job.httpTransport()}
+	resp, err := client.Get(srv.URL)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if gotCookie != "session=abc123" {
+		t.Fatalf("expected the Cookie header to reach the server, got %q", gotCookie)
+	}
+
+	job.finish(nil)
+	data, err := os.ReadFile(filepath.Join(dir, "mutirec-fetch-debug-cookietest.log"))
+	if err != nil {
+		t.Fatalf("could not read debug log: %v", err)
+	}
+	log := string(data)
+	if strings.Contains(log, "abc123") {
+		t.Error("debug log leaked the session cookie in plain text - it should be redacted")
+	}
+	if !strings.Contains(log, "Cookie: [redacted]") {
+		t.Errorf("expected a redacted Cookie line in the debug log:\n%s", log)
+	}
+}
+
 func TestURLFetchJobFinish(t *testing.T) {
 	job := &URLFetchJob{id: "f1", status: "running"}
 	job.finish(nil)

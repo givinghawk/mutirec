@@ -49,6 +49,7 @@ type AppConfig struct {
 	Sources         []Source                 `json:"sources"`
 	Timetable       []StageSchedule          `json:"timetable"`
 	TimetableSource *TimetableLink           `json:"timetableSource,omitempty"`
+	SavedTimetables []SavedTimetable         `json:"savedTimetables,omitempty"`
 	LibraryEvents   []LibraryEvent           `json:"libraryEvents"`
 	RecordingMeta   map[string]RecordingMeta `json:"recordingMeta"`
 	Festivals       []Festival               `json:"festivals"`
@@ -265,6 +266,47 @@ type TimetableLink struct {
 	PlanType   string    `json:"planType"`
 	SourceURL  string    `json:"sourceUrl"`
 	ImportedAt time.Time `json:"importedAt"`
+}
+
+// SavedTimetable is a named, timestamped snapshot of an imported timetable,
+// kept independently of the live, mutable AppConfig.Timetable so a previous
+// import can be switched back to instantly instead of re-fetching or
+// re-uploading it. Written automatically by every import path (file upload,
+// timetable.lol) - not the raw JSON editor's plain save, which would create
+// one of these per keystroke-ish edit instead of per actual import.
+type SavedTimetable struct {
+	ID         string          `json:"id"`
+	Name       string          `json:"name"`
+	Source     string          `json:"source,omitempty"` // "file upload" or "timetable.lol"
+	ImportedAt time.Time       `json:"importedAt"`
+	Stages     int             `json:"stages"`
+	Sets       int             `json:"sets"`
+	Schedule   []StageSchedule `json:"schedule"`
+}
+
+// maxSavedTimetables bounds how many snapshots pile up in config.json - old
+// ones are dropped oldest-first once the cap is hit.
+const maxSavedTimetables = 30
+
+// snapshotTimetable records schedule as a new saved-timetable entry on cfg,
+// called by every import handler right after it overwrites the live
+// timetable.
+func snapshotTimetable(cfg *AppConfig, name, source string, schedule []StageSchedule) {
+	stages := len(schedule)
+	sets := 0
+	for _, s := range schedule {
+		sets += len(s.Sets)
+	}
+	if name == "" {
+		name = time.Now().Format("2006-01-02 15:04")
+	}
+	cfg.SavedTimetables = append(cfg.SavedTimetables, SavedTimetable{
+		ID: newID(), Name: name, Source: source, ImportedAt: time.Now(),
+		Stages: stages, Sets: sets, Schedule: append([]StageSchedule(nil), schedule...),
+	})
+	if len(cfg.SavedTimetables) > maxSavedTimetables {
+		cfg.SavedTimetables = cfg.SavedTimetables[len(cfg.SavedTimetables)-maxSavedTimetables:]
+	}
 }
 
 type State struct {
@@ -585,6 +627,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/timetable/lol-events", a.handleTimetableLolEvents)
 	mux.HandleFunc("/api/timetable/lol-import", a.handleTimetableLolImport)
 	mux.HandleFunc("/api/timetable/lol-unlink", a.handleTimetableLolUnlink)
+	mux.HandleFunc("/api/timetable/saved/", a.handleTimetableSavedItem)
 	mux.HandleFunc("/api/record/", a.handleRecordAction)
 	mux.HandleFunc("/api/live/", a.handleLive)
 	mux.HandleFunc("/api/recordings", a.handleRecordings)
@@ -986,6 +1029,7 @@ func (a *App) runRecording(rec *recording) {
 			relPath := filepath.ToSlash(rel)
 			go a.generateThumbnail(finalPath, relPath, audioOnly)
 			go a.finalizeRecordingSidecar(rec, finalPath, relPath, rec.timeOffsetMs, rec.timeSource)
+			go a.saveEventTimetableSidecar(rec, finalPath)
 		}
 		if failed {
 			// Real content was captured before the error hit (e.g. a network
@@ -3057,6 +3101,7 @@ func (a *App) handleTimetableImport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	fileName := strings.TrimSpace(r.URL.Query().Get("name"))
 	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -3089,6 +3134,7 @@ func (a *App) handleTimetableImport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.cfg.Timetable = tt
+	snapshotTimetable(&a.cfg, fileName, "file upload", tt)
 	cfg := a.cfg
 	a.mu.Unlock()
 	_ = a.persist(cfg)
@@ -3207,7 +3253,31 @@ func (a *App) handleTimetableLolEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not parse timetable.lol response", http.StatusBadGateway)
 		return
 	}
+	for _, e := range payload.Events {
+		if d := firstStringField(e, "startDate", "start_date", "date", "dates", "eventDate", "start"); d != "" {
+			e["displayStartDate"] = d
+		}
+		if d := firstStringField(e, "endDate", "end_date", "end"); d != "" {
+			e["displayEndDate"] = d
+		}
+	}
 	writeJSON(w, map[string]any{"events": payload.Events, "attribution": "Timetable data provided by timetable.lol (https://timetable.lol)"})
+}
+
+// firstStringField returns the first non-empty string value found in m under
+// any of keys, tried in order - used to normalize timetable.lol's event list
+// (an opaquely passed-through map[string]any, since its exact field names
+// aren't part of any contract with us) into one canonical field the
+// frontend can rely on regardless of which name timetable.lol actually uses.
+func firstStringField(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // handleTimetableLolImport fetches one event's schedule from timetable.lol
@@ -3276,9 +3346,14 @@ func (a *App) handleTimetableLolImport(w http.ResponseWriter, r *http.Request) {
 		ImportedAt: time.Now(),
 	}
 
+	snapshotName := payload.Title
+	if snapshotName == "" {
+		snapshotName = req.EventSlug
+	}
 	a.mu.Lock()
 	a.cfg.Timetable = schedule
 	a.cfg.TimetableSource = link
+	snapshotTimetable(&a.cfg, snapshotName, "timetable.lol", schedule)
 	cfg2 := a.cfg
 	a.mu.Unlock()
 	_ = a.persist(cfg2)
@@ -3300,6 +3375,79 @@ func (a *App) handleTimetableLolUnlink(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	_ = a.persist(cfg)
 	writeJSON(w, map[string]string{"status": "unlinked"})
+}
+
+// handleTimetableSavedItem handles the saved-timetable list's per-item
+// actions, addressed as /api/timetable/saved/{id}[/activate] - POST
+// .../activate switches the live timetable to that snapshot (same per-stage
+// URL-preservation as every other import path), DELETE forgets it.
+func (a *App) handleTimetableSavedItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/timetable/saved/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	switch {
+	case r.Method == http.MethodPost && action == "activate":
+		a.mu.Lock()
+		var found *SavedTimetable
+		for i := range a.cfg.SavedTimetables {
+			if a.cfg.SavedTimetables[i].ID == id {
+				found = &a.cfg.SavedTimetables[i]
+				break
+			}
+		}
+		if found == nil {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		schedule := append([]StageSchedule(nil), found.Schedule...)
+		existingURL := map[string]string{}
+		for _, s := range a.cfg.Timetable {
+			if s.URL != "" {
+				existingURL[strings.ToLower(s.Stage)] = s.URL
+			}
+		}
+		for i := range schedule {
+			if schedule[i].URL == "" {
+				if u, ok := existingURL[strings.ToLower(schedule[i].Stage)]; ok {
+					schedule[i].URL = u
+				}
+			}
+		}
+		a.cfg.Timetable = schedule
+		name := found.Name
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		a.event("info", fmt.Sprintf("Switched active timetable to saved snapshot %q", name))
+		writeJSON(w, map[string]any{"timetable": schedule})
+
+	case r.Method == http.MethodDelete && action == "":
+		a.mu.Lock()
+		out := a.cfg.SavedTimetables[:0]
+		for _, s := range a.cfg.SavedTimetables {
+			if s.ID != id {
+				out = append(out, s)
+			}
+		}
+		a.cfg.SavedTimetables = out
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // convertTimetableLolData converts a timetable.lol PlannerData payload into

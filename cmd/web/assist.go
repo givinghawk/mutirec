@@ -218,23 +218,37 @@ func (a *App) handleCutterDetect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.RUnlock()
-	if ev == nil {
-		http.Error(w, "organize this recording (assign it to an event) before running auto-detect", http.StatusBadRequest)
-		return
-	}
+
 	channel := meta.Channel
 	if channel == "" {
 		channel = channelFromPath(relPath)
 	}
+
 	var sets []ScheduleSet
-	for _, st := range ev.Timetable {
-		if strings.EqualFold(st.Stage, channel) {
-			sets = append(sets, st.Sets...)
-			break
+	if ev != nil {
+		for _, st := range ev.Timetable {
+			if strings.EqualFold(st.Stage, channel) {
+				sets = append(sets, st.Sets...)
+				break
+			}
+		}
+	}
+	// Fall back to this recording's own ".timetable.json" sidecar - a
+	// snapshot taken at record-finish time for sources attached to an event
+	// (see saveEventTimetableSidecar) - if it hasn't been organized into a
+	// LibraryEvent yet, or that event has no matching stage.
+	if len(sets) == 0 {
+		if tt, err := readTimetableSidecar(sidecarTimetablePath(abs)); err == nil {
+			for _, st := range tt {
+				if strings.EqualFold(st.Stage, channel) {
+					sets = append(sets, st.Sets...)
+					break
+				}
+			}
 		}
 	}
 	if len(sets) == 0 {
-		http.Error(w, fmt.Sprintf("no archived timetable found for channel %q on %s", channel, ev.Name), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("no archived timetable found for channel %q - organize this recording into an event with a matching timetable, or record it from a source attached to an event", channel), http.StatusBadRequest)
 		return
 	}
 
