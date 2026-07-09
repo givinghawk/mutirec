@@ -1,8 +1,13 @@
 package main
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +112,54 @@ func TestURLFetchJobViewIsSafeCopy(t *testing.T) {
 	view.Log[0].Text = "mutated"
 	if job.view().Log[0].Text != "started" {
 		t.Fatal("view() log slice was not copied - mutation leaked back into the job")
+	}
+}
+
+func TestURLFetchJobDebugLogsRequestsAndResponses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"nodes":[]}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	job := &URLFetchJob{id: "debugtest", status: "running"}
+	job.enableDebug(dir)
+
+	client := &http.Client{Transport: job.httpTransport()}
+	resp, err := client.Get(srv.URL + "/api/v2/share/tok/nodes?parentID=1")
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != `{"nodes":[]}` {
+		t.Fatalf("response body corrupted by the debug wrapper: %q", body)
+	}
+
+	job.finish(nil)
+
+	logPath := filepath.Join(dir, "mutirec-fetch-debug-debugtest.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("expected a debug log at %s: %v", logPath, err)
+	}
+	log := string(data)
+	if !strings.Contains(log, "--> GET "+srv.URL+"/api/v2/share/tok/nodes?parentID=1") {
+		t.Errorf("debug log missing the request line:\n%s", log)
+	}
+	if !strings.Contains(log, "<-- 200 OK") {
+		t.Errorf("debug log missing the response status line:\n%s", log)
+	}
+	if !strings.Contains(log, `body: {"nodes":[]}`) {
+		t.Errorf("debug log missing the response body:\n%s", log)
+	}
+}
+
+func TestURLFetchJobDebugDisabledByDefault(t *testing.T) {
+	job := &URLFetchJob{id: "nodebug", status: "running"}
+	if _, ok := job.httpTransport().(*debugRoundTripper); ok {
+		t.Fatal("expected a plain transport when debug mode was never enabled")
 	}
 }
 

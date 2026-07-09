@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,6 +53,15 @@ type URLFetchJob struct {
 
 	lastSampleAt    time.Time
 	lastSampleBytes int64
+
+	// Debug mode: when enabled, every HTTP request/response this job makes
+	// (URLs, headers, and small textual bodies) is appended to debugFile, a
+	// plain-text ".log" file dropped in the download's own destination
+	// directory - meant to be handed back for troubleshooting a share
+	// provider's API without having to reproduce the problem live.
+	debugMu   sync.Mutex
+	debugFile *os.File
+	debugPath string
 }
 
 // URLFetchJobView is the JSON-safe snapshot of a URLFetchJob.
@@ -109,7 +119,6 @@ func (j *URLFetchJob) addBytes(n int64) {
 
 func (j *URLFetchJob) finish(err error) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	j.finishedAt = time.Now()
 	j.speedBps = 0
 	if err != nil {
@@ -118,6 +127,108 @@ func (j *URLFetchJob) finish(err error) {
 	} else {
 		j.status = "done"
 	}
+	j.mu.Unlock()
+
+	j.debugMu.Lock()
+	if j.debugFile != nil {
+		j.debugFile.Close()
+		j.debugFile = nil
+	}
+	j.debugMu.Unlock()
+}
+
+// enableDebug turns on request/response logging for this job, writing to a
+// ".log" file in destDir (the same directory the download is being saved
+// into) named after the job's ID so concurrent jobs targeting the same
+// folder don't clobber each other's logs. Best-effort: a failure to create
+// the file just means debug logging silently stays off.
+func (j *URLFetchJob) enableDebug(destDir string) {
+	path := filepath.Join(destDir, "mutirec-fetch-debug-"+j.id+".log")
+	f, err := os.Create(path)
+	if err != nil {
+		j.logf("Debug mode requested but could not create %s: %s", path, err)
+		return
+	}
+	j.debugMu.Lock()
+	j.debugFile = f
+	j.debugPath = path
+	j.debugMu.Unlock()
+	j.logf("Debug mode on - logging every HTTP request/response to %s", path)
+}
+
+// debugf appends one line to the debug log, if enabled; a no-op otherwise.
+func (j *URLFetchJob) debugf(format string, args ...any) {
+	j.debugMu.Lock()
+	defer j.debugMu.Unlock()
+	if j.debugFile == nil {
+		return
+	}
+	fmt.Fprintf(j.debugFile, "[%s] "+format+"\n", append([]any{time.Now().Format("15:04:05.000")}, args...)...)
+}
+
+// httpTransport returns the base RoundTripper every HTTP client this job
+// creates should use - wrapped in a request/response logger when debug mode
+// is on, otherwise just the plain transport.
+func (j *URLFetchJob) httpTransport() http.RoundTripper {
+	base := &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
+	j.debugMu.Lock()
+	enabled := j.debugFile != nil
+	j.debugMu.Unlock()
+	if !enabled {
+		return base
+	}
+	return &debugRoundTripper{inner: base, job: j}
+}
+
+// debugBodyLogCap bounds how much of a textual response body gets copied
+// into the debug log - plenty for an API's JSON/HTML response, small enough
+// to never turn on a multi-gigabyte file download.
+const debugBodyLogCap = 16 * 1024
+
+// debugRoundTripper logs every request and response that passes through it
+// to its job's debug log file, then delegates to inner unchanged.
+type debugRoundTripper struct {
+	inner http.RoundTripper
+	job   *URLFetchJob
+}
+
+func (d *debugRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	d.job.debugf("--> %s %s", req.Method, req.URL.String())
+	for k, v := range req.Header {
+		if strings.EqualFold(k, "Authorization") {
+			d.job.debugf("    %s: [redacted]", k)
+			continue
+		}
+		d.job.debugf("    %s: %s", k, strings.Join(v, ", "))
+	}
+
+	resp, err := d.inner.RoundTrip(req)
+	if err != nil {
+		d.job.debugf("<-- error for %s %s: %s", req.Method, req.URL.String(), err)
+		return resp, err
+	}
+
+	d.job.debugf("<-- %s %s", resp.Status, req.URL.String())
+	for k, v := range resp.Header {
+		d.job.debugf("    %s: %s", k, strings.Join(v, ", "))
+	}
+	if isTextualContentType(resp.Header.Get("Content-Type")) {
+		head, _ := io.ReadAll(io.LimitReader(resp.Body, debugBodyLogCap))
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(head), resp.Body), resp.Body}
+		d.job.debugf("    body: %s", string(head))
+	}
+	return resp, nil
+}
+
+// isTextualContentType reports whether a response's Content-Type is worth
+// copying into the debug log (JSON/HTML/XML/plain text), as opposed to a
+// media file that would be pointlessly slow and huge to log.
+func isTextualContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	return strings.HasPrefix(ct, "text/") || strings.Contains(ct, "json") || strings.Contains(ct, "xml")
 }
 
 func (a *App) putFetchJob(job *URLFetchJob) {
@@ -196,6 +307,7 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 		URL      string `json:"url"`
 		Password string `json:"password"`
 		Path     string `json:"path"`
+		Debug    bool   `json:"debug"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -215,6 +327,9 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &URLFetchJob{id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now()}
+	if req.Debug {
+		job.enableDebug(destDir)
+	}
 	a.putFetchJob(job)
 	a.event("info", "Started URL fetch job "+job.id+" for "+req.URL)
 	go a.runURLFetchJob(job, req.URL, req.Password, destDir, root)
@@ -223,9 +338,7 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 
 // runURLFetchJob is the background worker started by handleExplorerFetchURL.
 func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root string) {
-	client := &http.Client{Transport: &http.Transport{
-		ResponseHeaderTimeout: responseHeaderTimeout,
-	}}
+	client := &http.Client{Transport: job.httpTransport()}
 
 	// A Stack (stackstorage) share URL that already names a specific folder
 	// (.../s/<token>/<locale>/files/<nodeID>) is unambiguous - go straight to
@@ -508,7 +621,7 @@ func downloadStackFile(client *http.Client, base, token, csrfToken string, node 
 // named by startNodeID) into destDir, mirroring its folder structure.
 func (a *App) runStackShareDownload(job *URLFetchJob, scheme, host, token, startNodeID, destDir, root string) {
 	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar, Transport: &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}}
+	client := &http.Client{Jar: jar, Transport: job.httpTransport()}
 	base := scheme + "://" + host
 
 	job.logf("Detected a Stack share (token %s) - using the Stack API to list and fetch files", token)
