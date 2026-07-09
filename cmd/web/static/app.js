@@ -1368,6 +1368,7 @@ function setupWatchPlayerControls(player) {
   };
   player.on('loadedmetadata', updateVisualizerVisibility);
   vizToggle.addEventListener('change', () => { if (!vizToggle.disabled) updateVisualizerVisibility(); });
+  populateVisualizerPresetSelect('watch-visualizer');
   $('watch-visualizer-next').addEventListener('click', () => nextVisualizerPreset('watch-visualizer', true));
 }
 
@@ -3397,6 +3398,7 @@ function setupCustomPlayerControls(player) {
 
   speed.addEventListener('change', () => { player.playbackRate(parseFloat(speed.value)); });
 
+  populateVisualizerPresetSelect('cp-visualizer');
   $('cp-visualizer-next').addEventListener('click', () => nextVisualizerPreset('cp-visualizer', true));
 
   setupPiP($('cp-pip'), () => techVideoEl(player));
@@ -3496,14 +3498,73 @@ function resizeVizCanvas(canvas, butterchurnViz) {
   if (butterchurnViz) butterchurnViz.setRendererSize(w, h);
 }
 
-function nextVisualizerPreset(canvasId, random) {
-  const inst = vizInstances[canvasId || 'cp-visualizer'];
+// The bars fallback gets its own canvas (see index.html: `${canvasId}-bars`)
+// rather than reusing the MilkDrop one - a canvas permanently locks to
+// whichever context type ('webgl2' vs '2d') is first *successfully* created
+// on it, so switching between MilkDrop and bars at runtime (not just once at
+// startup as a failure fallback) requires two separate elements toggled by
+// visibility rather than one canvas juggling two context types.
+function barsCanvasId(canvasId) { return canvasId + '-bars'; }
+
+// value is either '__bars__' or a MilkDrop preset name from vizPresets().
+function setVisualizerPreset(canvasId, value) {
+  canvasId = canvasId || 'cp-visualizer';
+  const inst = vizInstances[canvasId];
+  if (!inst) return;
+  if (value === '__bars__') {
+    inst.mode = 'bars';
+    renderVisualizer(canvasId);
+    return;
+  }
   const presets = vizPresets();
-  if (!inst || !inst.butterchurn || !presets.length) return;
+  const idx = presets.findIndex(p => p.name === value);
+  if (idx < 0) return;
+  inst.presetIndex = idx;
+  if (inst.mode === 'milkdrop' && inst.butterchurn) {
+    inst.butterchurn.loadPreset(presets[idx].preset, 1.5);
+    return;
+  }
+  inst.mode = 'milkdrop';
+  renderVisualizer(canvasId);
+}
+
+function nextVisualizerPreset(canvasId, random) {
+  canvasId = canvasId || 'cp-visualizer';
+  const inst = vizInstances[canvasId];
+  const presets = vizPresets();
+  if (!inst || !presets.length) return;
+  if (inst.mode !== 'milkdrop' || !inst.butterchurn) return;
   inst.presetIndex = random
     ? Math.floor(Math.random() * presets.length)
     : (inst.presetIndex + 1) % presets.length;
   inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 1.5);
+  syncVisualizerPresetSelect(canvasId);
+}
+
+// Reflects an instance's current mode/preset (changed via the "Random
+// preset" button, or on first auto-start) back into its <select> so the
+// dropdown never silently goes stale relative to what's actually rendering.
+function syncVisualizerPresetSelect(canvasId) {
+  const inst = vizInstances[canvasId];
+  if (!inst) return;
+  const value = inst.mode === 'milkdrop' && inst.presetIndex >= 0
+    ? (vizPresets()[inst.presetIndex] || {}).name
+    : '__bars__';
+  if (value !== undefined) setDropdownValue(canvasId + '-preset', value);
+}
+
+// Populates the "$canvasId-preset" custom-dropdown with a "Simple Bars"
+// option plus every MilkDrop preset name, once per canvas. If MilkDrop
+// isn't available at all (no WebGL2/butterchurn failed to load), only
+// "Simple Bars" is offered.
+function populateVisualizerPresetSelect(canvasId) {
+  const id = canvasId + '-preset';
+  if (!$(id + '-dropdown')) return;
+  const presets = window.butterchurn ? vizPresets() : [];
+  const options = [{ value: '__bars__', label: 'Simple Bars' }]
+    .concat(presets.map(p => ({ value: p.name, label: p.name, group: 'MilkDrop' })));
+  setDropdownOptions(id, options, { value: '__bars__', placeholder: 'Simple Bars' });
+  $(id).addEventListener('change', () => setVisualizerPreset(canvasId, $(id).value));
 }
 
 function startVisualizer(videoEl, canvasId) {
@@ -3511,36 +3572,44 @@ function startVisualizer(videoEl, canvasId) {
   const inst = ensureVizGraph(videoEl, canvasId);
   if (!inst) return;
   if (inst.audioCtx.state === 'suspended') inst.audioCtx.resume().catch(() => {});
-  const canvas = $(canvasId);
+  if (!inst.mode) inst.mode = window.butterchurn ? 'milkdrop' : 'bars';
+  renderVisualizer(canvasId);
+}
+
+function renderVisualizer(canvasId) {
+  const inst = vizInstances[canvasId];
+  if (!inst) return;
   if (inst.raf) cancelAnimationFrame(inst.raf);
+  const mdCanvas = $(canvasId);
+  const barsCanvas = $(barsCanvasId(canvasId)) || mdCanvas;
 
-  // Deliberately don't pre-probe WebGL2 support with our own getContext()
-  // call: a canvas permanently locks to whichever context type is first
-  // *successfully* created, so if butterchurn.createVisualizer below fails
-  // (or is never attempted) the 2D fallback path still needs a virgin
-  // canvas to call getContext('2d') on.
-  if (window.butterchurn && !inst.butterchurn) {
-    try {
-      canvas.width = canvas.clientWidth;
-      canvas.height = canvas.clientHeight;
-      const Butterchurn = typeof window.butterchurn.createVisualizer === 'function' ? window.butterchurn : window.butterchurn.default;
-      inst.butterchurn = Butterchurn.createVisualizer(inst.audioCtx, canvas, {
-        width: canvas.width, height: canvas.height,
-      });
-      inst.butterchurn.connectAudio(inst.source);
-      const presets = vizPresets();
-      if (presets.length) {
-        inst.presetIndex = Math.floor(Math.random() * presets.length);
-        inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 0);
+  if (inst.mode === 'milkdrop' && window.butterchurn) {
+    if (barsCanvas !== mdCanvas) barsCanvas.classList.add('hidden');
+    if (mdCanvas) mdCanvas.classList.remove('hidden');
+    if (!inst.butterchurn) {
+      try {
+        mdCanvas.width = mdCanvas.clientWidth;
+        mdCanvas.height = mdCanvas.clientHeight;
+        const Butterchurn = typeof window.butterchurn.createVisualizer === 'function' ? window.butterchurn : window.butterchurn.default;
+        inst.butterchurn = Butterchurn.createVisualizer(inst.audioCtx, mdCanvas, {
+          width: mdCanvas.width, height: mdCanvas.height,
+        });
+        inst.butterchurn.connectAudio(inst.source);
+        const presets = vizPresets();
+        if (presets.length) {
+          if (inst.presetIndex < 0) inst.presetIndex = Math.floor(Math.random() * presets.length);
+          inst.butterchurn.loadPreset(presets[inst.presetIndex].preset, 0);
+        }
+        inst.resizeObserver = new ResizeObserver(() => resizeVizCanvas(mdCanvas, inst.butterchurn));
+        inst.resizeObserver.observe(mdCanvas);
+      } catch {
+        inst.butterchurn = null;
+        inst.mode = 'bars';
+        renderVisualizer(canvasId);
+        return;
       }
-      inst.resizeObserver = new ResizeObserver(() => resizeVizCanvas(canvas, inst.butterchurn));
-      inst.resizeObserver.observe(canvas);
-    } catch {
-      inst.butterchurn = null;
     }
-  }
-
-  if (inst.butterchurn) {
+    syncVisualizerPresetSelect(canvasId);
     const draw = () => {
       inst.raf = requestAnimationFrame(draw);
       inst.butterchurn.render();
@@ -3549,19 +3618,23 @@ function startVisualizer(videoEl, canvasId) {
     return;
   }
 
-  // Fallback: plain frequency-bar spectrum on a 2D canvas.
+  // Bars mode: plain frequency-bar spectrum on a 2D canvas.
+  inst.mode = 'bars';
+  if (mdCanvas && mdCanvas !== barsCanvas) mdCanvas.classList.add('hidden');
+  barsCanvas.classList.remove('hidden');
   if (!inst.analyser) {
     inst.analyser = inst.audioCtx.createAnalyser();
     inst.analyser.fftSize = 128;
     inst.data = new Uint8Array(inst.analyser.frequencyBinCount);
     inst.source.connect(inst.analyser);
   }
-  const ctx2d = canvas.getContext('2d');
+  syncVisualizerPresetSelect(canvasId);
+  const ctx2d = barsCanvas.getContext('2d');
   const draw = () => {
     inst.raf = requestAnimationFrame(draw);
-    const w = canvas.clientWidth, h = canvas.clientHeight;
-    if (canvas.width !== w) canvas.width = w;
-    if (canvas.height !== h) canvas.height = h;
+    const w = barsCanvas.clientWidth, h = barsCanvas.clientHeight;
+    if (barsCanvas.width !== w) barsCanvas.width = w;
+    if (barsCanvas.height !== h) barsCanvas.height = h;
     inst.analyser.getByteFrequencyData(inst.data);
     ctx2d.clearRect(0, 0, w, h);
     const accent = accents[config.ui.accent] || accents.red;
@@ -3585,10 +3658,10 @@ function stopVisualizer(canvasId) {
   if (inst && inst.raf) cancelAnimationFrame(inst.raf);
   if (inst) inst.raf = null;
   if (inst && inst.resizeObserver) { inst.resizeObserver.disconnect(); inst.resizeObserver = null; }
-  const canvas = $(canvasId);
-  if (canvas && !(inst && inst.butterchurn)) {
-    const ctx2d = canvas.getContext('2d');
-    if (ctx2d) ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+  const barsCanvas = $(barsCanvasId(canvasId));
+  if (barsCanvas && !(inst && inst.butterchurn)) {
+    const ctx2d = barsCanvas.getContext('2d');
+    if (ctx2d) ctx2d.clearRect(0, 0, barsCanvas.width, barsCanvas.height);
   }
 }
 
