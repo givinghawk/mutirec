@@ -2125,11 +2125,23 @@ async function toggleFavorite(id) {
 
 // --- timetable.lol integration (optional) ---
 
+// lolEventDateLabel prefers a real date (normalized server-side into
+// displayStartDate/displayEndDate, whatever field name timetable.lol
+// actually used) over just the year, so events from the same festival
+// franchise in different years - or on different days within one edition -
+// are distinguishable in the picker.
+function lolEventDateLabel(e) {
+  if (e.displayStartDate) {
+    return e.displayEndDate && e.displayEndDate !== e.displayStartDate ? `${e.displayStartDate} – ${e.displayEndDate}` : e.displayStartDate;
+  }
+  return e.year ? String(e.year) : '';
+}
+
 async function loadLolEvents() {
   try {
     const result = await api('/api/timetable/lol-events');
     lolEvents = result.events || [];
-    const options = lolEvents.map(e => ({ value: e.slug, label: `${e.title || e.slug}${e.year ? ' (' + e.year + ')' : ''}` }));
+    const options = lolEvents.map(e => ({ value: e.slug, label: `${e.title || e.slug}${lolEventDateLabel(e) ? ' (' + lolEventDateLabel(e) + ')' : ''}` }));
     setDropdownOptions('tt-lol-event', options, { value: options.length ? options[0].value : '', placeholder: 'No events found' });
     $('tt-lol-status').textContent = `${lolEvents.length} events available from timetable.lol.`;
   } catch {

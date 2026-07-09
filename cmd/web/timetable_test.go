@@ -220,6 +220,26 @@ func TestHandleTimetableSavedItemActivateAndDelete(t *testing.T) {
 	}
 }
 
+// TestFirstStringField confirms it tries keys in order and skips
+// non-string/empty values, since timetable.lol's event list is passed
+// through as an untyped map[string]any and we don't control its schema.
+func TestFirstStringField(t *testing.T) {
+	m := map[string]any{
+		"date":      "",
+		"startDate": "2026-06-25",
+		"eventDate": 12345, // wrong type, must be skipped
+	}
+	if got := firstStringField(m, "startDate", "date", "eventDate"); got != "2026-06-25" {
+		t.Errorf("got %q, want %q", got, "2026-06-25")
+	}
+	if got := firstStringField(m, "date", "eventDate"); got != "" {
+		t.Errorf("expected empty when only empty/wrong-typed candidates remain, got %q", got)
+	}
+	if got := firstStringField(m, "missing"); got != "" {
+		t.Errorf("expected empty for a missing key, got %q", got)
+	}
+}
+
 // TestParseStageTimetableJSONHourOverflow confirms the compact-format parser
 // normalizes an out-of-range hour (the "25:00" after-midnight convention)
 // into a valid next-day instant rather than emitting an unparseable string.

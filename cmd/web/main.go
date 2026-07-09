@@ -3253,7 +3253,31 @@ func (a *App) handleTimetableLolEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not parse timetable.lol response", http.StatusBadGateway)
 		return
 	}
+	for _, e := range payload.Events {
+		if d := firstStringField(e, "startDate", "start_date", "date", "dates", "eventDate", "start"); d != "" {
+			e["displayStartDate"] = d
+		}
+		if d := firstStringField(e, "endDate", "end_date", "end"); d != "" {
+			e["displayEndDate"] = d
+		}
+	}
 	writeJSON(w, map[string]any{"events": payload.Events, "attribution": "Timetable data provided by timetable.lol (https://timetable.lol)"})
+}
+
+// firstStringField returns the first non-empty string value found in m under
+// any of keys, tried in order - used to normalize timetable.lol's event list
+// (an opaquely passed-through map[string]any, since its exact field names
+// aren't part of any contract with us) into one canonical field the
+// frontend can rely on regardless of which name timetable.lol actually uses.
+func firstStringField(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // handleTimetableLolImport fetches one event's schedule from timetable.lol
