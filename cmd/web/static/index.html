@@ -100,7 +100,8 @@
               <label class="flex items-center gap-2 text-sm text-zinc-300" title="MilkDrop-style music visualizer (Butterchurn)">
                 <input id="watch-visualizer-toggle" type="checkbox" class="accent-red-500" checked> Visualizer
               </label>
-              <button type="button" id="watch-visualizer-next" class="btn" title="Next visualizer preset">Next preset</button>
+              <div class="custom-dropdown" id="watch-visualizer-preset-dropdown" style="min-width:200px"></div>
+              <button type="button" id="watch-visualizer-next" class="btn" title="Random MilkDrop preset">Random preset</button>
             </div>
           </div>
           <div id="watch-player-status" class="mb-2 hidden text-xs text-emerald-300"></div>
@@ -109,6 +110,7 @@
             <div class="custom-player-overlay-btn hidden" id="watch-center-play" aria-label="Play">&#9658;</div>
             <div id="watch-audio-stage" class="custom-player-audio-stage hidden">
               <canvas id="watch-visualizer" class="cp-visualizer"></canvas>
+              <canvas id="watch-visualizer-bars" class="cp-visualizer hidden"></canvas>
             </div>
             <div class="custom-player-controls">
               <button type="button" id="watch-playpause" class="cp-btn cp-playpause" aria-label="Play/Pause">&#9658;</button>
@@ -331,7 +333,11 @@
                 <div class="custom-player-overlay-btn hidden" id="cp-center-play" aria-label="Play">&#9658;</div>
                 <div id="cp-audio-stage" class="custom-player-audio-stage hidden">
                   <canvas id="cp-visualizer" class="cp-visualizer"></canvas>
-                  <button type="button" id="cp-visualizer-next" class="btn cp-visualizer-next-btn" title="Next visualizer preset">Next preset</button>
+                  <canvas id="cp-visualizer-bars" class="cp-visualizer hidden"></canvas>
+                  <div class="cp-visualizer-controls">
+                    <div class="custom-dropdown" id="cp-visualizer-preset-dropdown" style="min-width:200px"></div>
+                    <button type="button" id="cp-visualizer-next" class="btn" title="Random MilkDrop preset">Random preset</button>
+                  </div>
                   <div id="cp-wave" class="cp-wave"></div>
                 </div>
                 <div class="custom-player-controls">

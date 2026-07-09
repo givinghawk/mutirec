@@ -480,8 +480,8 @@ label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 
 .cp-visualizer { display: block; width: 100%; height: 260px; }
 .cp-wave { padding: 6px 14px 10px; }
 .cp-wave:empty { min-height: 56px; }
-.cp-visualizer-next-btn { position: absolute; top: 10px; right: 14px; opacity: .75; }
-.cp-visualizer-next-btn:hover { opacity: 1; }
+.cp-visualizer-controls { position: absolute; top: 10px; right: 14px; display: flex; align-items: center; gap: 8px; opacity: .75; }
+.cp-visualizer-controls:hover, .cp-visualizer-controls:focus-within { opacity: 1; }
 
 /* ---- watch tab ----------------------------------------------------------- */
 
