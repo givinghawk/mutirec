@@ -593,6 +593,23 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
         </div>
       </div>
 
+      <!-- Match file import review: shows what a match file would change before applying it -->
+      <div id="matchfile-review-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel" style="max-width:620px">
+          <div class="panel-head">
+            <h2>Review match file import</h2>
+            <button type="button" id="matchfile-review-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p id="matchfile-review-summary" class="mb-2 text-sm text-zinc-400"></p>
+          <p id="matchfile-review-dupes" class="mb-2 hidden text-sm text-amber-300"></p>
+          <div id="matchfile-review-list" class="mb-3 max-h-72 space-y-1 overflow-y-auto"></div>
+          <div class="flex justify-end gap-2">
+            <button type="button" class="btn" id="matchfile-review-cancel">Cancel</button>
+            <button type="button" class="btn primary" id="matchfile-review-apply">Apply</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Event create/edit modal -->
       <div id="event-editor-overlay" class="modal-overlay hidden">
         <div class="modal-panel panel">

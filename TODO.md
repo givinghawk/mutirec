@@ -1087,7 +1087,50 @@
   not the timetable's total stage count. Verified in a real browser: exactly
   4 stages-with-sets renders `.tt-cols`, a 5th flips it back to `.tt-row`.
 
-## Done (this session, part 14) - YouTube auto-upload, Stack share fix, Watch tab source filter
+## Done (this session, part 14) - Loose ends + small UI freshen
+
+- **Matchfile import review step + duplicate-hash handling** (`main.go`,
+  `matchfile_test.go`, `index.html`, `app.js`) - closes both former
+  "Matchfile follow-ups" backlog items:
+  - `POST /api/recordings/matchfile/import?dryRun=1` computes the exact match
+    list (path + event/festival/stage/artist per file, via a new
+    `matchfilePreviewItem` DTO) without applying anything; the response now
+    always includes that `matches` list plus a `duplicates` count either way.
+  - The frontend's Import Match File flow is now two-step: dry run first,
+    then a review modal (`#matchfile-review-overlay`) listing every local
+    recording that matched and what it would be organized as, with an
+    explicit Apply/Cancel - nothing changes until Apply. A "no matches" file
+    still short-circuits to the old toast.
+  - Duplicate hashes in one import file: the **first** entry now wins
+    (previously whichever came last silently won), an identical repeat isn't
+    counted, and a *conflicting* repeat is surfaced in the review modal as an
+    amber warning with the count.
+  - Covered by `matchfile_test.go` (dry run applies/persists nothing but
+    previews correctly, real import applies + creates the named
+    LibraryEvent, first-entry-wins + conflict counting) and verified
+    end-to-end in a real browser (Playwright: modal contents, cancel-then-
+    apply, `/api/config` before/after each step).
+- **Events/Organisations reachable from the Sources tab** (former backlog
+  item 1): the source editor's Event dropdown gained a "Manage Events &
+  Organisations…" action option (same `dropdownActions` mechanism as
+  "+ New Event…") that jumps to the Events tab via `goToView('events-tab')`,
+  so full Festival/Organisation management is one click away while setting
+  up a source instead of requiring a manual tab hunt.
+- **UI freshen** (`app.css`):
+  - `.toast-warn` was used by `toast(..., 'warn')` call sites but had no
+    styling at all (fell back to the default grey edge) - now amber, matching
+    the reconnecting/warn palette.
+  - Native `<select class="input">` elements (Mass Transcode options, Set
+    Cutter's Whisper language) kept the UA default arrow and white dropdown
+    list on a dark theme - now styled like every other input with a custom
+    SVG chevron (`appearance: none`) and dark `option` backgrounds.
+    `.input:focus` switched from the `background` shorthand to
+    `background-color` so focusing a select doesn't wipe its chevron image.
+  - `<details>/<summary>` disclosure panels ("Advanced options" in the Set
+    Cutter) get a rotating ▸ marker and hover state instead of the browser
+    default triangle; `::selection` tinted with the accent colour.
+
+## Done (this session, part 15) - YouTube auto-upload, Stack share fix, Watch tab source filter
 - **YouTube auto-upload** (`youtube.go`, new file): finished recordings can now auto-upload to
   YouTube as private/unlisted/public (default unlisted). `Settings.YouTube` (`YouTubeConfig`:
   enabled/clientId/clientSecret/refreshToken) holds a pasted-in long-lived OAuth2 refresh token
@@ -1123,21 +1166,7 @@
 
 ## Remaining (in suggested order)
 
-### 1. Organisation linking from the Sources tab
-- The Organisation editor is currently only reachable via the Events tab grid headers.
-  Should also be reachable from the Sources tab's Festival picker (e.g. an inline "manage
-  organisations" link), so users don't have to switch tabs to set this up while adding a
-  new live source.
-
-### 2. Matchfile follow-ups (optional, not blocking)
-- Import currently only matches on exact hash; consider a summary/preview step (like Smart
-  Match's review list) before applying, so users can see what's about to change rather than
-  it applying silently.
-- No dedupe/merge if the same hash appears twice in one import file with different metadata
-  — last one in the array wins. Unlikely in practice (a well-formed export has one entry per
-  hash) but worth a defensive check if this becomes user-facing/shared widely.
-
-### 3. Smart Match follow-ups (optional, not blocking)
+### 1. Smart Match follow-ups (optional, not blocking)
 - The festival/edition-name/genre tail of filenames like "..._Neonbeat_Prime_Directive_HardDance"
   (festival name + that edition's theme name + genre) is intentionally not parsed at all -
   the channel, date, and artist-name signals already fully disambiguate which set a
