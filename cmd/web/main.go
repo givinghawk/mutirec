@@ -1701,6 +1701,16 @@ func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Req
 	writeJSON(w, out)
 }
 
+// matchfilePreviewItem is one row of the import preview: which local file
+// would be organized, and with what metadata.
+type matchfilePreviewItem struct {
+	Path         string `json:"path"`
+	EventName    string `json:"eventName,omitempty"`
+	FestivalName string `json:"festivalName,omitempty"`
+	StageName    string `json:"stageName,omitempty"`
+	Artist       string `json:"artist,omitempty"`
+}
+
 // handleRecordingsMatchfileImport hashes every not-yet-organized local
 // recording and, on an exact hash match against the imported list, applies
 // that entry's metadata - resolving (or creating) a local LibraryEvent/
@@ -1708,21 +1718,36 @@ func (a *App) handleRecordingsMatchfileExport(w http.ResponseWriter, r *http.Req
 // The imported SetID is deliberately dropped: it points at a timetable set
 // in the exporter's own LibraryEvent, which won't exist locally unless that
 // archived timetable was also imported separately.
+//
+// ?dryRun=1 computes the same match list without applying anything, so the
+// client can show a review step before changing metadata. A hash appearing
+// more than once in the import file keeps its first entry (reported via
+// "duplicates" when the copies disagree) rather than letting whichever
+// happens to come last silently win.
 func (a *App) handleRecordingsMatchfileImport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	dryRun := r.URL.Query().Get("dryRun") != ""
 	var entries []MatchFileEntry
 	if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	byHash := make(map[string]MatchFileEntry, len(entries))
+	duplicates := 0
 	for _, e := range entries {
-		if e.Hash != "" {
-			byHash[e.Hash] = e
+		if e.Hash == "" {
+			continue
 		}
+		if first, seen := byHash[e.Hash]; seen {
+			if first != e {
+				duplicates++
+			}
+			continue
+		}
+		byHash[e.Hash] = e
 	}
 
 	cfg := a.snapshotConfig()
@@ -1758,29 +1783,47 @@ func (a *App) handleRecordingsMatchfileImport(w http.ResponseWriter, r *http.Req
 		return nil
 	})
 
-	a.mu.Lock()
-	if a.cfg.RecordingMeta == nil {
-		a.cfg.RecordingMeta = map[string]RecordingMeta{}
-	}
+	preview := make([]matchfilePreviewItem, 0, len(matched))
 	for _, m := range matched {
-		eventID := ""
-		if m.entry.EventName != "" {
-			eventID = a.resolveOrCreateLibraryEventLocked(m.entry.EventName, m.entry.FestivalName)
+		preview = append(preview, matchfilePreviewItem{
+			Path:         m.path,
+			EventName:    m.entry.EventName,
+			FestivalName: m.entry.FestivalName,
+			StageName:    m.entry.StageName,
+			Artist:       m.entry.Artist,
+		})
+	}
+
+	if !dryRun {
+		a.mu.Lock()
+		if a.cfg.RecordingMeta == nil {
+			a.cfg.RecordingMeta = map[string]RecordingMeta{}
 		}
-		a.cfg.RecordingMeta[m.path] = RecordingMeta{
-			EventID: eventID,
-			Channel: m.entry.StageName,
-			Artist:  m.entry.Artist,
-			Start:   m.entry.Start,
-			End:     m.entry.End,
+		for _, m := range matched {
+			eventID := ""
+			if m.entry.EventName != "" {
+				eventID = a.resolveOrCreateLibraryEventLocked(m.entry.EventName, m.entry.FestivalName)
+			}
+			a.cfg.RecordingMeta[m.path] = RecordingMeta{
+				EventID: eventID,
+				Channel: m.entry.StageName,
+				Artist:  m.entry.Artist,
+				Start:   m.entry.Start,
+				End:     m.entry.End,
+			}
+		}
+		newCfg := a.cfg
+		a.mu.Unlock()
+		if len(matched) > 0 {
+			_ = a.persist(newCfg)
 		}
 	}
-	newCfg := a.cfg
-	a.mu.Unlock()
-	if len(matched) > 0 {
-		_ = a.persist(newCfg)
-	}
-	writeJSON(w, map[string]int{"matched": len(matched)})
+	writeJSON(w, map[string]any{
+		"matched":    len(matched),
+		"duplicates": duplicates,
+		"dryRun":     dryRun,
+		"matches":    preview,
+	})
 }
 
 // resolveOrCreateLibraryEventLocked finds a LibraryEvent by name, creating it

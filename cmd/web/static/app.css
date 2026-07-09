@@ -60,6 +60,15 @@ a { color: color-mix(in srgb, var(--accent) 55%, #9ee6f2); text-decoration: none
 a:hover { color: color-mix(in srgb, var(--accent) 40%, #cdf3f8); }
 code { color: #fda4af; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: .92em; }
 
+::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+
+/* Advanced-options disclosure panels (Set Cutter, etc.). */
+details > summary { list-style: none; user-select: none; transition: color .15s var(--ease); }
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸"; display: inline-block; margin-right: 6px; font-size: 11px; transition: transform .18s var(--ease); }
+details[open] > summary::before { transform: rotate(90deg); }
+details > summary:hover { color: var(--text); }
+
 *:focus { outline: none; }
 :focus-visible {
   outline: none;
@@ -202,11 +211,27 @@ code { color: #fda4af; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco,
 .input:focus, .codebox:focus {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   box-shadow: var(--ring);
-  background: rgb(0 0 0 / .34);
+  /* background-color, not the shorthand: select.input carries its chevron as
+     a background-image, which the shorthand would wipe on focus. */
+  background-color: rgb(0 0 0 / .34);
 }
 .input::placeholder { color: var(--text-dim); }
 .codebox { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.5; }
 label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 500; }
+
+/* Native <select>s (Mass Transcode options, Whisper language) get the same
+   treatment as .input plus a custom chevron - the UA default arrow and white
+   option list clash badly with the dark theme. */
+select.input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a1a1aa' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 11px center;
+  padding-right: 30px;
+  cursor: pointer;
+}
+select.input option { background: #18181b; color: var(--text); }
 
 /* ---- source cards (dashboard) ------------------------------------------- */
 
@@ -272,7 +297,20 @@ label { display: block; color: var(--text-muted); font-size: 13px; font-weight: 
 }
 .toast-error { border-left-color: #ef4444; color: #fecaca; }
 .toast-info { border-left-color: #10b981; color: #d1fae5; }
+.toast-warn { border-left-color: #f59e0b; color: #fde68a; }
 .toast-out { opacity: 0; transform: translateX(20px); }
+
+/* ---- match file import review -------------------------------------------- */
+
+.matchfile-review-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+.matchfile-review-path { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.matchfile-review-target { color: var(--text-muted); margin-top: 2px; }
 
 /* ---- empty states / loading --------------------------------------------- */
 

@@ -646,6 +646,7 @@ function drawSourceEditor() {
                 <div class="dropdown-option" data-value=""><div class="font-semibold">None</div></div>
                 ${(config.festivals || []).map(f => `<div class="dropdown-option" data-value="${escapeAttr(f.id)}"><div class="font-semibold">${escapeHtml(f.name)}</div></div>`).join('')}
                 <div class="dropdown-option" data-action="new-festival"><div class="font-semibold">+ New Event…</div></div>
+                <div class="dropdown-option" data-action="manage-events"><div class="font-semibold">Manage Events &amp; Organisations…</div><div class="text-xs text-zinc-400">Opens the Events tab</div></div>
               </div>
               <input type="hidden" class="src-festival" value="${escapeAttr(s.festivalId || '')}">
             </div>
@@ -725,6 +726,10 @@ function sourceCardEl(i) { return document.querySelector(`.source-row[data-sourc
 let festivalEditorTargetRowId = null; // stable source id, since refresh() replaces the row's DOM entirely
 
 dropdownActions['new-festival'] = (dropdown) => openFestivalEditor(dropdown);
+// Jump to the Events tab (full Festival/Organisation management) without
+// making the user hunt for it while they're mid-way through setting up a
+// source - the quick-create modal above only covers name+color.
+dropdownActions['manage-events'] = () => goToView('events-tab');
 
 function openFestivalEditor(dropdown) {
   // Captured now, before any refresh() can replace the row's DOM (which
@@ -2256,6 +2261,12 @@ $('lib-matchfile-export').onclick = async () => {
   toast(`Exported ${entries.length} recording${entries.length === 1 ? '' : 's'}`, 'info');
 };
 
+// Import is a two-step flow: a dry run first (so the user can review exactly
+// which local recordings would be organized, and as what), then the real
+// apply only after confirmation. `matchfilePendingEntries` holds the parsed
+// file between the two requests.
+let matchfilePendingEntries = null;
+
 $('lib-matchfile-import').onclick = () => $('lib-matchfile-input').click();
 $('lib-matchfile-input').addEventListener('change', async () => {
   const file = $('lib-matchfile-input').files[0];
@@ -2274,13 +2285,51 @@ $('lib-matchfile-input').addEventListener('change', async () => {
   }
   let result;
   try {
+    result = await api('/api/recordings/matchfile/import?dryRun=1', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
+  } catch {
+    return;
+  }
+  if (!result.matched) {
+    toast('No local recordings matched this file', 'warn');
+    return;
+  }
+  matchfilePendingEntries = entries;
+  $('matchfile-review-summary').textContent = `${result.matched} local recording${result.matched === 1 ? '' : 's'} matched this file and will be organized as follows:`;
+  const dupes = $('matchfile-review-dupes');
+  if (result.duplicates) {
+    dupes.textContent = `${result.duplicates} entr${result.duplicates === 1 ? 'y' : 'ies'} in the file repeat${result.duplicates === 1 ? 's' : ''} an already-listed recording with different metadata - the first entry wins.`;
+    dupes.classList.remove('hidden');
+  } else {
+    dupes.classList.add('hidden');
+  }
+  $('matchfile-review-list').innerHTML = (result.matches || []).map(m => {
+    const target = [m.eventName, m.stageName, m.artist].filter(Boolean).join(' · ') || 'metadata only';
+    return `<div class="matchfile-review-row"><div class="matchfile-review-path">${escapeHtml(m.path)}</div><div class="matchfile-review-target">→ ${escapeHtml(target)}</div></div>`;
+  }).join('');
+  $('matchfile-review-overlay').classList.remove('hidden');
+});
+
+function closeMatchfileReview() {
+  $('matchfile-review-overlay').classList.add('hidden');
+  matchfilePendingEntries = null;
+}
+$('matchfile-review-close').onclick = closeMatchfileReview;
+$('matchfile-review-cancel').onclick = closeMatchfileReview;
+$('matchfile-review-overlay').addEventListener('click', (e) => { if (e.target.id === 'matchfile-review-overlay') closeMatchfileReview(); });
+
+$('matchfile-review-apply').onclick = async () => {
+  const entries = matchfilePendingEntries;
+  if (!entries) return;
+  let result;
+  try {
     result = await api('/api/recordings/matchfile/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
   } catch {
     return;
   }
+  closeMatchfileReview();
   toast(result.matched ? `Matched and organized ${result.matched} recording${result.matched === 1 ? '' : 's'}` : 'No local recordings matched this file', result.matched ? 'info' : 'warn');
   await reloadLibraryData();
-});
+};
 
 // --- Peer-to-peer sharing (sender side): pick sets, generate a share code ---
 
