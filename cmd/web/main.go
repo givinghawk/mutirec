@@ -143,6 +143,17 @@ type Settings struct {
 	Sharing                 SharingConfig      `json:"sharing"`
 	FileExplorerRoot        string             `json:"fileExplorerRoot,omitempty"`
 	YouTube                 YouTubeConfig      `json:"youtube"`
+	TranscodePresets        []TranscodePreset  `json:"transcodePresets,omitempty"`
+	TranscodeRules          []TranscodeRule    `json:"transcodeRules,omitempty"`
+	Downloads               DownloadsConfig    `json:"downloads"`
+}
+
+// DownloadsConfig controls the shared worker pool that Fetch-from-URL and
+// YouTube-download jobs are queued through (see enqueueDownload in
+// downloadqueue.go) - extra downloads beyond MaxConcurrent sit in "queued"
+// status until a slot frees up, rather than all running at once.
+type DownloadsConfig struct {
+	MaxConcurrent int `json:"maxConcurrent"`
 }
 
 // YouTubeConfig holds this instance's YouTube Data API v3 credentials,
@@ -186,6 +197,24 @@ type BackupConfig struct {
 	RcloneRemote  string   `json:"rcloneRemote"`
 	RcloneArgs    []string `json:"rcloneArgs"`
 	AfterComplete bool     `json:"afterComplete"`
+
+	// Method picks which backup mechanism a.backup() uses: "rclone" (the
+	// original, default when empty) shells out to the rclone binary above;
+	// "webdav" instead PUTs the file directly to WebDAV, for a plain WebDAV
+	// server with no rclone remote configured for it.
+	Method string       `json:"method,omitempty"`
+	WebDAV WebDAVBackup `json:"webdav,omitempty"`
+}
+
+// WebDAVBackup holds the destination and credentials for BackupConfig's
+// "webdav" method - a finished recording is PUT to WebDAVBackup.URL plus its
+// path relative to FinishedDir, creating any intermediate WebDAV
+// collections (MKCOL) that don't already exist.
+type WebDAVBackup struct {
+	URL      string `json:"url"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+	Proxy    bool   `json:"proxy,omitempty"` // route through Settings.Sharing.ProxyURL
 }
 
 type Notifications struct {
@@ -492,6 +521,17 @@ type App struct {
 	detectJobsMu sync.Mutex
 	detectJobs   map[string]*DetectJob
 
+	ytJobsMu sync.Mutex
+	ytJobs   map[string]*YouTubeDownloadJob
+
+	// downloadQueue is a shared worker pool that both Fetch-from-URL and
+	// YouTube-download jobs are submitted to, so "start five downloads at
+	// once" queues the extras instead of hammering the network/disk with
+	// them all in parallel. Lazily started (see enqueueDownload) since it
+	// needs a config read to size itself.
+	downloadQueueOnce sync.Once
+	downloadQueue     chan func()
+
 	sourcePresets []SourcePreset
 }
 
@@ -566,6 +606,7 @@ func NewApp(configPath string) (*App, error) {
 		cutterJobs:      map[string]*CutterJob{},
 		transcodeJobs:   map[string]*TranscodeJob{},
 		detectJobs:      map[string]*DetectJob{},
+		ytJobs:          map[string]*YouTubeDownloadJob{},
 		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -648,6 +689,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cutter/detect/jobs/", a.handleCutterDetectJobItem)
 	mux.HandleFunc("/api/transcode/start", a.handleTranscodeStart)
 	mux.HandleFunc("/api/transcode/jobs/", a.handleTranscodeJobItem)
+	mux.HandleFunc("/api/transcode/presets", a.handleTranscodePresets)
+	mux.HandleFunc("/api/transcode/presets/", a.handleTranscodePresetItem)
+	mux.HandleFunc("/api/transcode/rules", a.handleTranscodeRules)
+	mux.HandleFunc("/api/transcode/rules/", a.handleTranscodeRuleItem)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).
@@ -661,6 +706,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/explorer/unzip", a.handleExplorerUnzip)
 	mux.HandleFunc("/api/explorer/fetch", a.handleExplorerFetchURL)
 	mux.HandleFunc("/api/explorer/fetch/jobs/", a.handleExplorerFetchJobItem)
+	mux.HandleFunc("/api/explorer/youtube", a.handleExplorerYouTubeDownload)
+	mux.HandleFunc("/api/explorer/youtube/jobs/", a.handleExplorerYouTubeJobItem)
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)
@@ -1020,6 +1067,11 @@ func (a *App) runRecording(rec *recording) {
 			_ = copyFile(rec.tempPath, rec.finalPath)
 			_ = os.Remove(rec.tempPath)
 		}
+		// Auto-transcode rules run first (and synchronously) since a matching
+		// rule can change the recording's actual final path (a container
+		// change moves the file) - everything below needs to see that
+		// updated rec.finalPath, not the pre-transcode one.
+		a.autoTranscode(rec)
 		a.writeNFO(rec)
 		a.backup(rec)
 		go a.uploadYouTube(rec)
@@ -3933,7 +3985,18 @@ Recorder: MutiRec %s
 
 func (a *App) backup(rec *recording) {
 	cfg := a.snapshotConfig()
-	if !cfg.Settings.Backup.Enabled || !cfg.Settings.Backup.AfterComplete || cfg.Settings.Backup.RcloneRemote == "" {
+	if !cfg.Settings.Backup.Enabled || !cfg.Settings.Backup.AfterComplete {
+		return
+	}
+	if cfg.Settings.Backup.Method == "webdav" {
+		if err := a.backupWebDAV(rec, cfg); err != nil {
+			a.event("error", fmt.Sprintf("[%s] WebDAV backup failed: %s", rec.source.Name, err))
+			return
+		}
+		a.event("info", fmt.Sprintf("[%s] WebDAV backup complete", rec.source.Name))
+		return
+	}
+	if cfg.Settings.Backup.RcloneRemote == "" {
 		return
 	}
 	args := append([]string{"copy", rec.finalPath, cfg.Settings.Backup.RcloneRemote}, cfg.Settings.Backup.RcloneArgs...)
@@ -4172,6 +4235,7 @@ func defaultConfig() AppConfig {
 			EnableWaveform:          true,
 			AllowLiveProxy:          true,
 			LiveRewindWindowSeconds: 1800,
+			Downloads:               DownloadsConfig{MaxConcurrent: 2},
 		},
 		UI:      UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
 		Sources: []Source{},
@@ -4196,6 +4260,9 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Settings.WarnFreeBytes == 0 {
 		cfg.Settings.WarnFreeBytes = 5 * 1024 * 1024 * 1024
+	}
+	if cfg.Settings.Downloads.MaxConcurrent <= 0 {
+		cfg.Settings.Downloads.MaxConcurrent = 2
 	}
 	if cfg.Settings.DefaultContainer == "" {
 		cfg.Settings.DefaultContainer = "mkv"

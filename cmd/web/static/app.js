@@ -854,6 +854,13 @@ const gbBytes = 1024 * 1024 * 1024;
 function bytesToGb(b) { return Math.round((b / gbBytes) * 100) / 100; }
 function gbToBytes(gb) { return Math.round(gb * gbBytes); }
 
+function toggleBackupMethodFields() {
+  const isWebdav = $('backup-method').value === 'webdav';
+  $('backup-rclone-fields').classList.toggle('hidden', isWebdav);
+  $('backup-webdav-fields').classList.toggle('hidden', !isWebdav);
+}
+$('backup-method').addEventListener('change', toggleBackupMethodFields);
+
 function fillSettings() {
   const s = config.settings, ui = config.ui;
   ['finishedDir','tempDir','logDir','checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
@@ -861,6 +868,7 @@ function fillSettings() {
   $('warnFreeGb').value = bytesToGb(s.warnFreeBytes || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('fileExplorerRoot').value = s.fileExplorerRoot || '';
+  $('downloadsMaxConcurrent').value = (s.downloads && s.downloads.maxConcurrent) || 2;
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
   syncImageUploadPreview('uiLogoUrl');
@@ -873,6 +881,13 @@ function fillSettings() {
   $('backupAfterComplete').checked = !!s.backup.afterComplete;
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
+  setDropdownValue('backup-method', s.backup.method || 'rclone');
+  toggleBackupMethodFields();
+  const wd = s.backup.webdav || {};
+  $('backup-webdav-url').value = wd.url || '';
+  $('backup-webdav-username').value = wd.username || '';
+  $('backup-webdav-password').value = wd.password || '';
+  $('backup-webdav-proxy').checked = !!wd.proxy;
   const d = s.discordOAuth || {};
   $('discordOAuthEnabled').checked = !!d.enabled;
   $('discordOAuthClientId').value = d.clientId || '';
@@ -888,6 +903,9 @@ function fillSettings() {
     updateColorInputs(ui.themeColors);
   }
   renderFestivalPresets();
+  renderTranscodePresetSelect();
+  renderTranscodePresetList();
+  renderTranscodeRuleList();
 }
 
 function readSettings() {
@@ -898,10 +916,16 @@ function readSettings() {
   s.warnFreeBytes = gbToBytes(Number($('warnFreeGb').value) || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
   s.fileExplorerRoot = $('fileExplorerRoot').value.trim();
+  s.downloads = { maxConcurrent: Math.max(1, Number($('downloadsMaxConcurrent').value) || 2) };
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
-  s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
+  s.backup = {
+    enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked,
+    method: $('backup-method').value || 'rclone',
+    rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean),
+    webdav: { url: $('backup-webdav-url').value, username: $('backup-webdav-username').value, password: $('backup-webdav-password').value, proxy: $('backup-webdav-proxy').checked },
+  };
   s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
   s.youtube = { enabled: $('youtubeEnabled').checked, clientId: $('youtubeClientId').value, clientSecret: $('youtubeClientSecret').value, refreshToken: $('youtubeRefreshToken').value };
 }
@@ -4421,11 +4445,16 @@ $('explorer-download-selected').onclick = () => {
 
 function openExplorerFetchModal() {
   $('explorer-fetch-url').value = '';
+  $('explorer-fetch-username').value = '';
   $('explorer-fetch-password').value = '';
   $('explorer-fetch-cookie').value = '';
   $('explorer-fetch-debug').checked = false;
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-job-box').classList.add('hidden');
+  const proxyUrl = ((config.settings && config.settings.sharing) || {}).proxyUrl || '';
+  $('explorer-fetch-use-proxy').checked = false;
+  $('explorer-fetch-use-proxy').disabled = !proxyUrl;
+  $('explorer-fetch-proxy-hint').textContent = proxyUrl ? `(${proxyUrl})` : '(none configured - set one in Settings → Peer Sharing)';
   stopExplorerFetchPoll();
   $('explorer-fetch-overlay').classList.remove('hidden');
 }
@@ -4440,15 +4469,17 @@ $('explorer-fetch-overlay').addEventListener('click', (e) => { if (e.target.id =
 
 $('explorer-fetch-start').onclick = async () => {
   const url = $('explorer-fetch-url').value.trim();
+  const username = $('explorer-fetch-username').value.trim();
   const password = $('explorer-fetch-password').value;
   const cookie = $('explorer-fetch-cookie').value.trim();
   const debug = $('explorer-fetch-debug').checked;
+  const useProxy = $('explorer-fetch-use-proxy').checked;
   if (!url) { $('explorer-fetch-error').textContent = 'Enter a URL first'; $('explorer-fetch-error').classList.remove('hidden'); return; }
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-start').disabled = true;
   let result;
   try {
-    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, cookie, path: explorerPath, debug }) });
+    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, username, password, cookie, path: explorerPath, debug, useProxy }) });
   } catch { $('explorer-fetch-start').disabled = false; return; }
   if (!result.ok) {
     $('explorer-fetch-error').textContent = result.error || 'Could not start that download.';
@@ -4474,7 +4505,7 @@ async function pollExplorerFetchJob(jobId) {
     return;
   }
   renderExplorerFetchJob(job);
-  if (job.status === 'running') {
+  if (job.status === 'running' || job.status === 'queued') {
     explorerFetchJobPollTimer = setTimeout(() => pollExplorerFetchJob(jobId), 1000);
   } else {
     $('explorer-fetch-start').disabled = false;
@@ -4485,13 +4516,92 @@ async function pollExplorerFetchJob(jobId) {
 
 function renderExplorerFetchJob(job) {
   const pct = job.totalBytes > 0 ? Math.min(100, Math.round(job.transferredBytes / job.totalBytes * 100)) : 0;
-  $('explorer-fetch-job-title').textContent = job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
+  $('explorer-fetch-job-title').textContent = job.status === 'queued' ? 'Queued…' : job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
   $('explorer-fetch-job-stats').textContent = job.totalBytes > 0
     ? `${formatBytes(job.transferredBytes)} / ${formatBytes(job.totalBytes)} · ${formatBytes(job.speedBps)}/s`
     : `${formatBytes(job.transferredBytes)} · ${formatBytes(job.speedBps)}/s`;
   $('explorer-fetch-job-bar').style.width = `${pct}%`;
   $('explorer-fetch-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
   $('explorer-fetch-job-log').scrollTop = $('explorer-fetch-job-log').scrollHeight;
+}
+
+// --- Download from YouTube (also covers most other sites yt-dlp supports) ---
+
+let explorerYoutubeJobPollTimer = null;
+
+function openExplorerYoutubeModal() {
+  $('explorer-youtube-url').value = '';
+  $('explorer-youtube-playlist').checked = false;
+  $('explorer-youtube-format').value = '';
+  $('explorer-youtube-error').classList.add('hidden');
+  $('explorer-youtube-job-box').classList.add('hidden');
+  const proxyUrl = ((config.settings && config.settings.sharing) || {}).proxyUrl || '';
+  $('explorer-youtube-use-proxy').checked = false;
+  $('explorer-youtube-use-proxy').disabled = !proxyUrl;
+  $('explorer-youtube-proxy-hint').textContent = proxyUrl ? `(${proxyUrl})` : '(none configured - set one in Settings → Peer Sharing)';
+  stopExplorerYoutubePoll();
+  $('explorer-youtube-overlay').classList.remove('hidden');
+}
+function closeExplorerYoutubeModal() {
+  $('explorer-youtube-overlay').classList.add('hidden');
+  stopExplorerYoutubePoll();
+}
+$('explorer-youtube-open').onclick = openExplorerYoutubeModal;
+$('explorer-youtube-close').onclick = closeExplorerYoutubeModal;
+$('explorer-youtube-cancel').onclick = closeExplorerYoutubeModal;
+$('explorer-youtube-overlay').addEventListener('click', (e) => { if (e.target.id === 'explorer-youtube-overlay') closeExplorerYoutubeModal(); });
+
+$('explorer-youtube-start').onclick = async () => {
+  const url = $('explorer-youtube-url').value.trim();
+  const playlist = $('explorer-youtube-playlist').checked;
+  const format = $('explorer-youtube-format').value.trim();
+  const useProxy = $('explorer-youtube-use-proxy').checked;
+  if (!url) { $('explorer-youtube-error').textContent = 'Enter a video or playlist URL first'; $('explorer-youtube-error').classList.remove('hidden'); return; }
+  $('explorer-youtube-error').classList.add('hidden');
+  $('explorer-youtube-start').disabled = true;
+  let result;
+  try {
+    result = await api('/api/explorer/youtube', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, playlist, format, path: explorerPath, useProxy }) });
+  } catch { $('explorer-youtube-start').disabled = false; return; }
+  if (!result.ok) {
+    $('explorer-youtube-error').textContent = result.error || 'Could not start that download.';
+    $('explorer-youtube-error').classList.remove('hidden');
+    $('explorer-youtube-start').disabled = false;
+    return;
+  }
+  $('explorer-youtube-job-box').classList.remove('hidden');
+  pollExplorerYoutubeJob(result.jobId);
+};
+
+function stopExplorerYoutubePoll() {
+  if (explorerYoutubeJobPollTimer) { clearTimeout(explorerYoutubeJobPollTimer); explorerYoutubeJobPollTimer = null; }
+}
+
+async function pollExplorerYoutubeJob(jobId) {
+  stopExplorerYoutubePoll();
+  let job;
+  try {
+    job = await api(`/api/explorer/youtube/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    explorerYoutubeJobPollTimer = setTimeout(() => pollExplorerYoutubeJob(jobId), 2000);
+    return;
+  }
+  renderExplorerYoutubeJob(job);
+  if (job.status === 'running' || job.status === 'queued') {
+    explorerYoutubeJobPollTimer = setTimeout(() => pollExplorerYoutubeJob(jobId), 1000);
+  } else {
+    $('explorer-youtube-start').disabled = false;
+    if (job.status === 'error') toast(`YouTube download failed: ${job.error || 'unknown error'}`, 'error');
+    else { toast(`Downloaded "${job.destName}"`, 'info'); loadExplorer(); }
+  }
+}
+
+function renderExplorerYoutubeJob(job) {
+  $('explorer-youtube-job-title').textContent = job.status === 'queued' ? 'Queued…' : job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
+  $('explorer-youtube-job-stats').textContent = job.progressLine || '';
+  $('explorer-youtube-job-bar').style.width = `${Math.min(100, job.progressPct || 0)}%`;
+  $('explorer-youtube-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('explorer-youtube-job-log').scrollTop = $('explorer-youtube-job-log').scrollHeight;
 }
 
 // Explorer only loads on demand (its tab click handler calls loadExplorer()
@@ -4902,9 +5012,12 @@ $('lib-transcode-filter').addEventListener('input', renderTranscodeList);
 $('lib-transcode-selectall').onclick = () => { transcodeFilteredRecordings().forEach(r => transcodeSelected.add(r.path)); renderTranscodeList(); };
 $('lib-transcode-clear').onclick = () => { transcodeSelected = new Set(); renderTranscodeList(); };
 
-$('lib-transcode-start').onclick = async () => {
-  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
-  const options = {
+// readTranscodeOptionsFromForm/applyTranscodeOptionsToForm let the Mass
+// Transcode form double as a preset editor: "Save current settings as
+// preset" reads the form, and picking a preset (or clicking "Edit" on one
+// in Settings) writes back into it.
+function readTranscodeOptionsFromForm() {
+  return {
     container: $('tc-container').value,
     videoCodec: $('tc-video-codec').value,
     audioCodec: $('tc-audio-codec').value,
@@ -4913,6 +5026,180 @@ $('lib-transcode-start').onclick = async () => {
     hardwareAccel: $('tc-hwaccel').value,
     replace: $('tc-replace').checked,
   };
+}
+function applyTranscodeOptionsToForm(o) {
+  o = o || {};
+  $('tc-container').value = o.container || '';
+  $('tc-video-codec').value = o.videoCodec || 'copy';
+  $('tc-audio-codec').value = o.audioCodec || 'copy';
+  $('tc-crf').value = o.crf || '';
+  $('tc-bitrate').value = o.audioBitrateKbps || '';
+  $('tc-hwaccel').value = o.hardwareAccel || '';
+  $('tc-replace').checked = !!o.replace;
+}
+
+function renderTranscodePresetSelect() {
+  const presets = config.settings.transcodePresets || [];
+  const sel = $('tc-preset-select');
+  sel.innerHTML = '<option value="">(custom - pick fields below)</option>' +
+    presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+}
+$('tc-preset-select').addEventListener('change', () => {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === $('tc-preset-select').value);
+  if (preset) applyTranscodeOptionsToForm(preset.options);
+});
+
+// editingPresetId tracks whether "Save current settings as preset" creates
+// a new preset or updates the one most recently loaded via "Edit" in
+// Settings -> Transcode Presets.
+let editingPresetId = null;
+$('tc-save-preset').onclick = async () => {
+  const existing = (config.settings.transcodePresets || []).find(p => p.id === editingPresetId);
+  const name = prompt('Preset name:', existing ? existing.name : '');
+  if (!name) return;
+  const options = readTranscodeOptionsFromForm();
+  try {
+    if (existing) {
+      await api(`/api/transcode/presets/${encodeURIComponent(editingPresetId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, options }) });
+    } else {
+      await api('/api/transcode/presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, options }) });
+    }
+  } catch { return; }
+  editingPresetId = null;
+  toast('Preset saved', 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+};
+
+function editTranscodePreset(id) {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === id);
+  if (!preset) return;
+  editingPresetId = id;
+  goToView('recordings');
+  // The Recordings tab's own nav handler is async (it awaits refresh()) -
+  // give it a moment to settle before switching into the Mass Transcode
+  // sub-view and filling it, rather than fighting that in-flight render.
+  setTimeout(() => {
+    openTranscodeView();
+    applyTranscodeOptionsToForm(preset.options);
+    toast(`Loaded "${preset.name}" - adjust and click "Save current settings as preset…" to update it`, 'info');
+  }, 50);
+}
+
+async function deleteTranscodePreset(id, name) {
+  if (!confirm(`Delete preset "${name}"? Any auto-transcode rule referencing it will be disabled.`)) return;
+  try {
+    await api(`/api/transcode/presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch { return; }
+  toast(`Deleted "${name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+function renderTranscodePresetList() {
+  const presets = config.settings.transcodePresets || [];
+  const list = $('tc-preset-list');
+  if (!presets.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No presets saved yet - configure Mass Transcode settings (Recordings tab) and click "Save current settings as preset…".</p>';
+    return;
+  }
+  list.innerHTML = presets.map(p => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(p.name)}</div>
+        <div class="text-xs text-zinc-500">${escapeHtml(p.options.container || 'source container')} · video ${escapeHtml(p.options.videoCodec || 'copy')} · audio ${escapeHtml(p.options.audioCodec || 'copy')}${p.options.hardwareAccel ? ' · ' + escapeHtml(p.options.hardwareAccel) : ''}</div>
+      </div>
+      <div class="flex flex-shrink-0 gap-2">
+        <button type="button" class="btn" onclick="editTranscodePreset('${escapeAttr(p.id)}')">Edit</button>
+        <button type="button" class="btn" style="color:#fda4af" onclick="deleteTranscodePreset('${escapeAttr(p.id)}', '${escapeAttr(p.name)}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+// --- Auto-transcode rules ---
+
+async function addTranscodeRule() {
+  try {
+    await api('/api/transcode/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New rule', enabled: false }) });
+  } catch { return; }
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+$('tc-rule-add').onclick = addTranscodeRule;
+
+function renderTranscodeRuleList() {
+  const rules = config.settings.transcodeRules || [];
+  const presets = config.settings.transcodePresets || [];
+  const list = $('tc-rule-list');
+  if (!rules.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No auto-transcode rules yet.</p>';
+    return;
+  }
+  const presetOptions = presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  list.innerHTML = rules.map(r => `
+    <div class="rounded border border-white/10 p-3" data-rule-id="${escapeAttr(r.id)}">
+      <div class="grid gap-2 md:grid-cols-2">
+        <label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" class="tc-rule-enabled" ${r.enabled ? 'checked' : ''}> Enabled</label>
+        <label>Name<input class="input tc-rule-name" value="${escapeAttr(r.name)}"></label>
+        <label>Preset<select class="input tc-rule-preset"><option value="">Choose a preset…</option>${presetOptions}</select></label>
+        <label>Min size (MB, 0 = any)<input type="number" class="input tc-rule-minsize" value="${r.minSizeBytes ? Math.round(r.minSizeBytes / (1024 * 1024)) : ''}"></label>
+        <label>Match container(s) <span class="text-xs text-zinc-500">comma-separated, blank = any</span><input class="input tc-rule-container" value="${escapeAttr((r.matchContainer || []).join(', '))}" placeholder="e.g. ts, flv"></label>
+        <label>Match source type(s) <span class="text-xs text-zinc-500">comma-separated, blank = any</span><input class="input tc-rule-sourcetype" value="${escapeAttr((r.matchSourceType || []).join(', '))}" placeholder="e.g. twitch, http"></label>
+        <label>Audio-only<select class="input tc-rule-audioonly">
+          <option value="">Any</option>
+          <option value="true">Audio-only recordings</option>
+          <option value="false">Video recordings</option>
+        </select></label>
+      </div>
+      <div class="mt-2 flex gap-2">
+        <button type="button" class="btn primary tc-rule-save">Save</button>
+        <button type="button" class="btn tc-rule-delete" style="color:#fda4af">Delete</button>
+      </div>
+    </div>`).join('');
+
+  list.querySelectorAll('[data-rule-id]').forEach(row => {
+    const rule = rules.find(r => r.id === row.dataset.ruleId);
+    if (!rule) return;
+    row.querySelector('.tc-rule-preset').value = rule.presetId || '';
+    row.querySelector('.tc-rule-audioonly').value = rule.matchAudioOnly === true ? 'true' : rule.matchAudioOnly === false ? 'false' : '';
+    row.querySelector('.tc-rule-save').addEventListener('click', () => saveTranscodeRule(row, rule));
+    row.querySelector('.tc-rule-delete').addEventListener('click', () => deleteTranscodeRule(rule.id, rule.name));
+  });
+}
+
+async function saveTranscodeRule(row, rule) {
+  const audioOnlyVal = row.querySelector('.tc-rule-audioonly').value;
+  const minSizeMb = parseFloat(row.querySelector('.tc-rule-minsize').value) || 0;
+  const body = {
+    name: row.querySelector('.tc-rule-name').value.trim() || 'Unnamed rule',
+    enabled: row.querySelector('.tc-rule-enabled').checked,
+    presetId: row.querySelector('.tc-rule-preset').value,
+    matchContainer: row.querySelector('.tc-rule-container').value.split(',').map(s => s.trim()).filter(Boolean),
+    matchSourceType: row.querySelector('.tc-rule-sourcetype').value.split(',').map(s => s.trim()).filter(Boolean),
+    matchAudioOnly: audioOnlyVal === '' ? null : audioOnlyVal === 'true',
+    minSizeBytes: minSizeMb > 0 ? Math.round(minSizeMb * 1024 * 1024) : 0,
+  };
+  try {
+    await api(`/api/transcode/rules/${encodeURIComponent(rule.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch { return; }
+  toast('Rule saved', 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+async function deleteTranscodeRule(id, name) {
+  if (!confirm(`Delete rule "${name}"?`)) return;
+  try {
+    await api(`/api/transcode/rules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch { return; }
+  toast(`Deleted "${name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+$('lib-transcode-start').onclick = async () => {
+  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
+  const options = readTranscodeOptionsFromForm();
   $('lib-transcode-start').disabled = true;
   let result;
   try {

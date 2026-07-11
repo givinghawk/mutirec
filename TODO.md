@@ -1192,6 +1192,77 @@
   there's no organized event or no matching stage there, so auto-detect works immediately for any
   event-attached source's recording without requiring manual organizing first.
 
+## Done (this session, part 17) - WebDAV, verbose transcoding, presets/auto-transcode rules, HW passthrough
+- **WebDAV support**: Fetch-from-URL (`urlfetch.go`/new `webdav.go`) now accepts a `webdav://`/
+  `webdavs://` URL (rewritten to http/https) alongside direct links and Stack/ownCloud shares -
+  PROPFIND (Depth: 0) decides file vs. folder, PROPFIND (Depth: 1) walks a folder recursively, GET
+  downloads each file, Basic Auth via a new username field. Struct tags for the multistatus XML
+  deliberately omit a namespace so encoding/xml matches by local name regardless of which "D:"/"d:"
+  prefix a given server uses (confirmed by test against a namespaced fixture). WebDAV is also now a
+  **backup destination** (`BackupConfig.Method` "rclone"|"webdav", `WebDAVBackup`): `a.backupWebDAV`
+  PUTs a finished recording to the same relative path it has under FinishedDir, MKCOL-ing
+  intermediate collections first.
+- **Proxy support for downloads**: every Fetch-from-URL job (WebDAV included) can now route through
+  the proxy already configured for P2P sharing (`Settings.Sharing.ProxyURL`) via a new "Route
+  through configured proxy" checkbox - reuses `proxyTransport()` from `proxy.go` rather than adding
+  a second proxy config; `URLFetchJob.httpTransport()` wraps in cookie/debug/proxy layers in that
+  order so the debug log shows requests as actually sent.
+- **Hardware transcoding passthrough by default**: `docker-compose.yml` passes `/dev/dri` plus
+  `group_add` (video/render GIDs) into the container by default for VAAPI/QSV; the `Dockerfile`
+  installs `mesa-va-drivers`, `intel-media-va-driver-non-free`, and `vainfo`, and adds the `app`
+  user to the image's own video/render groups. NVIDIA stays commented out in both files (needs the
+  NVIDIA Container Toolkit on the host - enabling it unconditionally would break `docker compose
+  up` entirely on a host without it, a much worse failure than VAAPI/QSV just lacking permissions).
+  Could not verify the actual Docker build in this environment - Docker Hub registry pulls are
+  blocked by this sandbox's network policy - worth a real build/test before relying on it.
+- **Verbose mass-transcode** (`transcode.go`): previously `-loglevel error` + `CombinedOutput()`,
+  fully silent until success/failure. `buildTranscodeArgs` now also passes `-progress pipe:1`;
+  `runFFmpegTranscode` streams that instead, logging a periodic "N%, speed, fps" line (throttled to
+  every `transcodeProgressLogInterval`, parsed via `parseFFmpegTimestamp` off ffmpeg's `out_time`
+  field rather than the historically-mislabeled `out_time_ms`/`out_time_us` keys). `transcodeOneFile`
+  now also logs an input summary (codec/container/duration) before starting and an elapsed-time +
+  size-reduction summary after; failures report ffmpeg's actual captured stderr.
+- **Transcode presets** (`TranscodePreset`, `Settings.TranscodePresets`): a named bundle of
+  `TranscodeOptions`, CRUD via `/api/transcode/presets[/​{id}]`. The Mass Transcode form doubles as
+  the preset editor - "Load preset" dropdown fills the form, "Save current settings as preset…"
+  creates or (via a Settings-tab "Edit" round-trip, `editingPresetId`) updates one.
+- **Auto-transcode rules** (`TranscodeRule`, `Settings.TranscodeRules`): match on container/source
+  type/audio-only/min-size (any empty condition = "any"), each referencing a preset. `a.autoTranscode`
+  runs **synchronously** (not `go`) right after a recording's file is placed and *before* NFO/backup/
+  YouTube-upload/thumbnail/sidecar steps - deliberately, since a container-changing rule moves the
+  file, and every one of those needs `rec.finalPath` already pointing at the real final artifact,
+  not the pre-transcode one. First enabled match wins. CRUD via `/api/transcode/rules[/​{id}]`;
+  deleting a preset a rule references disables that rule rather than leaving a dangling reference.
+
+## Done (this session, part 18) - YouTube download tool, download queue, hash checking
+
+- **YouTube download tool** (new `ytdownload.go`): a second, distinct download feature from
+  Fetch-from-URL, for grabbing already-published videos/playlists/"video sets" (as opposed to
+  live streams, which is what `streamlink` is for). Shells out to `yt-dlp` (installed as the
+  official standalone binary in the `Dockerfile`, alongside `streamlink`/`ffmpeg`/`rclone`) with
+  `--newline` so each progress update is its own line, and `--print after_move:filepath` so the
+  code knows exactly which file(s) yt-dlp produced (works for a single video or a whole
+  playlist) without having to reverse-engineer its output-template naming itself.
+  `YouTubeDownloadJob` mirrors `URLFetchJob`'s job-map/poll pattern (`ytJobs`, `putYTJob`/
+  `getYTJob`, `/api/explorer/youtube` to start, `/api/explorer/youtube/jobs/{id}` to poll).
+  Supports an optional yt-dlp format selector, whole-playlist vs. single-video, and routing
+  through the same configured P2P proxy as Fetch-from-URL. New "Download from YouTube" button/
+  modal next to "Fetch from URL" in the File Explorer tab.
+- **Shared download queue** (new `downloadqueue.go`): both Fetch-from-URL and YouTube-download
+  jobs are now submitted to `a.enqueueDownload(...)` instead of a bare `go a.runX(...)` -  a
+  small fixed worker pool (`Settings.Downloads.MaxConcurrent`, default 2, new Settings ->
+  Recorder field) that a job sits in "queued" status waiting for if all workers are busy, so
+  starting several downloads at once queues the extras rather than running everything in
+  parallel. Frontend polling for both job types now treats "queued" the same as "running" (still
+  polls, shows "Queued…") rather than treating it as a terminal state.
+- **Hash checking on every download** (new `hashcheck.go`, `a.verifyDownloadHash`): after every
+  file Fetch-from-URL (direct link, Stack, WebDAV) or the new YouTube tool saves, its sha256 is
+  computed (reusing the existing cached `a.fileHash` used by matchfile export, so a re-check of
+  an unchanged file is free) and logged to the job's log, and every other file already in that
+  same destination folder is hash-compared against it - a match logs a "you may already have
+  this" note. Deliberately scoped to the destination folder (not a whole-tree scan) to keep the
+  cost bounded on a large library.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

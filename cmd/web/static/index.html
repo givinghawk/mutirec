@@ -496,6 +496,13 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Bulk re-encode selected recordings - change container, drop to a smaller video codec, extract audio-only from a video source, or normalize everything to one format. Runs in the background; you can navigate away while it works.</p>
 
+          <div class="mb-3 flex flex-wrap items-end gap-2">
+            <label class="min-w-[220px]">Load preset<select id="tc-preset-select" class="input">
+              <option value="">(custom - pick fields below)</option>
+            </select></label>
+            <button type="button" id="tc-save-preset" class="btn">Save current settings as preset…</button>
+          </div>
+
           <div class="grid gap-3 md:grid-cols-2 mb-3">
             <label>Container<select id="tc-container" class="input">
               <option value="">Keep source</option>
@@ -888,6 +895,7 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <button type="button" id="explorer-zip-selected" class="btn" disabled>Zip Selected</button>
             <button type="button" id="explorer-download-selected" class="btn" disabled>Download Selected</button>
             <button type="button" id="explorer-fetch-open" class="btn primary">Fetch from URL</button>
+            <button type="button" id="explorer-youtube-open" class="btn primary">Download from YouTube</button>
             <button type="button" id="explorer-folder-help-open" class="btn" title="Recommended folder layout for sets you add by hand">Folder Layout</button>
             <button type="button" id="explorer-refresh" class="btn">Refresh</button>
           </div>
@@ -916,10 +924,12 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <h2>Fetch from URL</h2>
             <button type="button" id="explorer-fetch-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <p class="mb-2 text-sm text-zinc-400">Downloads directly into the current folder, in the background. Works with a direct download link, or a public share link from an ownCloud/Nextcloud-based host (TransIP Stack included) - a zip is auto-extracted once it finishes.</p>
+          <p class="mb-2 text-sm text-zinc-400">Downloads directly into the current folder, in the background. Works with a direct download link, a public share link from an ownCloud/Nextcloud-based host (TransIP Stack included), or a <code>webdav://</code>/<code>webdavs://</code> URL (prefix a regular WebDAV URL with one of those instead of http/https) - either a single file or a whole folder. A zip is auto-extracted once it finishes. Every downloaded file also gets its sha256 hash logged and checked against files already in the destination folder. If several downloads are started at once, extras wait their turn in a queue (see Settings for how many run at a time).</p>
           <label>URL<input id="explorer-fetch-url" class="input" placeholder="https://stack.example.com/s/xxxxx or a direct link"></label>
-          <label>Share password <span class="text-xs text-zinc-500">(only if the link is protected)</span><input id="explorer-fetch-password" type="password" class="input"></label>
+          <label>WebDAV username <span class="text-xs text-zinc-500">(only for a webdav:// or webdavs:// URL that needs Basic Auth)</span><input id="explorer-fetch-username" class="input" autocomplete="off"></label>
+          <label>Share/WebDAV password <span class="text-xs text-zinc-500">(only if the link is protected)</span><input id="explorer-fetch-password" type="password" class="input"></label>
           <label>Session cookie <span class="text-xs text-zinc-500">(only if the share needs your login - copy it from your browser's DevTools &gt; Application/Storage &gt; Cookies for that site)</span><input id="explorer-fetch-cookie" type="password" class="input" placeholder="e.g. session=abc123; other=xyz"></label>
+          <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-fetch-use-proxy" type="checkbox" class="accent-red-500"> Route through configured proxy <span id="explorer-fetch-proxy-hint" class="text-xs text-zinc-500"></span></label>
           <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-fetch-debug" type="checkbox" class="accent-red-500"> Debug mode <span class="text-xs text-zinc-500">(writes every HTTP request/response to a .log file next to the download - for troubleshooting a share link that isn't working)</span></label>
           <p id="explorer-fetch-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-end gap-2">
@@ -935,6 +945,36 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
               <div id="explorer-fetch-job-bar" class="storage-bar-fill" style="width:0%"></div>
             </div>
             <pre id="explorer-fetch-job-log" class="codebox mt-2 h-32 overflow-y-auto text-xs"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- YouTube download modal (File Explorer) -->
+      <div id="explorer-youtube-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Download from YouTube</h2>
+            <button type="button" id="explorer-youtube-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Downloads a video (or a whole playlist/video set) into the current folder using yt-dlp, in the background. Works with YouTube and most other sites yt-dlp supports. Downloads are queued if several are started at once. Each file's sha256 hash is logged and checked against files already in the destination folder.</p>
+          <label>Video or playlist URL<input id="explorer-youtube-url" class="input" placeholder="https://www.youtube.com/watch?v=... or a playlist URL"></label>
+          <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-youtube-playlist" type="checkbox" class="accent-red-500"> Download the whole playlist <span class="text-xs text-zinc-500">(otherwise just the single video, even if the URL is part of a playlist)</span></label>
+          <label class="mt-2">Format <span class="text-xs text-zinc-500">(optional - a yt-dlp format selector, e.g. "bestaudio" for audio-only; leave blank for yt-dlp's own best-quality default)</span><input id="explorer-youtube-format" class="input" placeholder="best"></label>
+          <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-youtube-use-proxy" type="checkbox" class="accent-red-500"> Route through configured proxy <span id="explorer-youtube-proxy-hint" class="text-xs text-zinc-500"></span></label>
+          <p id="explorer-youtube-error" class="mt-1 hidden text-sm text-rose-300"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" id="explorer-youtube-cancel">Close</button>
+            <button type="button" class="btn primary" id="explorer-youtube-start">Start download</button>
+          </div>
+          <div id="explorer-youtube-job-box" class="mt-4 hidden">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <span id="explorer-youtube-job-title" class="text-sm font-medium"></span>
+              <span id="explorer-youtube-job-stats" class="text-xs text-zinc-400"></span>
+            </div>
+            <div class="storage-bar-track">
+              <div id="explorer-youtube-job-bar" class="storage-bar-fill" style="width:0%"></div>
+            </div>
+            <pre id="explorer-youtube-job-log" class="codebox mt-2 h-32 overflow-y-auto text-xs"></pre>
           </div>
         </div>
       </div>
@@ -1018,6 +1058,7 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>Minimum free space (GB) <span class="text-xs text-zinc-500">recording pauses below this</span><input id="minFreeGb" type="number" step="0.1" min="0" class="input"></label>
             <label>Warning free space (GB) <span class="text-xs text-zinc-500">shows a warning below this</span><input id="warnFreeGb" type="number" step="0.1" min="0" class="input"></label>
             <label>Live rewind window (seconds)<input id="liveRewindWindowSeconds" type="number" class="input"></label>
+            <label>Max concurrent downloads <span class="text-xs text-zinc-500">(Fetch-from-URL + YouTube downloads share this queue - takes effect after a restart)</span><input id="downloadsMaxConcurrent" type="number" min="1" class="input"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">How far back viewers can scrub on a live, in-progress recording. Only applies to sources with "Live rewind" enabled below.</p>
             <label>File explorer root <span class="text-xs text-zinc-500">(optional)</span><input id="fileExplorerRoot" class="input" placeholder="defaults to the Finished directory above"></label>
             <p class="-mt-2 mb-3 text-xs text-zinc-500">Which folder the Explorer tab browses. Leaving this blank (recommended) scopes it to your recordings library; pointing it at a wider folder (or the data root) gives Explorer access to whatever's inside - the same trust level as source stream/ffmpeg args, so only change this if you understand that.</p>
@@ -1084,10 +1125,28 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
           </div>
           <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Backups</h2></div>
-            <label class="inline-flex items-center gap-2 text-sm"><input id="backupEnabled" type="checkbox" class="accent-red-500"> Enable rclone backup</label>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="backupEnabled" type="checkbox" class="accent-red-500"> Enable backup</label>
             <label class="mt-3 inline-flex items-center gap-2 text-sm"><input id="backupAfterComplete" type="checkbox" class="accent-red-500"> Run after each recording</label>
-            <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/mutirec or gdrive:recordings"></label>
-            <label>Extra rclone args, one per line<textarea id="rcloneArgs" class="codebox h-32"></textarea></label>
+            <label>Method
+              <div class="custom-dropdown" id="backup-method-dropdown">
+                <button type="button" class="dropdown-toggle input"><span class="dropdown-toggle-label">rclone</span><span class="ml-auto">▼</span></button>
+                <div class="dropdown-menu hidden">
+                  <div class="dropdown-option" data-value="rclone"><div class="font-semibold">rclone</div></div>
+                  <div class="dropdown-option" data-value="webdav"><div class="font-semibold">WebDAV</div></div>
+                </div>
+                <input type="hidden" id="backup-method" value="rclone">
+              </div>
+            </label>
+            <div id="backup-rclone-fields">
+              <label>rclone remote/path<input id="rcloneRemote" class="input" placeholder="s3:bucket/mutirec or gdrive:recordings"></label>
+              <label>Extra rclone args, one per line<textarea id="rcloneArgs" class="codebox h-32"></textarea></label>
+            </div>
+            <div id="backup-webdav-fields" class="hidden">
+              <label>WebDAV URL<input id="backup-webdav-url" class="input" placeholder="https://your-nas/remote.php/dav/files/user/ or webdav://..."></label>
+              <label>Username<input id="backup-webdav-username" class="input" autocomplete="off"></label>
+              <label>Password<input id="backup-webdav-password" type="password" class="input"></label>
+              <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="backup-webdav-proxy" type="checkbox" class="accent-red-500"> Route through configured proxy <span class="text-xs text-zinc-500">(Settings → Peer Sharing)</span></label>
+            </div>
           </div>
           <div class="panel" data-admin-only>
             <div class="panel-head"><h2>YouTube Auto-Upload</h2></div>
@@ -1096,6 +1155,19 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>Client ID<input id="youtubeClientId" class="input"></label>
             <label>Client Secret<input id="youtubeClientSecret" type="password" class="input"></label>
             <label>Refresh Token<input id="youtubeRefreshToken" type="password" class="input"></label>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Transcode Presets</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Named bundles of Mass Transcode settings - pick one from the "Load preset" dropdown there, or reference one from an auto-transcode rule below.</p>
+            <div id="tc-preset-list" class="space-y-2"></div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head">
+              <h2>Auto-Transcode Rules</h2>
+              <button type="button" id="tc-rule-add" class="btn">Add rule</button>
+            </div>
+            <p class="mb-3 text-sm text-zinc-400">Automatically applies a preset to a recording right after it finishes, if it matches every condition set on the rule (blank = any). Rules are tried in order; the first enabled match wins, so a recording is never transcoded by more than one rule.</p>
+            <div id="tc-rule-list" class="space-y-3"></div>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Account</h2></div>
