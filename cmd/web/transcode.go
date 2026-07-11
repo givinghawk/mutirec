@@ -534,3 +534,298 @@ func (a *App) handleTranscodeJobItem(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, job.view())
 }
+
+// ============================================================================
+// Transcode presets: a named bundle of TranscodeOptions, so a common target
+// (e.g. "H.264 CRF 23 MP4") can be picked from a dropdown in the mass-
+// transcode start form, or referenced by a TranscodeRule, instead of
+// re-entering the same options by hand every time.
+// ============================================================================
+
+// TranscodePreset is one saved, named set of transcode options.
+type TranscodePreset struct {
+	ID      string           `json:"id"`
+	Name    string           `json:"name"`
+	Options TranscodeOptions `json:"options"`
+}
+
+// findTranscodePreset looks up a preset by ID, returning nil if not found.
+func findTranscodePreset(presets []TranscodePreset, id string) *TranscodePreset {
+	for i := range presets {
+		if presets[i].ID == id {
+			return &presets[i]
+		}
+	}
+	return nil
+}
+
+// handleTranscodePresets handles the collection endpoint: GET lists every
+// saved preset, POST creates a new one.
+func (a *App) handleTranscodePresets(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, a.snapshotConfig().Settings.TranscodePresets)
+	case http.MethodPost:
+		var req struct {
+			Name    string           `json:"name"`
+			Options TranscodeOptions `json:"options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		preset := TranscodePreset{ID: newID(), Name: strings.TrimSpace(req.Name), Options: req.Options}
+		a.mu.Lock()
+		a.cfg.Settings.TranscodePresets = append(a.cfg.Settings.TranscodePresets, preset)
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, preset)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleTranscodePresetItem handles /api/transcode/presets/{id}: PUT
+// replaces a preset's name/options, DELETE removes it.
+func (a *App) handleTranscodePresetItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/transcode/presets/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var req struct {
+			Name    string           `json:"name"`
+			Options TranscodeOptions `json:"options"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		a.mu.Lock()
+		preset := findTranscodePreset(a.cfg.Settings.TranscodePresets, id)
+		if preset == nil {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		preset.Name = strings.TrimSpace(req.Name)
+		preset.Options = req.Options
+		updated := *preset
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, updated)
+	case http.MethodDelete:
+		a.mu.Lock()
+		out := a.cfg.Settings.TranscodePresets[:0]
+		for _, p := range a.cfg.Settings.TranscodePresets {
+			if p.ID != id {
+				out = append(out, p)
+			}
+		}
+		a.cfg.Settings.TranscodePresets = out
+		// A rule referencing a deleted preset would otherwise silently stop
+		// working with no indication why - disable it instead of leaving a
+		// dangling reference.
+		for i := range a.cfg.Settings.TranscodeRules {
+			if a.cfg.Settings.TranscodeRules[i].PresetID == id {
+				a.cfg.Settings.TranscodeRules[i].Enabled = false
+			}
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ============================================================================
+// Auto-transcode rules: automatically transcode a just-finished recording
+// when it matches, using one of the presets above. Evaluated once per
+// recording (see a.autoTranscode, called synchronously from runRecording
+// right after the recording's file is placed) - rules are tried in order
+// and the first enabled match wins, so a recording is never transcoded by
+// more than one rule.
+// ============================================================================
+
+// TranscodeRule automatically applies a preset to a finished recording when
+// every one of its match conditions holds. An empty/nil condition means
+// "any" - a rule with no conditions at all matches every recording.
+type TranscodeRule struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`
+	PresetID string `json:"presetId"`
+
+	MatchContainer  []string `json:"matchContainer,omitempty"`  // e.g. ["ts","flv"] - the recording's own container/extension
+	MatchSourceType []string `json:"matchSourceType,omitempty"` // e.g. ["twitch","youtube","http"]
+	MatchAudioOnly  *bool    `json:"matchAudioOnly,omitempty"`
+	MinSizeBytes    int64    `json:"minSizeBytes,omitempty"`
+}
+
+// matchesTranscodeRule reports whether rule applies to a just-finished
+// recording described by container/sourceType/audioOnly/sizeBytes.
+func matchesTranscodeRule(rule TranscodeRule, container, sourceType string, audioOnly bool, sizeBytes int64) bool {
+	if !rule.Enabled {
+		return false
+	}
+	if len(rule.MatchContainer) > 0 && !containsFold(rule.MatchContainer, container) {
+		return false
+	}
+	if len(rule.MatchSourceType) > 0 && !containsFold(rule.MatchSourceType, sourceType) {
+		return false
+	}
+	if rule.MatchAudioOnly != nil && *rule.MatchAudioOnly != audioOnly {
+		return false
+	}
+	if rule.MinSizeBytes > 0 && sizeBytes < rule.MinSizeBytes {
+		return false
+	}
+	return true
+}
+
+// containsFold reports whether val is in list, case-insensitively.
+func containsFold(list []string, val string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, val) {
+			return true
+		}
+	}
+	return false
+}
+
+// autoTranscode evaluates Settings.TranscodeRules against a just-finished
+// recording and, on the first match, runs that rule's preset as a
+// single-file transcode job - mirrors a.backup()'s "best-effort,
+// event-logged" shape, but runs synchronously (not `go`) and updates
+// rec.finalPath in place when the rule's preset changes the file's path
+// (e.g. a container change), so every step after this one in runRecording
+// (NFO, backup, YouTube upload, thumbnail, sidecars) sees the real final
+// file rather than the pre-transcode one.
+func (a *App) autoTranscode(rec *recording) {
+	cfg := a.snapshotConfig()
+	if len(cfg.Settings.TranscodeRules) == 0 {
+		return
+	}
+	info, err := os.Stat(rec.finalPath)
+	if err != nil {
+		return
+	}
+	root := filepath.Clean(cfg.Settings.FinishedDir)
+	relPath, relErr := filepath.Rel(root, rec.finalPath)
+	if relErr != nil {
+		return
+	}
+	relPath = filepath.ToSlash(relPath)
+	container := strings.TrimPrefix(filepath.Ext(rec.finalPath), ".")
+
+	for _, rule := range cfg.Settings.TranscodeRules {
+		if !matchesTranscodeRule(rule, container, rec.source.Type, rec.source.AudioOnly, info.Size()) {
+			continue
+		}
+		preset := findTranscodePreset(cfg.Settings.TranscodePresets, rule.PresetID)
+		if preset == nil {
+			a.event("error", fmt.Sprintf("[%s] auto-transcode rule %q references a missing preset", rec.source.Name, rule.Name))
+			return
+		}
+
+		job := &TranscodeJob{id: newID(), status: "running", startedAt: time.Now(), totalFiles: 1}
+		a.putTranscodeJob(job)
+		a.event("info", fmt.Sprintf("[%s] auto-transcode rule %q matched (preset %q)", rec.source.Name, rule.Name, preset.Name))
+		job.logf("transcoding %s (auto-transcode rule %q)", relPath, rule.Name)
+		result := a.transcodeOneFile(job, rec.finalPath, relPath, preset.Options)
+		job.addResult(result)
+		job.finish()
+
+		if result.Status == "error" {
+			a.event("error", fmt.Sprintf("[%s] auto-transcode failed: %s", rec.source.Name, result.Error))
+			return
+		}
+		a.event("info", fmt.Sprintf("[%s] auto-transcode complete: %s", rec.source.Name, result.Output))
+		if result.Output != "" {
+			rec.finalPath = filepath.Join(root, filepath.FromSlash(result.Output))
+		}
+		return // first matching rule wins
+	}
+}
+
+// handleTranscodeRules handles the collection endpoint: GET lists every
+// rule, POST creates a new one.
+func (a *App) handleTranscodeRules(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, a.snapshotConfig().Settings.TranscodeRules)
+	case http.MethodPost:
+		var rule TranscodeRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil || strings.TrimSpace(rule.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		rule.ID = newID()
+		a.mu.Lock()
+		a.cfg.Settings.TranscodeRules = append(a.cfg.Settings.TranscodeRules, rule)
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, rule)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleTranscodeRuleItem handles /api/transcode/rules/{id}: PUT replaces a
+// rule, DELETE removes it.
+func (a *App) handleTranscodeRuleItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/transcode/rules/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		var rule TranscodeRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil || strings.TrimSpace(rule.Name) == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		rule.ID = id
+		a.mu.Lock()
+		found := false
+		for i := range a.cfg.Settings.TranscodeRules {
+			if a.cfg.Settings.TranscodeRules[i].ID == id {
+				a.cfg.Settings.TranscodeRules[i] = rule
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.mu.Unlock()
+			http.NotFound(w, r)
+			return
+		}
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, rule)
+	case http.MethodDelete:
+		a.mu.Lock()
+		out := a.cfg.Settings.TranscodeRules[:0]
+		for _, ru := range a.cfg.Settings.TranscodeRules {
+			if ru.ID != id {
+				out = append(out, ru)
+			}
+		}
+		a.cfg.Settings.TranscodeRules = out
+		cfg := a.cfg
+		a.mu.Unlock()
+		_ = a.persist(cfg)
+		writeJSON(w, map[string]string{"status": "deleted"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}

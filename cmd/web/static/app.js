@@ -902,6 +902,9 @@ function fillSettings() {
     updateColorInputs(ui.themeColors);
   }
   renderFestivalPresets();
+  renderTranscodePresetSelect();
+  renderTranscodePresetList();
+  renderTranscodeRuleList();
 }
 
 function readSettings() {
@@ -4928,9 +4931,12 @@ $('lib-transcode-filter').addEventListener('input', renderTranscodeList);
 $('lib-transcode-selectall').onclick = () => { transcodeFilteredRecordings().forEach(r => transcodeSelected.add(r.path)); renderTranscodeList(); };
 $('lib-transcode-clear').onclick = () => { transcodeSelected = new Set(); renderTranscodeList(); };
 
-$('lib-transcode-start').onclick = async () => {
-  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
-  const options = {
+// readTranscodeOptionsFromForm/applyTranscodeOptionsToForm let the Mass
+// Transcode form double as a preset editor: "Save current settings as
+// preset" reads the form, and picking a preset (or clicking "Edit" on one
+// in Settings) writes back into it.
+function readTranscodeOptionsFromForm() {
+  return {
     container: $('tc-container').value,
     videoCodec: $('tc-video-codec').value,
     audioCodec: $('tc-audio-codec').value,
@@ -4939,6 +4945,180 @@ $('lib-transcode-start').onclick = async () => {
     hardwareAccel: $('tc-hwaccel').value,
     replace: $('tc-replace').checked,
   };
+}
+function applyTranscodeOptionsToForm(o) {
+  o = o || {};
+  $('tc-container').value = o.container || '';
+  $('tc-video-codec').value = o.videoCodec || 'copy';
+  $('tc-audio-codec').value = o.audioCodec || 'copy';
+  $('tc-crf').value = o.crf || '';
+  $('tc-bitrate').value = o.audioBitrateKbps || '';
+  $('tc-hwaccel').value = o.hardwareAccel || '';
+  $('tc-replace').checked = !!o.replace;
+}
+
+function renderTranscodePresetSelect() {
+  const presets = config.settings.transcodePresets || [];
+  const sel = $('tc-preset-select');
+  sel.innerHTML = '<option value="">(custom - pick fields below)</option>' +
+    presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+}
+$('tc-preset-select').addEventListener('change', () => {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === $('tc-preset-select').value);
+  if (preset) applyTranscodeOptionsToForm(preset.options);
+});
+
+// editingPresetId tracks whether "Save current settings as preset" creates
+// a new preset or updates the one most recently loaded via "Edit" in
+// Settings -> Transcode Presets.
+let editingPresetId = null;
+$('tc-save-preset').onclick = async () => {
+  const existing = (config.settings.transcodePresets || []).find(p => p.id === editingPresetId);
+  const name = prompt('Preset name:', existing ? existing.name : '');
+  if (!name) return;
+  const options = readTranscodeOptionsFromForm();
+  try {
+    if (existing) {
+      await api(`/api/transcode/presets/${encodeURIComponent(editingPresetId)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, options }) });
+    } else {
+      await api('/api/transcode/presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, options }) });
+    }
+  } catch { return; }
+  editingPresetId = null;
+  toast('Preset saved', 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+};
+
+function editTranscodePreset(id) {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === id);
+  if (!preset) return;
+  editingPresetId = id;
+  goToView('recordings');
+  // The Recordings tab's own nav handler is async (it awaits refresh()) -
+  // give it a moment to settle before switching into the Mass Transcode
+  // sub-view and filling it, rather than fighting that in-flight render.
+  setTimeout(() => {
+    openTranscodeView();
+    applyTranscodeOptionsToForm(preset.options);
+    toast(`Loaded "${preset.name}" - adjust and click "Save current settings as preset…" to update it`, 'info');
+  }, 50);
+}
+
+async function deleteTranscodePreset(id, name) {
+  if (!confirm(`Delete preset "${name}"? Any auto-transcode rule referencing it will be disabled.`)) return;
+  try {
+    await api(`/api/transcode/presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch { return; }
+  toast(`Deleted "${name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+function renderTranscodePresetList() {
+  const presets = config.settings.transcodePresets || [];
+  const list = $('tc-preset-list');
+  if (!presets.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No presets saved yet - configure Mass Transcode settings (Recordings tab) and click "Save current settings as preset…".</p>';
+    return;
+  }
+  list.innerHTML = presets.map(p => `
+    <div class="flex flex-wrap items-center justify-between gap-2 rounded border border-white/10 px-3 py-2">
+      <div class="min-w-0">
+        <div class="font-medium">${escapeHtml(p.name)}</div>
+        <div class="text-xs text-zinc-500">${escapeHtml(p.options.container || 'source container')} · video ${escapeHtml(p.options.videoCodec || 'copy')} · audio ${escapeHtml(p.options.audioCodec || 'copy')}${p.options.hardwareAccel ? ' · ' + escapeHtml(p.options.hardwareAccel) : ''}</div>
+      </div>
+      <div class="flex flex-shrink-0 gap-2">
+        <button type="button" class="btn" onclick="editTranscodePreset('${escapeAttr(p.id)}')">Edit</button>
+        <button type="button" class="btn" style="color:#fda4af" onclick="deleteTranscodePreset('${escapeAttr(p.id)}', '${escapeAttr(p.name)}')">Delete</button>
+      </div>
+    </div>`).join('');
+}
+
+// --- Auto-transcode rules ---
+
+async function addTranscodeRule() {
+  try {
+    await api('/api/transcode/rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'New rule', enabled: false }) });
+  } catch { return; }
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+$('tc-rule-add').onclick = addTranscodeRule;
+
+function renderTranscodeRuleList() {
+  const rules = config.settings.transcodeRules || [];
+  const presets = config.settings.transcodePresets || [];
+  const list = $('tc-rule-list');
+  if (!rules.length) {
+    list.innerHTML = '<p class="text-sm text-zinc-400">No auto-transcode rules yet.</p>';
+    return;
+  }
+  const presetOptions = presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  list.innerHTML = rules.map(r => `
+    <div class="rounded border border-white/10 p-3" data-rule-id="${escapeAttr(r.id)}">
+      <div class="grid gap-2 md:grid-cols-2">
+        <label class="inline-flex items-center gap-2 text-sm"><input type="checkbox" class="tc-rule-enabled" ${r.enabled ? 'checked' : ''}> Enabled</label>
+        <label>Name<input class="input tc-rule-name" value="${escapeAttr(r.name)}"></label>
+        <label>Preset<select class="input tc-rule-preset"><option value="">Choose a preset…</option>${presetOptions}</select></label>
+        <label>Min size (MB, 0 = any)<input type="number" class="input tc-rule-minsize" value="${r.minSizeBytes ? Math.round(r.minSizeBytes / (1024 * 1024)) : ''}"></label>
+        <label>Match container(s) <span class="text-xs text-zinc-500">comma-separated, blank = any</span><input class="input tc-rule-container" value="${escapeAttr((r.matchContainer || []).join(', '))}" placeholder="e.g. ts, flv"></label>
+        <label>Match source type(s) <span class="text-xs text-zinc-500">comma-separated, blank = any</span><input class="input tc-rule-sourcetype" value="${escapeAttr((r.matchSourceType || []).join(', '))}" placeholder="e.g. twitch, http"></label>
+        <label>Audio-only<select class="input tc-rule-audioonly">
+          <option value="">Any</option>
+          <option value="true">Audio-only recordings</option>
+          <option value="false">Video recordings</option>
+        </select></label>
+      </div>
+      <div class="mt-2 flex gap-2">
+        <button type="button" class="btn primary tc-rule-save">Save</button>
+        <button type="button" class="btn tc-rule-delete" style="color:#fda4af">Delete</button>
+      </div>
+    </div>`).join('');
+
+  list.querySelectorAll('[data-rule-id]').forEach(row => {
+    const rule = rules.find(r => r.id === row.dataset.ruleId);
+    if (!rule) return;
+    row.querySelector('.tc-rule-preset').value = rule.presetId || '';
+    row.querySelector('.tc-rule-audioonly').value = rule.matchAudioOnly === true ? 'true' : rule.matchAudioOnly === false ? 'false' : '';
+    row.querySelector('.tc-rule-save').addEventListener('click', () => saveTranscodeRule(row, rule));
+    row.querySelector('.tc-rule-delete').addEventListener('click', () => deleteTranscodeRule(rule.id, rule.name));
+  });
+}
+
+async function saveTranscodeRule(row, rule) {
+  const audioOnlyVal = row.querySelector('.tc-rule-audioonly').value;
+  const minSizeMb = parseFloat(row.querySelector('.tc-rule-minsize').value) || 0;
+  const body = {
+    name: row.querySelector('.tc-rule-name').value.trim() || 'Unnamed rule',
+    enabled: row.querySelector('.tc-rule-enabled').checked,
+    presetId: row.querySelector('.tc-rule-preset').value,
+    matchContainer: row.querySelector('.tc-rule-container').value.split(',').map(s => s.trim()).filter(Boolean),
+    matchSourceType: row.querySelector('.tc-rule-sourcetype').value.split(',').map(s => s.trim()).filter(Boolean),
+    matchAudioOnly: audioOnlyVal === '' ? null : audioOnlyVal === 'true',
+    minSizeBytes: minSizeMb > 0 ? Math.round(minSizeMb * 1024 * 1024) : 0,
+  };
+  try {
+    await api(`/api/transcode/rules/${encodeURIComponent(rule.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch { return; }
+  toast('Rule saved', 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+async function deleteTranscodeRule(id, name) {
+  if (!confirm(`Delete rule "${name}"?`)) return;
+  try {
+    await api(`/api/transcode/rules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } catch { return; }
+  toast(`Deleted "${name}"`, 'info');
+  $('source-editor').dataset.loaded = '';
+  await refresh();
+}
+
+$('lib-transcode-start').onclick = async () => {
+  if (!transcodeSelected.size) { toast('Select at least one recording to transcode', 'error'); return; }
+  const options = readTranscodeOptionsFromForm();
   $('lib-transcode-start').disabled = true;
   let result;
   try {

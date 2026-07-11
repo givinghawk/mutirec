@@ -143,6 +143,8 @@ type Settings struct {
 	Sharing                 SharingConfig      `json:"sharing"`
 	FileExplorerRoot        string             `json:"fileExplorerRoot,omitempty"`
 	YouTube                 YouTubeConfig      `json:"youtube"`
+	TranscodePresets        []TranscodePreset  `json:"transcodePresets,omitempty"`
+	TranscodeRules          []TranscodeRule    `json:"transcodeRules,omitempty"`
 }
 
 // YouTubeConfig holds this instance's YouTube Data API v3 credentials,
@@ -666,6 +668,10 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/cutter/detect/jobs/", a.handleCutterDetectJobItem)
 	mux.HandleFunc("/api/transcode/start", a.handleTranscodeStart)
 	mux.HandleFunc("/api/transcode/jobs/", a.handleTranscodeJobItem)
+	mux.HandleFunc("/api/transcode/presets", a.handleTranscodePresets)
+	mux.HandleFunc("/api/transcode/presets/", a.handleTranscodePresetItem)
+	mux.HandleFunc("/api/transcode/rules", a.handleTranscodeRules)
+	mux.HandleFunc("/api/transcode/rules/", a.handleTranscodeRuleItem)
 	mux.HandleFunc("/api/uploads/image", a.handleImageUpload)
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir(a.uploadsDir()))))
 	// File explorer, rooted at Settings.FileExplorerRoot (defaults to FinishedDir).
@@ -1038,6 +1044,11 @@ func (a *App) runRecording(rec *recording) {
 			_ = copyFile(rec.tempPath, rec.finalPath)
 			_ = os.Remove(rec.tempPath)
 		}
+		// Auto-transcode rules run first (and synchronously) since a matching
+		// rule can change the recording's actual final path (a container
+		// change moves the file) - everything below needs to see that
+		// updated rec.finalPath, not the pre-transcode one.
+		a.autoTranscode(rec)
 		a.writeNFO(rec)
 		a.backup(rec)
 		go a.uploadYouTube(rec)

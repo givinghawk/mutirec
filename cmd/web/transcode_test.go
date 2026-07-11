@@ -259,3 +259,225 @@ func TestHandleTranscodeJobItemMissingIs404(t *testing.T) {
 		t.Fatalf("expected 404 for an unknown job id, got %d", w.Code)
 	}
 }
+
+func TestContainsFold(t *testing.T) {
+	if !containsFold([]string{"TS", "flv"}, "ts") {
+		t.Error("expected a case-insensitive match")
+	}
+	if containsFold([]string{"mp4"}, "ts") {
+		t.Error("expected no match")
+	}
+	if containsFold(nil, "ts") {
+		t.Error("expected no match against an empty list")
+	}
+}
+
+func TestMatchesTranscodeRule(t *testing.T) {
+	audioOnlyTrue := true
+	cases := []struct {
+		name      string
+		rule      TranscodeRule
+		container string
+		srcType   string
+		audioOnly bool
+		size      int64
+		want      bool
+	}{
+		{"disabled never matches", TranscodeRule{Enabled: false}, "ts", "http", false, 100, false},
+		{"no conditions matches anything", TranscodeRule{Enabled: true}, "ts", "http", false, 100, true},
+		{"container mismatch", TranscodeRule{Enabled: true, MatchContainer: []string{"mp4"}}, "ts", "http", false, 100, false},
+		{"container match case-insensitive", TranscodeRule{Enabled: true, MatchContainer: []string{"TS"}}, "ts", "http", false, 100, true},
+		{"source type mismatch", TranscodeRule{Enabled: true, MatchSourceType: []string{"twitch"}}, "ts", "http", false, 100, false},
+		{"audio-only mismatch", TranscodeRule{Enabled: true, MatchAudioOnly: &audioOnlyTrue}, "ts", "http", false, 100, false},
+		{"audio-only match", TranscodeRule{Enabled: true, MatchAudioOnly: &audioOnlyTrue}, "ts", "http", true, 100, true},
+		{"below min size", TranscodeRule{Enabled: true, MinSizeBytes: 1000}, "ts", "http", false, 100, false},
+		{"meets min size", TranscodeRule{Enabled: true, MinSizeBytes: 100}, "ts", "http", false, 100, true},
+	}
+	for _, c := range cases {
+		if got := matchesTranscodeRule(c.rule, c.container, c.srcType, c.audioOnly, c.size); got != c.want {
+			t.Errorf("%s: matchesTranscodeRule() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTranscodePresetsCRUD(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{config: filepath.Join(dir, "config.json")}
+
+	body, _ := json.Marshal(map[string]any{"name": "MP4 H264", "options": TranscodeOptions{Container: "mp4", VideoCodec: "h264"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/transcode/presets", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	a.handleTranscodePresets(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var created TranscodePreset
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("expected a created preset with an ID: %s (err %v)", w.Body.String(), err)
+	}
+	if len(a.cfg.Settings.TranscodePresets) != 1 {
+		t.Fatalf("expected 1 preset stored, got %d", len(a.cfg.Settings.TranscodePresets))
+	}
+
+	updateBody, _ := json.Marshal(map[string]any{"name": "MP4 H265", "options": TranscodeOptions{Container: "mp4", VideoCodec: "h265"}})
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/transcode/presets/"+created.ID, bytes.NewReader(updateBody))
+	updateW := httptest.NewRecorder()
+	a.handleTranscodePresetItem(updateW, updateReq)
+	if updateW.Code != http.StatusOK {
+		t.Fatalf("update: expected 200, got %d: %s", updateW.Code, updateW.Body.String())
+	}
+	if a.cfg.Settings.TranscodePresets[0].Options.VideoCodec != "h265" {
+		t.Errorf("expected the preset's options to be updated, got %+v", a.cfg.Settings.TranscodePresets[0])
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/transcode/presets/"+created.ID, nil)
+	delW := httptest.NewRecorder()
+	a.handleTranscodePresetItem(delW, delReq)
+	if delW.Code != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d: %s", delW.Code, delW.Body.String())
+	}
+	if len(a.cfg.Settings.TranscodePresets) != 0 {
+		t.Fatalf("expected the preset to be removed, got %+v", a.cfg.Settings.TranscodePresets)
+	}
+}
+
+func TestDeletingPresetDisablesReferencingRule(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{config: filepath.Join(dir, "config.json"), cfg: AppConfig{Settings: Settings{
+		TranscodePresets: []TranscodePreset{{ID: "p1", Name: "Preset"}},
+		TranscodeRules:   []TranscodeRule{{ID: "r1", Name: "Rule", Enabled: true, PresetID: "p1"}},
+	}}}
+	req := httptest.NewRequest(http.MethodDelete, "/api/transcode/presets/p1", nil)
+	w := httptest.NewRecorder()
+	a.handleTranscodePresetItem(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if a.cfg.Settings.TranscodeRules[0].Enabled {
+		t.Error("expected the rule referencing the deleted preset to be disabled")
+	}
+}
+
+func TestTranscodeRulesCRUD(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{config: filepath.Join(dir, "config.json")}
+
+	body, _ := json.Marshal(TranscodeRule{Name: "TS to MP4", Enabled: true, PresetID: "p1", MatchContainer: []string{"ts"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/transcode/rules", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	a.handleTranscodeRules(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var created TranscodeRule
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil || created.ID == "" {
+		t.Fatalf("expected a created rule with an ID: %s (err %v)", w.Body.String(), err)
+	}
+
+	created.Enabled = false
+	updateBody, _ := json.Marshal(created)
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/transcode/rules/"+created.ID, bytes.NewReader(updateBody))
+	updateW := httptest.NewRecorder()
+	a.handleTranscodeRuleItem(updateW, updateReq)
+	if updateW.Code != http.StatusOK {
+		t.Fatalf("update: expected 200, got %d: %s", updateW.Code, updateW.Body.String())
+	}
+	if a.cfg.Settings.TranscodeRules[0].Enabled {
+		t.Error("expected the rule to be disabled after the update")
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/transcode/rules/"+created.ID, nil)
+	delW := httptest.NewRecorder()
+	a.handleTranscodeRuleItem(delW, delReq)
+	if delW.Code != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d: %s", delW.Code, delW.Body.String())
+	}
+	if len(a.cfg.Settings.TranscodeRules) != 0 {
+		t.Fatalf("expected the rule to be removed, got %+v", a.cfg.Settings.TranscodeRules)
+	}
+}
+
+// TestAutoTranscodeMatchesRuleAndUpdatesFinalPath confirms a matching,
+// container-changing rule both runs the transcode and updates rec.finalPath
+// so everything downstream in runRecording (NFO, backup, YouTube upload,
+// thumbnail/sidecar generation) sees the real final file.
+func TestAutoTranscodeMatchesRuleAndUpdatesFinalPath(t *testing.T) {
+	fakeFFmpegOnPath(t, `
+for last in "$@"; do :; done
+echo transcoded > "$last"
+exit 0
+`)
+	dir := t.TempDir()
+	finishedDir := filepath.Join(dir, "finished")
+	if err := os.MkdirAll(filepath.Join(finishedDir, "BLUE"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	finalPath := filepath.Join(finishedDir, "BLUE", "set.ts")
+	if err := os.WriteFile(finalPath, []byte("original content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{
+		config:        filepath.Join(dir, "config.json"),
+		transcodeJobs: map[string]*TranscodeJob{},
+		cfg: AppConfig{Settings: Settings{
+			FinishedDir: finishedDir,
+			TranscodePresets: []TranscodePreset{
+				{ID: "p1", Name: "MP4", Options: TranscodeOptions{Container: "mp4", VideoCodec: "h264", Replace: true}},
+			},
+			TranscodeRules: []TranscodeRule{
+				{ID: "r1", Name: "TS to MP4", Enabled: true, PresetID: "p1", MatchContainer: []string{"ts"}},
+			},
+		}},
+	}
+	rec := &recording{finalPath: finalPath, source: Source{Name: "BLUE", Type: "http"}}
+	a.autoTranscode(rec)
+
+	if rec.finalPath == finalPath {
+		t.Fatalf("expected rec.finalPath to be updated after a container-changing auto-transcode, still %q", rec.finalPath)
+	}
+	if filepath.Ext(rec.finalPath) != ".mp4" {
+		t.Errorf("expected a .mp4 output path, got %q", rec.finalPath)
+	}
+	if _, err := os.Stat(rec.finalPath); err != nil {
+		t.Errorf("expected the transcoded output file to exist at the new path: %v", err)
+	}
+}
+
+// TestAutoTranscodeSkipsNonMatchingRule confirms a rule whose conditions
+// don't match leaves the recording untouched.
+func TestAutoTranscodeSkipsNonMatchingRule(t *testing.T) {
+	dir := t.TempDir()
+	finishedDir := filepath.Join(dir, "finished")
+	if err := os.MkdirAll(filepath.Join(finishedDir, "BLUE"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	finalPath := filepath.Join(finishedDir, "BLUE", "set.mkv")
+	if err := os.WriteFile(finalPath, []byte("original content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &App{
+		config:        filepath.Join(dir, "config.json"),
+		transcodeJobs: map[string]*TranscodeJob{},
+		cfg: AppConfig{Settings: Settings{
+			FinishedDir: finishedDir,
+			TranscodePresets: []TranscodePreset{
+				{ID: "p1", Name: "MP4", Options: TranscodeOptions{Container: "mp4", VideoCodec: "h264", Replace: true}},
+			},
+			TranscodeRules: []TranscodeRule{
+				{ID: "r1", Name: "TS to MP4", Enabled: true, PresetID: "p1", MatchContainer: []string{"ts"}},
+			},
+		}},
+	}
+	rec := &recording{finalPath: finalPath, source: Source{Name: "BLUE", Type: "http"}}
+	a.autoTranscode(rec)
+
+	if rec.finalPath != finalPath {
+		t.Errorf("expected finalPath unchanged for a non-matching rule, got %q", rec.finalPath)
+	}
+	data, err := os.ReadFile(finalPath)
+	if err != nil || string(data) != "original content" {
+		t.Errorf("expected the original file untouched, got %q (err %v)", data, err)
+	}
+}

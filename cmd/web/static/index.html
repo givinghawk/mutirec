@@ -496,6 +496,13 @@
           </div>
           <p class="mb-3 text-sm text-zinc-400">Bulk re-encode selected recordings - change container, drop to a smaller video codec, extract audio-only from a video source, or normalize everything to one format. Runs in the background; you can navigate away while it works.</p>
 
+          <div class="mb-3 flex flex-wrap items-end gap-2">
+            <label class="min-w-[220px]">Load preset<select id="tc-preset-select" class="input">
+              <option value="">(custom - pick fields below)</option>
+            </select></label>
+            <button type="button" id="tc-save-preset" class="btn">Save current settings as preset…</button>
+          </div>
+
           <div class="grid gap-3 md:grid-cols-2 mb-3">
             <label>Container<select id="tc-container" class="input">
               <option value="">Keep source</option>
@@ -1116,6 +1123,19 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>Client ID<input id="youtubeClientId" class="input"></label>
             <label>Client Secret<input id="youtubeClientSecret" type="password" class="input"></label>
             <label>Refresh Token<input id="youtubeRefreshToken" type="password" class="input"></label>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Transcode Presets</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Named bundles of Mass Transcode settings - pick one from the "Load preset" dropdown there, or reference one from an auto-transcode rule below.</p>
+            <div id="tc-preset-list" class="space-y-2"></div>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head">
+              <h2>Auto-Transcode Rules</h2>
+              <button type="button" id="tc-rule-add" class="btn">Add rule</button>
+            </div>
+            <p class="mb-3 text-sm text-zinc-400">Automatically applies a preset to a recording right after it finishes, if it matches every condition set on the rule (blank = any). Rules are tried in order; the first enabled match wins, so a recording is never transcoded by more than one rule.</p>
+            <div id="tc-rule-list" class="space-y-3"></div>
           </div>
           <div class="panel">
             <div class="panel-head"><h2>Account</h2></div>
