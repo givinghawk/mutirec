@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -189,7 +191,11 @@ func containerExt(name string) string {
 // with the requested codec/CRF. Audio follows the same copy-by-default
 // pattern with a requested bitrate when re-encoding.
 func buildTranscodeArgs(input, output, containerName string, opt TranscodeOptions) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-y"}
+	// -progress pipe:1 makes ffmpeg emit machine-readable "key=value"
+	// progress lines (out_time, speed, fps, ...) to stdout on top of
+	// whatever -loglevel prints to stderr - transcodeOneFile reads these to
+	// log periodic progress instead of going silent until the file finishes.
+	args := []string{"-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-y"}
 	if opt.HardwareAccel != "" && opt.HardwareAccel != "none" {
 		args = append(args, "-hwaccel", opt.HardwareAccel)
 	}
@@ -270,11 +276,97 @@ func (a *App) migrateRecordingMeta(oldRelPath, newRelPath string) {
 	}
 }
 
+// transcodeProgressLogInterval bounds how often a single ffmpeg run's
+// periodic progress line gets logged - frequent enough to show it's alive
+// on a long file, not so frequent it floods the job log.
+const transcodeProgressLogInterval = 5 * time.Second
+
+// parseFFmpegTimestamp parses ffmpeg's "-progress" out_time value
+// ("HH:MM:SS.ffffff") into seconds. Deliberately not using out_time_ms/
+// out_time_us - ffmpeg has a long-standing (kept for compatibility) quirk
+// where out_time_ms is actually microseconds, not milliseconds, which the
+// human-readable out_time field sidesteps entirely.
+func parseFFmpegTimestamp(s string) (float64, bool) {
+	parts := strings.SplitN(s, ":", 3)
+	if len(parts) != 3 {
+		return 0, false
+	}
+	h, err1 := strconv.ParseFloat(parts[0], 64)
+	m, err2 := strconv.ParseFloat(parts[1], 64)
+	sec, err3 := strconv.ParseFloat(parts[2], 64)
+	if err1 != nil || err2 != nil || err3 != nil {
+		return 0, false
+	}
+	return h*3600 + m*60 + sec, true
+}
+
+// formatTranscodeProgress renders one ffmpeg "-progress" update (a
+// key=value snapshot) as a short human-readable status line.
+func formatTranscodeProgress(fields map[string]string, totalDurationSec float64) string {
+	var parts []string
+	if elapsed, ok := parseFFmpegTimestamp(fields["out_time"]); ok && totalDurationSec > 0 {
+		pct := elapsed / totalDurationSec * 100
+		if pct > 100 {
+			pct = 100
+		}
+		parts = append(parts, fmt.Sprintf("%.0f%%", pct))
+	}
+	if speed := strings.TrimSuffix(fields["speed"], "x"); speed != "" && speed != "0" && speed != "N/A" {
+		parts = append(parts, speed+"x speed")
+	}
+	if fps := fields["fps"]; fps != "" && fps != "0" {
+		parts = append(parts, fps+" fps")
+	}
+	if len(parts) == 0 {
+		return "in progress"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// runFFmpegTranscode runs ffmpeg for one file, logging a periodic progress
+// line (parsed from the "-progress pipe:1" stream buildTranscodeArgs adds)
+// into job's log instead of going silent until the whole file finishes.
+// ffmpeg's own diagnostic output (loglevel "error") is captured separately
+// and returned verbatim on failure, same detail CombinedOutput used to give.
+func runFFmpegTranscode(job *TranscodeJob, relPath string, args []string, totalDurationSec float64) error {
+	cmd := exec.Command("ffmpeg", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	fields := map[string]string{}
+	lastLog := time.Now()
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		key, val, ok := strings.Cut(scanner.Text(), "=")
+		if !ok {
+			continue
+		}
+		fields[key] = strings.TrimSpace(val)
+		if key != "progress" || val == "end" || time.Since(lastLog) < transcodeProgressLogInterval {
+			continue
+		}
+		lastLog = time.Now()
+		job.logf("%s: %s", relPath, formatTranscodeProgress(fields, totalDurationSec))
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(stderrBuf.String()))
+	}
+	return nil
+}
+
 // transcodeOneFile re-encodes a single recording per opt, writing to a temp
 // path first and only replacing/placing the final file after ffmpeg
 // succeeds. Returns a result describing what happened - errors here are
 // per-file and never abort the rest of the batch.
-func (a *App) transcodeOneFile(abs, relPath string, opt TranscodeOptions) TranscodeFileResult {
+func (a *App) transcodeOneFile(job *TranscodeJob, abs, relPath string, opt TranscodeOptions) TranscodeFileResult {
 	containerName := opt.Container
 	ext := containerExt(containerName)
 	if ext == "" {
@@ -293,13 +385,33 @@ func (a *App) transcodeOneFile(abs, relPath string, opt TranscodeOptions) Transc
 	tempOut := outAbs + ".transcoding.tmp"
 	_ = os.Remove(tempOut)
 
-	args := buildTranscodeArgs(abs, tempOut, containerName, opt)
-	cmd := exec.Command("ffmpeg", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		_ = os.Remove(tempOut)
-		return TranscodeFileResult{Path: relPath, Status: "error", Error: fmt.Sprintf("%s: %s", err, strings.TrimSpace(string(out)))}
+	inInfo, statErr := os.Stat(abs)
+	var totalDurationSec float64
+	if probe, err := probeMediaInfo(abs); err == nil {
+		totalDurationSec, _ = strconv.ParseFloat(strings.TrimSpace(probe.Format.Duration), 64)
+		var vCodec, aCodec string
+		for _, s := range probe.Streams {
+			switch s.CodecType {
+			case "video":
+				if vCodec == "" {
+					vCodec = s.CodecName
+				}
+			case "audio":
+				if aCodec == "" {
+					aCodec = s.CodecName
+				}
+			}
+		}
+		job.logf("%s: input %s/%s, %.0fs, re-encoding video=%s audio=%s -> %s", relPath, vCodec, aCodec, totalDurationSec, opt.VideoCodec, opt.AudioCodec, containerName)
 	}
+
+	started := time.Now()
+	args := buildTranscodeArgs(abs, tempOut, containerName, opt)
+	if err := runFFmpegTranscode(job, relPath, args, totalDurationSec); err != nil {
+		_ = os.Remove(tempOut)
+		return TranscodeFileResult{Path: relPath, Status: "error", Error: err.Error()}
+	}
+	elapsed := time.Since(started)
 
 	root := filepath.Clean(a.snapshotConfig().Settings.FinishedDir)
 	newRel, relErr := filepath.Rel(root, outAbs)
@@ -321,6 +433,14 @@ func (a *App) transcodeOneFile(abs, relPath string, opt TranscodeOptions) Transc
 			return TranscodeFileResult{Path: relPath, Status: "error", Error: fmt.Sprintf("could not place transcoded output: %s", cpErr)}
 		}
 		_ = os.Remove(tempOut)
+	}
+
+	if outInfo, err := os.Stat(outAbs); err == nil && statErr == nil {
+		ratio := 100.0
+		if inInfo.Size() > 0 {
+			ratio = float64(outInfo.Size()) / float64(inInfo.Size()) * 100
+		}
+		job.logf("%s: done in %s (%s -> %s, %.0f%% of original size)", relPath, elapsed.Round(time.Second), formatBytesGo(inInfo.Size()), formatBytesGo(outInfo.Size()), ratio)
 	}
 
 	a.rewriteSidecarsAfterTranscode(abs, outAbs, newRel)
@@ -346,7 +466,7 @@ func (a *App) runTranscodeJob(job *TranscodeJob, paths []string, opt TranscodeOp
 			continue
 		}
 		job.logf("transcoding %s", relPath)
-		result := a.transcodeOneFile(abs, relPath, opt)
+		result := a.transcodeOneFile(job, abs, relPath, opt)
 		if result.Status == "error" {
 			job.logf("%s failed: %s", relPath, result.Error)
 		} else {

@@ -96,6 +96,83 @@ func TestBuildTranscodeArgsAudioOnlyExtraction(t *testing.T) {
 	}
 }
 
+func TestParseFFmpegTimestamp(t *testing.T) {
+	cases := []struct {
+		in     string
+		want   float64
+		wantOK bool
+	}{
+		{"00:01:30.500000", 90.5, true},
+		{"01:00:00.000000", 3600, true},
+		{"garbage", 0, false},
+		{"", 0, false},
+	}
+	for _, c := range cases {
+		got, ok := parseFFmpegTimestamp(c.in)
+		if ok != c.wantOK || (ok && got != c.want) {
+			t.Errorf("parseFFmpegTimestamp(%q) = (%v, %v), want (%v, %v)", c.in, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+func TestFormatTranscodeProgress(t *testing.T) {
+	got := formatTranscodeProgress(map[string]string{"out_time": "00:00:30.000000", "speed": "2.5x", "fps": "60"}, 60)
+	if !strings.Contains(got, "50%") || !strings.Contains(got, "2.5x speed") || !strings.Contains(got, "60 fps") {
+		t.Errorf("expected 50%%/2.5x speed/60 fps, got %q", got)
+	}
+	if got := formatTranscodeProgress(map[string]string{}, 0); got != "in progress" {
+		t.Errorf("expected a fallback for no usable fields, got %q", got)
+	}
+	if got := formatTranscodeProgress(map[string]string{"speed": "N/A"}, 0); strings.Contains(got, "N/A") {
+		t.Errorf("expected an N/A speed to be dropped, got %q", got)
+	}
+}
+
+// fakeFFmpegOnPath drops a fake "ffmpeg" script on PATH for this test only,
+// so runFFmpegTranscode can be exercised without a real media pipeline.
+// script is the shell body; it receives no special args, just needs to
+// write "-progress pipe:1" style lines to stdout and/or stderr and exit.
+func fakeFFmpegOnPath(t *testing.T, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatalf("could not write fake ffmpeg: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRunFFmpegTranscodeLogsProgressAndSucceeds(t *testing.T) {
+	fakeFFmpegOnPath(t, `
+echo "out_time=00:00:15.000000"
+echo "speed=1.0x"
+echo "fps=30"
+echo "progress=continue"
+echo "progress=end"
+exit 0
+`)
+	job := &TranscodeJob{id: "t1", status: "running"}
+	err := runFFmpegTranscode(job, "some/file.mkv", []string{"-i", "in.mkv", "out.mkv"}, 30)
+	if err != nil {
+		t.Fatalf("expected success, got error: %v", err)
+	}
+}
+
+func TestRunFFmpegTranscodeReturnsStderrOnFailure(t *testing.T) {
+	fakeFFmpegOnPath(t, `
+echo "ffmpeg: something went wrong" >&2
+exit 1
+`)
+	job := &TranscodeJob{id: "t2", status: "running"}
+	err := runFFmpegTranscode(job, "some/file.mkv", []string{"-i", "in.mkv", "out.mkv"}, 30)
+	if err == nil {
+		t.Fatal("expected an error for a nonzero exit")
+	}
+	if !strings.Contains(err.Error(), "something went wrong") {
+		t.Errorf("expected the captured stderr in the error, got: %v", err)
+	}
+}
+
 func TestHandleTranscodeStartRequiresAdmin(t *testing.T) {
 	dir := t.TempDir()
 	app := &App{config: filepath.Join(dir, "config.json"), cfg: AppConfig{Settings: Settings{FinishedDir: dir}}}
