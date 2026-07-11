@@ -391,15 +391,21 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	job := &URLFetchJob{
-		id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now(),
+		id: newID(), sourceURL: req.URL, status: "queued", startedAt: time.Now(),
 		cookie: strings.TrimSpace(req.Cookie), username: strings.TrimSpace(req.Username), proxyURL: proxyURL,
 	}
 	if req.Debug {
 		job.enableDebug(destDir)
 	}
 	a.putFetchJob(job)
-	a.event("info", "Started URL fetch job "+job.id+" for "+req.URL)
-	go a.runURLFetchJob(job, req.URL, req.Password, destDir, root)
+	a.event("info", "Queued URL fetch job "+job.id+" for "+req.URL)
+	a.enqueueDownload(func() {
+		job.mu.Lock()
+		job.status = "running"
+		job.startedAt = time.Now()
+		job.mu.Unlock()
+		a.runURLFetchJob(job, req.URL, req.Password, destDir, root)
+	})
 	writeJSON(w, map[string]any{"ok": true, "jobId": job.id})
 }
 
@@ -516,6 +522,7 @@ func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root s
 		return
 	}
 	job.logf("Saved %s (%s)", name, formatBytesGo(job.view().TransferredBytes))
+	a.verifyDownloadHash(job.logf, dest)
 
 	if strings.EqualFold(filepath.Ext(name), ".zip") {
 		extractTo := uniqueSiblingDir(strings.TrimSuffix(dest, filepath.Ext(dest)))
@@ -751,6 +758,7 @@ func (a *App) runStackShareDownload(job *URLFetchJob, scheme, host, token, start
 			return
 		}
 		job.logf("Saved %s", f.node.Name)
+		a.verifyDownloadHash(job.logf, dest)
 	}
 
 	job.finish(nil)

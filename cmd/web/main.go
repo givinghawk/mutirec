@@ -145,6 +145,15 @@ type Settings struct {
 	YouTube                 YouTubeConfig      `json:"youtube"`
 	TranscodePresets        []TranscodePreset  `json:"transcodePresets,omitempty"`
 	TranscodeRules          []TranscodeRule    `json:"transcodeRules,omitempty"`
+	Downloads               DownloadsConfig    `json:"downloads"`
+}
+
+// DownloadsConfig controls the shared worker pool that Fetch-from-URL and
+// YouTube-download jobs are queued through (see enqueueDownload in
+// downloadqueue.go) - extra downloads beyond MaxConcurrent sit in "queued"
+// status until a slot frees up, rather than all running at once.
+type DownloadsConfig struct {
+	MaxConcurrent int `json:"maxConcurrent"`
 }
 
 // YouTubeConfig holds this instance's YouTube Data API v3 credentials,
@@ -512,6 +521,17 @@ type App struct {
 	detectJobsMu sync.Mutex
 	detectJobs   map[string]*DetectJob
 
+	ytJobsMu sync.Mutex
+	ytJobs   map[string]*YouTubeDownloadJob
+
+	// downloadQueue is a shared worker pool that both Fetch-from-URL and
+	// YouTube-download jobs are submitted to, so "start five downloads at
+	// once" queues the extras instead of hammering the network/disk with
+	// them all in parallel. Lazily started (see enqueueDownload) since it
+	// needs a config read to size itself.
+	downloadQueueOnce sync.Once
+	downloadQueue     chan func()
+
 	sourcePresets []SourcePreset
 }
 
@@ -586,6 +606,7 @@ func NewApp(configPath string) (*App, error) {
 		cutterJobs:      map[string]*CutterJob{},
 		transcodeJobs:   map[string]*TranscodeJob{},
 		detectJobs:      map[string]*DetectJob{},
+		ytJobs:          map[string]*YouTubeDownloadJob{},
 		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -685,6 +706,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/explorer/unzip", a.handleExplorerUnzip)
 	mux.HandleFunc("/api/explorer/fetch", a.handleExplorerFetchURL)
 	mux.HandleFunc("/api/explorer/fetch/jobs/", a.handleExplorerFetchJobItem)
+	mux.HandleFunc("/api/explorer/youtube", a.handleExplorerYouTubeDownload)
+	mux.HandleFunc("/api/explorer/youtube/jobs/", a.handleExplorerYouTubeJobItem)
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)
@@ -4212,6 +4235,7 @@ func defaultConfig() AppConfig {
 			EnableWaveform:          true,
 			AllowLiveProxy:          true,
 			LiveRewindWindowSeconds: 1800,
+			Downloads:               DownloadsConfig{MaxConcurrent: 2},
 		},
 		UI:      UISettings{AppName: "MutiRec", Theme: "midnight", Accent: "red"},
 		Sources: []Source{},
@@ -4236,6 +4260,9 @@ func normalizeConfig(cfg *AppConfig) {
 	}
 	if cfg.Settings.WarnFreeBytes == 0 {
 		cfg.Settings.WarnFreeBytes = 5 * 1024 * 1024 * 1024
+	}
+	if cfg.Settings.Downloads.MaxConcurrent <= 0 {
+		cfg.Settings.Downloads.MaxConcurrent = 2
 	}
 	if cfg.Settings.DefaultContainer == "" {
 		cfg.Settings.DefaultContainer = "mkv"

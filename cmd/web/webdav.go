@@ -253,6 +253,7 @@ func (a *App) runWebDAVDownload(job *URLFetchJob, rewrittenURL, password, destDi
 			return
 		}
 		job.logf("Saved %s", name)
+		a.verifyDownloadHash(job.logf, dest)
 		job.finish(nil)
 		return
 	}
@@ -299,6 +300,7 @@ func (a *App) runWebDAVDownload(job *URLFetchJob, rewrittenURL, password, destDi
 			return
 		}
 		job.logf("Saved %s", f.name)
+		a.verifyDownloadHash(job.logf, dest)
 	}
 
 	job.finish(nil)

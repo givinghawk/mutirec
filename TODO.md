@@ -1234,6 +1234,35 @@
   not the pre-transcode one. First enabled match wins. CRUD via `/api/transcode/rules[/​{id}]`;
   deleting a preset a rule references disables that rule rather than leaving a dangling reference.
 
+## Done (this session, part 18) - YouTube download tool, download queue, hash checking
+
+- **YouTube download tool** (new `ytdownload.go`): a second, distinct download feature from
+  Fetch-from-URL, for grabbing already-published videos/playlists/"video sets" (as opposed to
+  live streams, which is what `streamlink` is for). Shells out to `yt-dlp` (installed as the
+  official standalone binary in the `Dockerfile`, alongside `streamlink`/`ffmpeg`/`rclone`) with
+  `--newline` so each progress update is its own line, and `--print after_move:filepath` so the
+  code knows exactly which file(s) yt-dlp produced (works for a single video or a whole
+  playlist) without having to reverse-engineer its output-template naming itself.
+  `YouTubeDownloadJob` mirrors `URLFetchJob`'s job-map/poll pattern (`ytJobs`, `putYTJob`/
+  `getYTJob`, `/api/explorer/youtube` to start, `/api/explorer/youtube/jobs/{id}` to poll).
+  Supports an optional yt-dlp format selector, whole-playlist vs. single-video, and routing
+  through the same configured P2P proxy as Fetch-from-URL. New "Download from YouTube" button/
+  modal next to "Fetch from URL" in the File Explorer tab.
+- **Shared download queue** (new `downloadqueue.go`): both Fetch-from-URL and YouTube-download
+  jobs are now submitted to `a.enqueueDownload(...)` instead of a bare `go a.runX(...)` -  a
+  small fixed worker pool (`Settings.Downloads.MaxConcurrent`, default 2, new Settings ->
+  Recorder field) that a job sits in "queued" status waiting for if all workers are busy, so
+  starting several downloads at once queues the extras rather than running everything in
+  parallel. Frontend polling for both job types now treats "queued" the same as "running" (still
+  polls, shows "Queued…") rather than treating it as a terminal state.
+- **Hash checking on every download** (new `hashcheck.go`, `a.verifyDownloadHash`): after every
+  file Fetch-from-URL (direct link, Stack, WebDAV) or the new YouTube tool saves, its sha256 is
+  computed (reusing the existing cached `a.fileHash` used by matchfile export, so a re-check of
+  an unchanged file is free) and logged to the job's log, and every other file already in that
+  same destination folder is hash-compared against it - a match logs a "you may already have
+  this" note. Deliberately scoped to the destination folder (not a whole-tree scan) to keep the
+  cost bounded on a large library.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

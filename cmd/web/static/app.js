@@ -868,6 +868,7 @@ function fillSettings() {
   $('warnFreeGb').value = bytesToGb(s.warnFreeBytes || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => $(k).checked = !!s[k]);
   $('fileExplorerRoot').value = s.fileExplorerRoot || '';
+  $('downloadsMaxConcurrent').value = (s.downloads && s.downloads.maxConcurrent) || 2;
   $('uiAppName').value = ui.appName || '';
   $('uiLogoUrl').value = ui.logoUrl || '';
   syncImageUploadPreview('uiLogoUrl');
@@ -915,6 +916,7 @@ function readSettings() {
   s.warnFreeBytes = gbToBytes(Number($('warnFreeGb').value) || 0);
   ['enableNfo','enableWaveform','allowLiveProxy'].forEach(k => s[k] = $(k).checked);
   s.fileExplorerRoot = $('fileExplorerRoot').value.trim();
+  s.downloads = { maxConcurrent: Math.max(1, Number($('downloadsMaxConcurrent').value) || 2) };
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
@@ -4503,7 +4505,7 @@ async function pollExplorerFetchJob(jobId) {
     return;
   }
   renderExplorerFetchJob(job);
-  if (job.status === 'running') {
+  if (job.status === 'running' || job.status === 'queued') {
     explorerFetchJobPollTimer = setTimeout(() => pollExplorerFetchJob(jobId), 1000);
   } else {
     $('explorer-fetch-start').disabled = false;
@@ -4514,13 +4516,92 @@ async function pollExplorerFetchJob(jobId) {
 
 function renderExplorerFetchJob(job) {
   const pct = job.totalBytes > 0 ? Math.min(100, Math.round(job.transferredBytes / job.totalBytes * 100)) : 0;
-  $('explorer-fetch-job-title').textContent = job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
+  $('explorer-fetch-job-title').textContent = job.status === 'queued' ? 'Queued…' : job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
   $('explorer-fetch-job-stats').textContent = job.totalBytes > 0
     ? `${formatBytes(job.transferredBytes)} / ${formatBytes(job.totalBytes)} · ${formatBytes(job.speedBps)}/s`
     : `${formatBytes(job.transferredBytes)} · ${formatBytes(job.speedBps)}/s`;
   $('explorer-fetch-job-bar').style.width = `${pct}%`;
   $('explorer-fetch-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
   $('explorer-fetch-job-log').scrollTop = $('explorer-fetch-job-log').scrollHeight;
+}
+
+// --- Download from YouTube (also covers most other sites yt-dlp supports) ---
+
+let explorerYoutubeJobPollTimer = null;
+
+function openExplorerYoutubeModal() {
+  $('explorer-youtube-url').value = '';
+  $('explorer-youtube-playlist').checked = false;
+  $('explorer-youtube-format').value = '';
+  $('explorer-youtube-error').classList.add('hidden');
+  $('explorer-youtube-job-box').classList.add('hidden');
+  const proxyUrl = ((config.settings && config.settings.sharing) || {}).proxyUrl || '';
+  $('explorer-youtube-use-proxy').checked = false;
+  $('explorer-youtube-use-proxy').disabled = !proxyUrl;
+  $('explorer-youtube-proxy-hint').textContent = proxyUrl ? `(${proxyUrl})` : '(none configured - set one in Settings → Peer Sharing)';
+  stopExplorerYoutubePoll();
+  $('explorer-youtube-overlay').classList.remove('hidden');
+}
+function closeExplorerYoutubeModal() {
+  $('explorer-youtube-overlay').classList.add('hidden');
+  stopExplorerYoutubePoll();
+}
+$('explorer-youtube-open').onclick = openExplorerYoutubeModal;
+$('explorer-youtube-close').onclick = closeExplorerYoutubeModal;
+$('explorer-youtube-cancel').onclick = closeExplorerYoutubeModal;
+$('explorer-youtube-overlay').addEventListener('click', (e) => { if (e.target.id === 'explorer-youtube-overlay') closeExplorerYoutubeModal(); });
+
+$('explorer-youtube-start').onclick = async () => {
+  const url = $('explorer-youtube-url').value.trim();
+  const playlist = $('explorer-youtube-playlist').checked;
+  const format = $('explorer-youtube-format').value.trim();
+  const useProxy = $('explorer-youtube-use-proxy').checked;
+  if (!url) { $('explorer-youtube-error').textContent = 'Enter a video or playlist URL first'; $('explorer-youtube-error').classList.remove('hidden'); return; }
+  $('explorer-youtube-error').classList.add('hidden');
+  $('explorer-youtube-start').disabled = true;
+  let result;
+  try {
+    result = await api('/api/explorer/youtube', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, playlist, format, path: explorerPath, useProxy }) });
+  } catch { $('explorer-youtube-start').disabled = false; return; }
+  if (!result.ok) {
+    $('explorer-youtube-error').textContent = result.error || 'Could not start that download.';
+    $('explorer-youtube-error').classList.remove('hidden');
+    $('explorer-youtube-start').disabled = false;
+    return;
+  }
+  $('explorer-youtube-job-box').classList.remove('hidden');
+  pollExplorerYoutubeJob(result.jobId);
+};
+
+function stopExplorerYoutubePoll() {
+  if (explorerYoutubeJobPollTimer) { clearTimeout(explorerYoutubeJobPollTimer); explorerYoutubeJobPollTimer = null; }
+}
+
+async function pollExplorerYoutubeJob(jobId) {
+  stopExplorerYoutubePoll();
+  let job;
+  try {
+    job = await api(`/api/explorer/youtube/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    explorerYoutubeJobPollTimer = setTimeout(() => pollExplorerYoutubeJob(jobId), 2000);
+    return;
+  }
+  renderExplorerYoutubeJob(job);
+  if (job.status === 'running' || job.status === 'queued') {
+    explorerYoutubeJobPollTimer = setTimeout(() => pollExplorerYoutubeJob(jobId), 1000);
+  } else {
+    $('explorer-youtube-start').disabled = false;
+    if (job.status === 'error') toast(`YouTube download failed: ${job.error || 'unknown error'}`, 'error');
+    else { toast(`Downloaded "${job.destName}"`, 'info'); loadExplorer(); }
+  }
+}
+
+function renderExplorerYoutubeJob(job) {
+  $('explorer-youtube-job-title').textContent = job.status === 'queued' ? 'Queued…' : job.status === 'running' ? 'Downloading…' : (job.status === 'error' ? 'Failed' : 'Done');
+  $('explorer-youtube-job-stats').textContent = job.progressLine || '';
+  $('explorer-youtube-job-bar').style.width = `${Math.min(100, job.progressPct || 0)}%`;
+  $('explorer-youtube-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
+  $('explorer-youtube-job-log').scrollTop = $('explorer-youtube-job-log').scrollHeight;
 }
 
 // Explorer only loads on demand (its tab click handler calls loadExplorer()
