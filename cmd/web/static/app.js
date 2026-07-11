@@ -854,6 +854,13 @@ const gbBytes = 1024 * 1024 * 1024;
 function bytesToGb(b) { return Math.round((b / gbBytes) * 100) / 100; }
 function gbToBytes(gb) { return Math.round(gb * gbBytes); }
 
+function toggleBackupMethodFields() {
+  const isWebdav = $('backup-method').value === 'webdav';
+  $('backup-rclone-fields').classList.toggle('hidden', isWebdav);
+  $('backup-webdav-fields').classList.toggle('hidden', !isWebdav);
+}
+$('backup-method').addEventListener('change', toggleBackupMethodFields);
+
 function fillSettings() {
   const s = config.settings, ui = config.ui;
   ['finishedDir','tempDir','logDir','checkIntervalSeconds','liveRewindWindowSeconds','reminderLeadMinutes'].forEach(k => $(k).value = s[k]);
@@ -873,6 +880,13 @@ function fillSettings() {
   $('backupAfterComplete').checked = !!s.backup.afterComplete;
   $('rcloneRemote').value = s.backup.rcloneRemote || '';
   $('rcloneArgs').value = (s.backup.rcloneArgs || []).join('\n');
+  setDropdownValue('backup-method', s.backup.method || 'rclone');
+  toggleBackupMethodFields();
+  const wd = s.backup.webdav || {};
+  $('backup-webdav-url').value = wd.url || '';
+  $('backup-webdav-username').value = wd.username || '';
+  $('backup-webdav-password').value = wd.password || '';
+  $('backup-webdav-proxy').checked = !!wd.proxy;
   const d = s.discordOAuth || {};
   $('discordOAuthEnabled').checked = !!d.enabled;
   $('discordOAuthClientId').value = d.clientId || '';
@@ -901,7 +915,12 @@ function readSettings() {
   config.ui = { appName: $('uiAppName').value, logoUrl: $('uiLogoUrl').value, customCss: $('uiCustomCss').value, customTheme: config.ui.customTheme, themeColors: config.ui.themeColors };
   s.notifications.discordWebhook = $('discordWebhook').value;
   s.notifications.smtp = { enabled: $('smtpEnabled').checked, host: $('smtpHost').value, port: Number($('smtpPort').value), username: $('smtpUsername').value, password: $('smtpPassword').value, from: $('smtpFrom').value, to: $('smtpTo').value };
-  s.backup = { enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked, rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean) };
+  s.backup = {
+    enabled: $('backupEnabled').checked, afterComplete: $('backupAfterComplete').checked,
+    method: $('backup-method').value || 'rclone',
+    rcloneRemote: $('rcloneRemote').value, rcloneArgs: $('rcloneArgs').value.split('\n').map(x => x.trim()).filter(Boolean),
+    webdav: { url: $('backup-webdav-url').value, username: $('backup-webdav-username').value, password: $('backup-webdav-password').value, proxy: $('backup-webdav-proxy').checked },
+  };
   s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
   s.youtube = { enabled: $('youtubeEnabled').checked, clientId: $('youtubeClientId').value, clientSecret: $('youtubeClientSecret').value, refreshToken: $('youtubeRefreshToken').value };
 }

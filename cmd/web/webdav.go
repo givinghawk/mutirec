@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -301,4 +302,113 @@ func (a *App) runWebDAVDownload(job *URLFetchJob, rewrittenURL, password, destDi
 	}
 
 	job.finish(nil)
+}
+
+// ============================================================================
+// WebDAV backup destination (BackupConfig.Method == "webdav"): PUTs a
+// finished recording straight to a WebDAV server at the same path it has
+// relative to FinishedDir, as an alternative to the rclone-based backup for
+// a plain WebDAV endpoint with no rclone remote configured for it.
+// ============================================================================
+
+// webdavBackupClient builds the HTTP client used for backup uploads,
+// optionally routed through the shared P2P-sharing proxy setting (rather
+// than adding a second, separate proxy config just for this).
+func webdavBackupClient(cfg AppConfig) (*http.Client, error) {
+	if !cfg.Settings.Backup.WebDAV.Proxy || cfg.Settings.Sharing.ProxyURL == "" {
+		return &http.Client{Transport: &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}}, nil
+	}
+	return shareHTTPClient(cfg.Settings.Sharing.ProxyURL)
+}
+
+// webdavMkdirAll creates every intermediate WebDAV collection along relDir
+// (e.g. "BLUE/2026") via MKCOL - WebDAV has no "mkdir -p", so each level is
+// created individually, tolerating "already exists" (405/409).
+func webdavMkdirAll(client *http.Client, base *url.URL, username, password, relDir string) error {
+	relDir = filepath.ToSlash(relDir)
+	if relDir == "" || relDir == "." {
+		return nil
+	}
+	cur := *base
+	for _, p := range strings.Split(relDir, "/") {
+		if p == "" {
+			continue
+		}
+		cur.Path = strings.TrimSuffix(cur.Path, "/") + "/" + p + "/"
+		req, err := http.NewRequest("MKCOL", cur.String(), nil)
+		if err != nil {
+			return err
+		}
+		if username != "" || password != "" {
+			req.SetBasicAuth(username, password)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusConflict {
+			return fmt.Errorf("could not create WebDAV folder %q: HTTP %d", p, resp.StatusCode)
+		}
+	}
+	return nil
+}
+
+// backupWebDAV uploads rec.finalPath to cfg.Settings.Backup.WebDAV, at the
+// same relative path it has under FinishedDir, creating intermediate
+// collections as needed.
+func (a *App) backupWebDAV(rec *recording, cfg AppConfig) error {
+	wd := cfg.Settings.Backup.WebDAV
+	if wd.URL == "" {
+		return fmt.Errorf("no WebDAV backup URL configured")
+	}
+	rewritten, _ := rewriteWebDAVScheme(wd.URL) // tolerate webdav(s):// here too, not just http(s)
+	base, err := url.Parse(rewritten)
+	if err != nil {
+		return fmt.Errorf("invalid WebDAV backup URL: %w", err)
+	}
+	rel, err := filepath.Rel(cfg.Settings.FinishedDir, rec.finalPath)
+	if err != nil {
+		return fmt.Errorf("could not compute the recording's relative path: %w", err)
+	}
+	rel = filepath.ToSlash(rel)
+
+	client, err := webdavBackupClient(cfg)
+	if err != nil {
+		return err
+	}
+	if err := webdavMkdirAll(client, base, wd.Username, wd.Password, path.Dir(rel)); err != nil {
+		return err
+	}
+
+	f, err := os.Open(rec.finalPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	dest := *base
+	dest.Path = strings.TrimSuffix(dest.Path, "/") + "/" + rel
+	req, err := http.NewRequest(http.MethodPut, dest.String(), f)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = info.Size()
+	if wd.Username != "" || wd.Password != "" {
+		req.SetBasicAuth(wd.Username, wd.Password)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+		return fmt.Errorf("WebDAV PUT returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }

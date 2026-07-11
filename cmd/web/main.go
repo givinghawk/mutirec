@@ -186,6 +186,24 @@ type BackupConfig struct {
 	RcloneRemote  string   `json:"rcloneRemote"`
 	RcloneArgs    []string `json:"rcloneArgs"`
 	AfterComplete bool     `json:"afterComplete"`
+
+	// Method picks which backup mechanism a.backup() uses: "rclone" (the
+	// original, default when empty) shells out to the rclone binary above;
+	// "webdav" instead PUTs the file directly to WebDAV, for a plain WebDAV
+	// server with no rclone remote configured for it.
+	Method string       `json:"method,omitempty"`
+	WebDAV WebDAVBackup `json:"webdav,omitempty"`
+}
+
+// WebDAVBackup holds the destination and credentials for BackupConfig's
+// "webdav" method - a finished recording is PUT to WebDAVBackup.URL plus its
+// path relative to FinishedDir, creating any intermediate WebDAV
+// collections (MKCOL) that don't already exist.
+type WebDAVBackup struct {
+	URL      string `json:"url"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+	Proxy    bool   `json:"proxy,omitempty"` // route through Settings.Sharing.ProxyURL
 }
 
 type Notifications struct {
@@ -3933,7 +3951,18 @@ Recorder: MutiRec %s
 
 func (a *App) backup(rec *recording) {
 	cfg := a.snapshotConfig()
-	if !cfg.Settings.Backup.Enabled || !cfg.Settings.Backup.AfterComplete || cfg.Settings.Backup.RcloneRemote == "" {
+	if !cfg.Settings.Backup.Enabled || !cfg.Settings.Backup.AfterComplete {
+		return
+	}
+	if cfg.Settings.Backup.Method == "webdav" {
+		if err := a.backupWebDAV(rec, cfg); err != nil {
+			a.event("error", fmt.Sprintf("[%s] WebDAV backup failed: %s", rec.source.Name, err))
+			return
+		}
+		a.event("info", fmt.Sprintf("[%s] WebDAV backup complete", rec.source.Name))
+		return
+	}
+	if cfg.Settings.Backup.RcloneRemote == "" {
 		return
 	}
 	args := append([]string{"copy", rec.finalPath, cfg.Settings.Backup.RcloneRemote}, cfg.Settings.Backup.RcloneArgs...)

@@ -828,6 +828,7 @@ func redactSecrets(cfg *AppConfig) {
 	cfg.Settings.Notifications.DiscordWebhook = ""
 	cfg.Settings.DiscordOAuth.ClientSecret = ""
 	cfg.Settings.Backup.RcloneArgs = nil
+	cfg.Settings.Backup.WebDAV.Password = ""
 	cfg.Settings.YouTube.ClientSecret = ""
 	cfg.Settings.YouTube.RefreshToken = ""
 	// A configured proxy URL can carry embedded credentials (user:pass@host).

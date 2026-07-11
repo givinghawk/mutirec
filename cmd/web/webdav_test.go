@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -183,5 +184,79 @@ func TestDownloadWebDAVFileRejectsBadAuth(t *testing.T) {
 	err := downloadWebDAVFile(srv.Client(), u, "wrong", "wrong", filepath.Join(dir, "out.txt"), job)
 	if err == nil {
 		t.Fatal("expected an error for a 401 response")
+	}
+}
+
+// TestBackupWebDAVCreatesFoldersAndUploads confirms backupWebDAV MKCOLs each
+// intermediate directory before PUTting the file to its full relative path,
+// and sends Basic Auth on both.
+func TestBackupWebDAVCreatesFoldersAndUploads(t *testing.T) {
+	var mkcolPaths []string
+	var putPath, putBody string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "bob" || pass != "secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case "MKCOL":
+			mkcolPaths = append(mkcolPaths, r.URL.Path)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodPut:
+			putPath = r.URL.Path
+			body, _ := io.ReadAll(r.Body)
+			putBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "unexpected method", 400)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	finishedDir := t.TempDir()
+	relDir := filepath.Join(finishedDir, "BLUE", "2026")
+	if err := os.MkdirAll(relDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	finalPath := filepath.Join(relDir, "set.mkv")
+	if err := os.WriteFile(finalPath, []byte("recording bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := AppConfig{Settings: Settings{
+		FinishedDir: finishedDir,
+		Backup: BackupConfig{
+			Method: "webdav",
+			WebDAV: WebDAVBackup{URL: srv.URL, Username: "bob", Password: "secret"},
+		},
+	}}
+	a := &App{}
+	rec := &recording{finalPath: finalPath}
+	if err := a.backupWebDAV(rec, cfg); err != nil {
+		t.Fatalf("backupWebDAV: %v", err)
+	}
+
+	if len(mkcolPaths) != 2 || mkcolPaths[0] != "/BLUE/" || mkcolPaths[1] != "/BLUE/2026/" {
+		t.Errorf("expected MKCOL for /BLUE/ then /BLUE/2026/, got %v", mkcolPaths)
+	}
+	if putPath != "/BLUE/2026/set.mkv" {
+		t.Errorf("expected PUT to /BLUE/2026/set.mkv, got %q", putPath)
+	}
+	if putBody != "recording bytes" {
+		t.Errorf("expected the file's contents to be uploaded, got %q", putBody)
+	}
+}
+
+func TestWebdavMkdirAllToleratesAlreadyExists(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed) // "already exists" per RFC 4918
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	if err := webdavMkdirAll(srv.Client(), base, "", "", "already/there"); err != nil {
+		t.Fatalf("expected 405 (already exists) to be tolerated, got error: %v", err)
 	}
 }
