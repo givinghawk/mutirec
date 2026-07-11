@@ -54,6 +54,17 @@ type URLFetchJob struct {
 	// so it's safe to read without holding mu.
 	cookie string
 
+	// username, if set, is used for HTTP Basic Auth alongside password (see
+	// runURLFetchJob's password parameter) - only the WebDAV path uses this;
+	// every other share convention this file supports has an implicit
+	// username (the share token) and only needs a password.
+	username string
+
+	// proxyURL, if set, routes every request this job makes through the
+	// given proxy (http/https/socks5/socks4/socks4a - see proxyTransport in
+	// proxy.go). Empty means dial directly. Immutable after job creation.
+	proxyURL string
+
 	totalBytes, transferredBytes int64
 	speedBps                     float64
 	errMsg                       string
@@ -179,6 +190,13 @@ func (j *URLFetchJob) debugf(format string, args ...any) {
 // is on, otherwise just the plain transport.
 func (j *URLFetchJob) httpTransport() http.RoundTripper {
 	var rt http.RoundTripper = &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout}
+	if j.proxyURL != "" {
+		if t, err := proxyTransport(j.proxyURL); err == nil {
+			rt = t
+		} else {
+			j.logf("Could not use the configured proxy (%s) - falling back to a direct connection", err)
+		}
+	}
 	j.debugMu.Lock()
 	enabled := j.debugFile != nil
 	j.debugMu.Unlock()
@@ -339,10 +357,12 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		URL      string `json:"url"`
+		Username string `json:"username"`
 		Password string `json:"password"`
 		Path     string `json:"path"`
 		Debug    bool   `json:"debug"`
 		Cookie   string `json:"cookie"`
+		UseProxy bool   `json:"useProxy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
@@ -361,7 +381,19 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job := &URLFetchJob{id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now(), cookie: strings.TrimSpace(req.Cookie)}
+	proxyURL := ""
+	if req.UseProxy {
+		proxyURL = a.snapshotConfig().Settings.Sharing.ProxyURL
+		if proxyURL == "" {
+			writeJSON(w, map[string]any{"ok": false, "error": "no proxy is configured - set one in Settings -> Peer Sharing (P2P) first"})
+			return
+		}
+	}
+
+	job := &URLFetchJob{
+		id: newID(), sourceURL: req.URL, status: "running", startedAt: time.Now(),
+		cookie: strings.TrimSpace(req.Cookie), username: strings.TrimSpace(req.Username), proxyURL: proxyURL,
+	}
 	if req.Debug {
 		job.enableDebug(destDir)
 	}
@@ -373,6 +405,15 @@ func (a *App) handleExplorerFetchURL(w http.ResponseWriter, r *http.Request) {
 
 // runURLFetchJob is the background worker started by handleExplorerFetchURL.
 func (a *App) runURLFetchJob(job *URLFetchJob, rawURL, password, destDir, root string) {
+	// A webdav://.../webdavs://... URL (the rclone/Cyberduck convention for
+	// naming a WebDAV endpoint unambiguously, since a WebDAV server is
+	// otherwise indistinguishable from a plain HTTP one by URL shape alone)
+	// gets its own PROPFIND-based walker instead of a plain GET.
+	if rewritten, isWebDAV := rewriteWebDAVScheme(rawURL); isWebDAV {
+		a.runWebDAVDownload(job, rewritten, password, destDir, root)
+		return
+	}
+
 	client := &http.Client{Transport: job.httpTransport()}
 
 	// A Stack (stackstorage) share URL that already names a specific folder

@@ -30,4 +30,36 @@ services:
       # - /mnt/mutirec-recordings:/data/recordings
       # rclone option: mount your rclone.conf for backups.
       # - ~/.config/rclone/rclone.conf:/home/app/.config/rclone/rclone.conf:ro
+    # Hardware transcoding (VAAPI/QSV) - passed through by default since most
+    # self-hosted Linux boxes have an integrated Intel/AMD GPU at /dev/dri and
+    # this costs nothing on a host that doesn't (see the note below). Set a
+    # source's Hardware Accel to "vaapi" or "qsv" in the WebUI to actually use
+    # it - this alone only makes the device available in the container.
+    devices:
+      - /dev/dri:/dev/dri
+    # The container needs to be in whatever group(s) own /dev/dri on the
+    # *host* (usually "video" and/or "render") to actually read/write it -
+    # group_add takes numeric GIDs, which vary by distro. Find yours with:
+    #   getent group video render
+    # and adjust these two numbers to match (44/109 are common Debian/Ubuntu
+    # defaults, used here as a reasonable starting guess).
+    group_add:
+      - "44"
+      - "109"
+    # If this host has no GPU at all, `docker compose up` will fail outright
+    # on the `devices:` line above (unlike a merely-wrong group_add, which
+    # just means VAAPI/QSV won't have permission) - delete the `devices:` and
+    # `group_add:` blocks entirely in that case; software encoding still
+    # works fine without them.
+    #
+    # NVIDIA (CUDA/NVENC) instead needs the NVIDIA Container Toolkit
+    # installed on the host (https://github.com/NVIDIA/nvidia-container-toolkit)
+    # - uncomment this once that's set up:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 

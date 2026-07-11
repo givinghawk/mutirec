@@ -4421,11 +4421,16 @@ $('explorer-download-selected').onclick = () => {
 
 function openExplorerFetchModal() {
   $('explorer-fetch-url').value = '';
+  $('explorer-fetch-username').value = '';
   $('explorer-fetch-password').value = '';
   $('explorer-fetch-cookie').value = '';
   $('explorer-fetch-debug').checked = false;
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-job-box').classList.add('hidden');
+  const proxyUrl = ((config.settings && config.settings.sharing) || {}).proxyUrl || '';
+  $('explorer-fetch-use-proxy').checked = false;
+  $('explorer-fetch-use-proxy').disabled = !proxyUrl;
+  $('explorer-fetch-proxy-hint').textContent = proxyUrl ? `(${proxyUrl})` : '(none configured - set one in Settings → Peer Sharing)';
   stopExplorerFetchPoll();
   $('explorer-fetch-overlay').classList.remove('hidden');
 }
@@ -4440,15 +4445,17 @@ $('explorer-fetch-overlay').addEventListener('click', (e) => { if (e.target.id =
 
 $('explorer-fetch-start').onclick = async () => {
   const url = $('explorer-fetch-url').value.trim();
+  const username = $('explorer-fetch-username').value.trim();
   const password = $('explorer-fetch-password').value;
   const cookie = $('explorer-fetch-cookie').value.trim();
   const debug = $('explorer-fetch-debug').checked;
+  const useProxy = $('explorer-fetch-use-proxy').checked;
   if (!url) { $('explorer-fetch-error').textContent = 'Enter a URL first'; $('explorer-fetch-error').classList.remove('hidden'); return; }
   $('explorer-fetch-error').classList.add('hidden');
   $('explorer-fetch-start').disabled = true;
   let result;
   try {
-    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, password, cookie, path: explorerPath, debug }) });
+    result = await api('/api/explorer/fetch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, username, password, cookie, path: explorerPath, debug, useProxy }) });
   } catch { $('explorer-fetch-start').disabled = false; return; }
   if (!result.ok) {
     $('explorer-fetch-error').textContent = result.error || 'Could not start that download.';

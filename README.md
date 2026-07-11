@@ -567,8 +567,21 @@ If you enable transcoding, choose one of:
 - `qsv` for Intel Quick Sync.
 - `vaapi` for VAAPI.
 
-You must also pass the matching device/runtime into Docker. For example, VAAPI
-usually needs `/dev/dri`, and NVIDIA needs NVIDIA Container Toolkit.
+`docker-compose.yml` passes `/dev/dri` (VAAPI/QSV) into the container by
+default, with `group_add` entries for the common Debian/Ubuntu `video`/`render`
+group IDs - if your host uses different GIDs, run `getent group video render`
+on the host and adjust those two numbers to match. If the host has no GPU at
+all, delete the `devices:`/`group_add:` block entirely (otherwise `docker
+compose up` fails outright trying to bind a device node that doesn't exist).
+The image itself also installs the VAAPI/QSV userspace drivers
+(`mesa-va-drivers`, `intel-media-va-driver-non-free`) and `vainfo`, so `docker
+compose exec recorder vainfo` is a quick way to confirm the device is visible
+and usable from inside the container.
+
+NVIDIA (CUDA/NVENC) instead needs the [NVIDIA Container
+Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit) installed on the
+host - there's a commented-out `deploy.resources.reservations.devices` block
+in `docker-compose.yml` to uncomment once that's set up.
 
 ## Development
 

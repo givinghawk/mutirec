@@ -916,10 +916,12 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <h2>Fetch from URL</h2>
             <button type="button" id="explorer-fetch-close" class="btn" aria-label="Close">&times;</button>
           </div>
-          <p class="mb-2 text-sm text-zinc-400">Downloads directly into the current folder, in the background. Works with a direct download link, or a public share link from an ownCloud/Nextcloud-based host (TransIP Stack included) - a zip is auto-extracted once it finishes.</p>
+          <p class="mb-2 text-sm text-zinc-400">Downloads directly into the current folder, in the background. Works with a direct download link, a public share link from an ownCloud/Nextcloud-based host (TransIP Stack included), or a <code>webdav://</code>/<code>webdavs://</code> URL (prefix a regular WebDAV URL with one of those instead of http/https) - either a single file or a whole folder. A zip is auto-extracted once it finishes.</p>
           <label>URL<input id="explorer-fetch-url" class="input" placeholder="https://stack.example.com/s/xxxxx or a direct link"></label>
-          <label>Share password <span class="text-xs text-zinc-500">(only if the link is protected)</span><input id="explorer-fetch-password" type="password" class="input"></label>
+          <label>WebDAV username <span class="text-xs text-zinc-500">(only for a webdav:// or webdavs:// URL that needs Basic Auth)</span><input id="explorer-fetch-username" class="input" autocomplete="off"></label>
+          <label>Share/WebDAV password <span class="text-xs text-zinc-500">(only if the link is protected)</span><input id="explorer-fetch-password" type="password" class="input"></label>
           <label>Session cookie <span class="text-xs text-zinc-500">(only if the share needs your login - copy it from your browser's DevTools &gt; Application/Storage &gt; Cookies for that site)</span><input id="explorer-fetch-cookie" type="password" class="input" placeholder="e.g. session=abc123; other=xyz"></label>
+          <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-fetch-use-proxy" type="checkbox" class="accent-red-500"> Route through configured proxy <span id="explorer-fetch-proxy-hint" class="text-xs text-zinc-500"></span></label>
           <label class="mt-2 inline-flex items-center gap-2 text-sm"><input id="explorer-fetch-debug" type="checkbox" class="accent-red-500"> Debug mode <span class="text-xs text-zinc-500">(writes every HTTP request/response to a .log file next to the download - for troubleshooting a share link that isn't working)</span></label>
           <p id="explorer-fetch-error" class="mt-1 hidden text-sm text-rose-300"></p>
           <div class="mt-3 flex justify-end gap-2">
