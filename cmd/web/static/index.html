@@ -323,7 +323,11 @@
             <button type="button" id="rec-player-close" class="btn">&larr; Back</button>
             <h2 id="rec-player-title" class="truncate text-base font-semibold">Recording</h2>
           </div>
-          <a id="rec-player-download" class="btn" download title="Download">&#8681; Download</a>
+          <div class="flex flex-shrink-0 items-center gap-2">
+            <button type="button" id="rec-player-transcode-open" class="btn" data-admin-only>Transcode…</button>
+            <button type="button" id="rec-player-youtube-open" class="btn" data-admin-only>Upload to YouTube</button>
+            <a id="rec-player-download" class="btn" download title="Download">&#8681; Download</a>
+          </div>
         </div>
         <div class="grid gap-4 lg:grid-cols-[1fr_320px]">
           <div class="space-y-4">
@@ -392,6 +396,49 @@
           </div>
         </div>
       </section>
+
+      <!-- Transcode-one-recording modal (player) -->
+      <div id="rec-transcode-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Transcode this recording</h2>
+            <button type="button" id="rec-transcode-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p id="rec-transcode-no-presets" class="mb-2 hidden text-sm text-zinc-400">No transcode presets exist yet - create one in Settings → Transcode Presets first.</p>
+          <label>Preset
+            <select id="rec-transcode-preset" class="input"></select>
+          </label>
+          <p id="rec-transcode-status" class="mt-2 text-sm text-zinc-400"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" id="rec-transcode-cancel">Close</button>
+            <button type="button" class="btn primary" id="rec-transcode-start">Start</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Upload-to-YouTube modal (player) -->
+      <div id="rec-youtube-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Upload to YouTube</h2>
+            <button type="button" id="rec-youtube-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Uploads this recording as-is. Requires YouTube to be configured in Settings → YouTube Auto-Upload.</p>
+          <label>Title <span class="text-xs text-zinc-500">(optional - defaults to the artist/channel on file, or the filename)</span><input id="rec-youtube-title" class="input"></label>
+          <label>Privacy
+            <select id="rec-youtube-privacy" class="input">
+              <option value="unlisted">Unlisted</option>
+              <option value="private">Private</option>
+              <option value="public">Public</option>
+            </select>
+          </label>
+          <p id="rec-youtube-status" class="mt-2 text-sm text-zinc-400"></p>
+          <div class="mt-3 flex justify-end gap-2">
+            <button type="button" class="btn" id="rec-youtube-cancel">Close</button>
+            <button type="button" class="btn primary" id="rec-youtube-start">Start Upload</button>
+          </div>
+        </div>
+      </div>
 
       <section id="recordings" class="view hidden space-y-4">
         <div class="panel lib-toolbar flex flex-wrap items-center justify-between gap-3">

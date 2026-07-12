@@ -1315,6 +1315,26 @@
   (rebuilding from scratch on a backward seek) - a VOD-chat-replay panel next to Details/More
   recordings, capped to the last 300 rendered lines so a long recording's chat never bloats the DOM.
 
+## Done (this session, part 21) - Per-recording Transcode/Upload-to-YouTube buttons
+
+- **`youtubeUploadFile`** (`youtube.go`) is now generic over `(accessToken, path, title,
+  description, privacy string)` instead of taking a `*recording` directly - `uploadYouTube`
+  (the auto-upload-after-recording path) just passes `rec.finalPath`/`rec.source.Name`/etc
+  through, unchanged behavior. `youtubeTokenURL`/`youtubeUploadURL` became vars (not consts) so
+  tests can point them at a local `httptest.Server`.
+- **New `youtubemanual.go`**: `POST /api/recordings/youtube-upload` starts a one-off upload of
+  any already-finished recording (identified by its path relative to FinishedDir) as a background
+  `YouTubeUploadJob`, polled via `GET /api/recordings/youtube-upload/jobs/{id}` - same
+  job-map-with-view() pattern as every other background job in this codebase. Defaults the title
+  to `RecordingMeta`'s artist/channel if the file has been organized into the library, falling
+  back to the filename; privacy defaults to unlisted like the auto-upload path.
+- **Player buttons**: the recording player header now has "Transcode…" and "Upload to YouTube"
+  buttons (admin-only). Transcode reuses the existing `/api/transcode/start` (already accepted
+  an arbitrary path list, not just Mass Transcode's multi-select) with a saved preset - the modal
+  just points at "create one in Settings" if none exist yet, rather than duplicating Mass
+  Transcode's whole custom-options form. Upload to YouTube offers a title override and a
+  privacy dropdown, then polls the new job endpoint and shows the resulting video link inline.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

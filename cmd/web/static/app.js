@@ -3291,6 +3291,7 @@ $('assign-save').onclick = async () => {
 // control bar, wired directly to the Player API instead of a raw <video>.
 
 let currentPlaybackUrl = '';
+let currentRecordingPath = '';
 
 function ensureRecPlayer() {
   if (recPlayer) return recPlayer;
@@ -3310,6 +3311,7 @@ function openRecordingPlayer(path, name) {
   switchToView('player');
 
   const player = ensureRecPlayer();
+  currentRecordingPath = path;
   currentPlaybackUrl = `/media/${encodeMediaPath(path)}`;
   player.src({ src: currentPlaybackUrl });
   player.currentTime(0);
@@ -4846,6 +4848,117 @@ $('bm-apply').onclick = async () => {
   closeBatchMatchModal();
   await refresh();
 };
+
+// --- Transcode / Upload to YouTube (recording player) ---
+
+function openRecTranscodeModal() {
+  if (!currentRecordingPath) return;
+  const presets = config.settings.transcodePresets || [];
+  const sel = $('rec-transcode-preset');
+  sel.innerHTML = presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  $('rec-transcode-no-presets').classList.toggle('hidden', presets.length > 0);
+  sel.classList.toggle('hidden', presets.length === 0);
+  $('rec-transcode-start').disabled = presets.length === 0;
+  $('rec-transcode-status').textContent = '';
+  $('rec-transcode-overlay').classList.remove('hidden');
+}
+function closeRecTranscodeModal() { $('rec-transcode-overlay').classList.add('hidden'); }
+$('rec-player-transcode-open').onclick = openRecTranscodeModal;
+$('rec-transcode-close').onclick = closeRecTranscodeModal;
+$('rec-transcode-cancel').onclick = closeRecTranscodeModal;
+$('rec-transcode-overlay').addEventListener('click', (e) => { if (e.target.id === 'rec-transcode-overlay') closeRecTranscodeModal(); });
+
+$('rec-transcode-start').onclick = async () => {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === $('rec-transcode-preset').value);
+  if (!preset) return;
+  $('rec-transcode-start').disabled = true;
+  $('rec-transcode-status').textContent = 'Starting…';
+  let res;
+  try {
+    res = await api('/api/transcode/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: [currentRecordingPath], options: preset.options }) });
+  } catch { $('rec-transcode-start').disabled = false; $('rec-transcode-status').textContent = 'Could not start the transcode.'; return; }
+  pollRecTranscodeJob(res.jobId);
+};
+
+async function pollRecTranscodeJob(jobId) {
+  let job;
+  try {
+    job = await api(`/api/transcode/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    setTimeout(() => pollRecTranscodeJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('rec-transcode-status').textContent = `Transcoding… (${job.done || 0}/${job.totalFiles || 1})`;
+    setTimeout(() => pollRecTranscodeJob(jobId), 1500);
+    return;
+  }
+  $('rec-transcode-start').disabled = false;
+  if (job.failed > 0) {
+    const err = (job.results || []).find(r => r.status === 'error');
+    $('rec-transcode-status').textContent = (err && err.error) || 'Transcode failed.';
+    toast('Transcode failed', 'error');
+  } else {
+    $('rec-transcode-status').textContent = 'Done.';
+    toast('Transcode complete', 'info');
+    closeRecTranscodeModal();
+    await reloadLibraryData();
+  }
+}
+
+function openRecYoutubeModal() {
+  if (!currentRecordingPath) return;
+  $('rec-youtube-title').value = '';
+  $('rec-youtube-privacy').value = 'unlisted';
+  $('rec-youtube-status').textContent = '';
+  $('rec-youtube-overlay').classList.remove('hidden');
+}
+function closeRecYoutubeModal() { $('rec-youtube-overlay').classList.add('hidden'); }
+$('rec-player-youtube-open').onclick = openRecYoutubeModal;
+$('rec-youtube-close').onclick = closeRecYoutubeModal;
+$('rec-youtube-cancel').onclick = closeRecYoutubeModal;
+$('rec-youtube-overlay').addEventListener('click', (e) => { if (e.target.id === 'rec-youtube-overlay') closeRecYoutubeModal(); });
+
+$('rec-youtube-start').onclick = async () => {
+  $('rec-youtube-start').disabled = true;
+  $('rec-youtube-status').textContent = 'Uploading…';
+  let res;
+  try {
+    res = await api('/api/recordings/youtube-upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentRecordingPath, title: $('rec-youtube-title').value.trim(), privacy: $('rec-youtube-privacy').value }),
+    });
+  } catch { $('rec-youtube-start').disabled = false; $('rec-youtube-status').textContent = 'Could not start the upload.'; return; }
+  if (!res.ok) {
+    $('rec-youtube-start').disabled = false;
+    $('rec-youtube-status').textContent = res.error || 'Could not start the upload.';
+    return;
+  }
+  pollRecYoutubeUploadJob(res.jobId);
+};
+
+async function pollRecYoutubeUploadJob(jobId) {
+  let job;
+  try {
+    job = await api(`/api/recordings/youtube-upload/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    setTimeout(() => pollRecYoutubeUploadJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('rec-youtube-status').textContent = 'Uploading…';
+    setTimeout(() => pollRecYoutubeUploadJob(jobId), 2000);
+    return;
+  }
+  $('rec-youtube-start').disabled = false;
+  if (job.status === 'error') {
+    $('rec-youtube-status').textContent = job.error || 'Upload failed.';
+    toast('YouTube upload failed', 'error');
+  } else {
+    $('rec-youtube-status').innerHTML = `Done: <a href="${escapeAttr(job.videoUrl)}" target="_blank" rel="noopener">${escapeHtml(job.videoUrl)}</a>`;
+    toast('Uploaded to YouTube', 'info');
+  }
+}
 
 // Explorer only loads on demand (its tab click handler calls loadExplorer()
 // below, alongside the other per-tab loaders), not eagerly at page load.

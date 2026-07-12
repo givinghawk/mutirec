@@ -545,6 +545,9 @@ type App struct {
 	ytJobsMu sync.Mutex
 	ytJobs   map[string]*YouTubeDownloadJob
 
+	ytUploadJobsMu sync.Mutex
+	ytUploadJobs   map[string]*YouTubeUploadJob
+
 	// downloadQueue is a shared worker pool that both Fetch-from-URL and
 	// YouTube-download jobs are submitted to, so "start five downloads at
 	// once" queues the extras instead of hammering the network/disk with
@@ -633,6 +636,7 @@ func NewApp(configPath string) (*App, error) {
 		transcodeJobs:   map[string]*TranscodeJob{},
 		detectJobs:      map[string]*DetectJob{},
 		ytJobs:          map[string]*YouTubeDownloadJob{},
+		ytUploadJobs:    map[string]*YouTubeUploadJob{},
 		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -707,6 +711,8 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/timecode", a.handleRecordingTimecode)
 	mux.HandleFunc("/api/recordings/waveform", a.handleRecordingWaveform)
 	mux.HandleFunc("/api/recordings/chat", a.handleRecordingChat)
+	mux.HandleFunc("/api/recordings/youtube-upload", a.handleRecordingYouTubeUpload)
+	mux.HandleFunc("/api/recordings/youtube-upload/jobs/", a.handleRecordingYouTubeUploadJobItem)
 	mux.HandleFunc("/api/recordings/backfill-timecodes", a.handleBackfillTimecodes)
 	mux.HandleFunc("/api/cutter/markers", a.handleCutterMarkers)
 	mux.HandleFunc("/api/cutter/preview", a.handleCutterPreview)
