@@ -82,7 +82,7 @@ type RecordingSidecar struct {
 // the existing ".nfo" exclusion, extended to cover the newer sidecar kinds).
 func isSidecarPath(p string) bool {
 	lower := strings.ToLower(p)
-	for _, suffix := range []string{".nfo", ".timecode.json", ".markers.json", ".timetable.json"} {
+	for _, suffix := range []string{".nfo", ".timecode.json", ".markers.json", ".timetable.json", ".chat.jsonl"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}

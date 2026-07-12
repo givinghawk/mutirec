@@ -1286,6 +1286,35 @@
   stage folder (or skip to use its own name as-is); step 4 previews every file's resolved
   stage/date/guessed-artist before Apply actually calls the endpoint for real.
 
+## Done (this session, part 20) - Twitch chat archive/playback + stream title in NFO
+
+- **New `twitchapi.go`**: looks up a Twitch channel's current live stream title via the Helix
+  "Get Streams" endpoint, authenticated with an app access token (client-credentials grant -
+  `Settings.Twitch{Enabled, ClientID, ClientSecret}`, new Settings -> Twitch panel) since
+  everything read is public - no per-user OAuth consent needed, unlike YouTube auto-upload's
+  pasted-refresh-token flow. Token cached on `App.twitchToken` until near expiry.
+  `twitchTokenURL`/`twitchStreamsURL` are package vars (not consts) so tests can point them at a
+  local `httptest.Server`.
+- **NFO title**: `execute()` (`main.go`) now fetches the stream title synchronously for a Twitch
+  source before starting streamlink/ffmpeg, stored on the new `recording.streamTitle` field;
+  `writeNFO` prefers it over `rec.source.Name` when non-empty (falls back to the old behavior
+  otherwise - channel offline, Twitch not configured, or the lookup just failed).
+- **New `twitchchat.go`**: `Source.ArchiveTwitchChat` (new Sources-tab toggle, Twitch only) makes
+  `execute()` spawn `captureTwitchChat`, which connects anonymously (a `justinfan<N>` IRC login -
+  no OAuth needed for read-only access) to `irc.chat.twitch.tv:6697`, joins the channel, and
+  appends every message to a `.chat.jsonl` sidecar (same "swap the extension" convention as
+  `.nfo`/`.timecode.json`; added to `isSidecarPath`) as `{t: secondsSinceStart, user, color,
+  text}`. Reconnects on a dropped connection every `twitchIRCReconnectDelay` until the recording
+  stops. The sidecar is written under `rec.tempPath` throughout capture (still live) and only
+  renamed next to `rec.finalPath` in `runRecording` **after** `autoTranscode` runs (a rule can
+  still move/rename the media file at that point) - doing the rename any earlier would leave the
+  chat sidecar orphaned under the pre-transcode filename.
+- **Playback**: `GET /api/recordings/chat?path=...` serves the sidecar as a JSON array. The
+  recording player (`app.js`) fetches it on open, keeps a running "rendered up to" index, and on
+  the existing `timeupdate` handler renders every message whose `t` is `<= player.currentTime()`
+  (rebuilding from scratch on a backward seek) - a VOD-chat-replay panel next to Details/More
+  recordings, capped to the last 300 rendered lines so a long recording's chat never bloats the DOM.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

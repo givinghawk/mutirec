@@ -381,6 +381,10 @@
               <div class="panel-head"><h2>Details</h2></div>
               <dl id="rec-details" class="space-y-1 text-sm"></dl>
             </div>
+            <div class="panel hidden" id="rec-chat-panel">
+              <div class="panel-head"><h2>Twitch Chat</h2></div>
+              <div id="rec-chat-list" class="space-y-1 overflow-y-auto text-sm" style="max-height:360px"></div>
+            </div>
             <div class="panel hidden" id="rec-more-panel">
               <div class="panel-head"><h2 id="rec-more-title">More recordings</h2></div>
               <div id="rec-more-list" class="lib-row-scroll"></div>
@@ -1218,6 +1222,13 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <label>Client ID<input id="youtubeClientId" class="input"></label>
             <label>Client Secret<input id="youtubeClientSecret" type="password" class="input"></label>
             <label>Refresh Token<input id="youtubeRefreshToken" type="password" class="input"></label>
+          </div>
+          <div class="panel" data-admin-only>
+            <div class="panel-head"><h2>Twitch</h2></div>
+            <p class="mb-3 text-sm text-zinc-400">Used to look up a Twitch channel's live stream title (shown in the recording's NFO instead of the source's own name) and required for the per-source "Archive Twitch chat" option. Create an application at <a href="https://dev.twitch.tv/console/apps" target="_blank" rel="noopener">dev.twitch.tv/console/apps</a> and paste its Client ID/Secret below - no user login needed, this only reads public stream info.</p>
+            <label class="inline-flex items-center gap-2 text-sm"><input id="twitchEnabled" type="checkbox" class="accent-red-500"> Enabled</label>
+            <label>Client ID<input id="twitchClientId" class="input"></label>
+            <label>Client Secret<input id="twitchClientSecret" type="password" class="input"></label>
           </div>
           <div class="panel" data-admin-only>
             <div class="panel-head"><h2>Transcode Presets</h2></div>

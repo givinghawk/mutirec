@@ -668,6 +668,7 @@ function drawSourceEditor() {
               <input type="hidden" class="src-yt-privacy" value="${escapeAttr(s.youtubePrivacy || 'unlisted')}">
             </div>
           </label>
+          <label class="inline-flex items-center gap-2" title="Twitch only. Connects anonymously to chat for the duration of the recording and archives it alongside the video for later playback."><input class="src-twitch-chat" type="checkbox" ${s.archiveTwitchChat ? 'checked' : ''}> Archive Twitch chat</label>
         </div>
         <label class="mt-2 block" title="Only relevant for 'http' type sources whose stream needs an auth token/cookie/custom header - sent with both the recording (ffmpeg) and the live-preview proxy. One 'Key: Value' per line.">HTTP headers <span class="text-xs text-zinc-500">(token-gated HTTP streams only, one "Key: Value" per line)</span>
           <textarea class="input src-httpheaders codebox h-20" placeholder="Authorization: Bearer your-token-here">${escapeHtml((s.httpHeaders || []).join('\n'))}</textarea>
@@ -727,6 +728,7 @@ function readSourceCard(el) {
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     youtubeUpload: el.querySelector('.src-yt-upload').checked,
     youtubePrivacy: el.querySelector('.src-yt-privacy').value,
+    archiveTwitchChat: el.querySelector('.src-twitch-chat').checked,
     timetableStage: el.querySelector('.src-ttstage').value,
     festivalId: el.querySelector('.src-festival').value,
     httpHeaders: el.querySelector('.src-httpheaders').value.split('\n').map(x => x.trim()).filter(Boolean)
@@ -898,6 +900,10 @@ function fillSettings() {
   $('youtubeClientId').value = yt.clientId || '';
   $('youtubeClientSecret').value = yt.clientSecret || '';
   $('youtubeRefreshToken').value = yt.refreshToken || '';
+  const tw = s.twitch || {};
+  $('twitchEnabled').checked = !!tw.enabled;
+  $('twitchClientId').value = tw.clientId || '';
+  $('twitchClientSecret').value = tw.clientSecret || '';
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -928,6 +934,7 @@ function readSettings() {
   };
   s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
   s.youtube = { enabled: $('youtubeEnabled').checked, clientId: $('youtubeClientId').value, clientSecret: $('youtubeClientSecret').value, refreshToken: $('youtubeRefreshToken').value };
+  s.twitch = { enabled: $('twitchEnabled').checked, clientId: $('twitchClientId').value, clientSecret: $('twitchClientSecret').value };
 }
 
 async function saveConfig() {
@@ -3317,6 +3324,65 @@ function openRecordingPlayer(path, name) {
 
   // Recommendations sidebar
   renderRecordingRecommendations(r);
+
+  // Archived Twitch chat (if any) - synced to playback via the player's own
+  // timeupdate handler in setupCustomPlayerControls.
+  loadRecordingChat(path);
+}
+
+// --- Twitch chat replay ---
+//
+// Messages are timestamped in the sidecar as seconds since the recording
+// started (see TwitchChatMessage in twitchchat.go), so replaying them is
+// just "show every message whose t is <= the video's current playback
+// time" - same idea as a VOD chat replay on Twitch itself.
+
+let recChatMessages = [];
+let recChatRenderedUpTo = -1;
+
+async function loadRecordingChat(path) {
+  recChatMessages = [];
+  recChatRenderedUpTo = -1;
+  $('rec-chat-list').innerHTML = '';
+  $('rec-chat-panel').classList.add('hidden');
+  try {
+    const messages = await api(`/api/recordings/chat?path=${encodeURIComponent(path)}`);
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    recChatMessages = messages;
+    $('rec-chat-panel').classList.remove('hidden');
+  } catch {
+    // No archived chat for this recording (most recordings won't have one) -
+    // leave the panel hidden, nothing to report to the user.
+  }
+}
+
+function renderChatUpToTime(currentTime) {
+  if (!recChatMessages.length) return;
+  let target = recChatMessages.length - 1;
+  while (target >= 0 && recChatMessages[target].t > currentTime) target--;
+  if (target < recChatRenderedUpTo) {
+    // The user seeked backward - rebuild from scratch rather than trying to
+    // remove already-rendered lines piecemeal.
+    $('rec-chat-list').innerHTML = '';
+    recChatRenderedUpTo = -1;
+  }
+  if (target <= recChatRenderedUpTo) return;
+  const list = $('rec-chat-list');
+  const frag = document.createDocumentFragment();
+  for (let i = recChatRenderedUpTo + 1; i <= target; i++) {
+    const m = recChatMessages[i];
+    const div = document.createElement('div');
+    div.className = 'truncate';
+    const userSpan = `<span style="color:${escapeAttr(m.color || '#a1a1aa')}">${escapeHtml(m.user || 'anon')}</span>`;
+    div.innerHTML = `${userSpan}: ${escapeHtml(m.text || '')}`;
+    frag.appendChild(div);
+  }
+  list.appendChild(frag);
+  // Cap how many rendered lines stick around so a long recording's chat log
+  // never turns the DOM into thousands of nodes.
+  while (list.children.length > 300) list.removeChild(list.firstChild);
+  list.scrollTop = list.scrollHeight;
+  recChatRenderedUpTo = target;
 }
 
 function renderRecordingDetails(r) {
@@ -3426,6 +3492,7 @@ function setupCustomPlayerControls(player) {
   fwd10.onclick = () => player.currentTime(Math.min(player.duration() || player.currentTime() + 10, player.currentTime() + 10));
 
   player.on('timeupdate', () => {
+    renderChatUpToTime(player.currentTime());
     const duration = player.duration();
     if (scrubbing || !isFinite(duration) || !duration) return;
     const pct = (player.currentTime() / duration) * 1000;
