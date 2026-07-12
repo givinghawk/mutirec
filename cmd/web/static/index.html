@@ -896,6 +896,7 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
             <button type="button" id="explorer-download-selected" class="btn" disabled>Download Selected</button>
             <button type="button" id="explorer-fetch-open" class="btn primary">Fetch from URL</button>
             <button type="button" id="explorer-youtube-open" class="btn primary">Download from YouTube</button>
+            <button type="button" id="explorer-batchmatch-open" class="btn" title="Mark the current folder as one event and bulk-tag everything inside it">Batch Match…</button>
             <button type="button" id="explorer-folder-help-open" class="btn" title="Recommended folder layout for sets you add by hand">Folder Layout</button>
             <button type="button" id="explorer-refresh" class="btn">Refresh</button>
           </div>
@@ -975,6 +976,68 @@ recordings/MyFestival/2026/Saturday/MainStage/MyFestival 2026, MainStage (Saturd
               <div id="explorer-youtube-job-bar" class="storage-bar-fill" style="width:0%"></div>
             </div>
             <pre id="explorer-youtube-job-log" class="codebox mt-2 h-32 overflow-y-auto text-xs"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Batch Match wizard (File Explorer) -->
+      <div id="explorer-batchmatch-overlay" class="modal-overlay hidden">
+        <div class="modal-panel panel">
+          <div class="panel-head">
+            <h2>Batch Match</h2>
+            <button type="button" id="explorer-batchmatch-close" class="btn" aria-label="Close">&times;</button>
+          </div>
+          <p class="mb-2 text-sm text-zinc-400">Marking <code id="bm-path" class="text-zinc-200"></code> as one event. This bulk-tags every file inside it - the day/stage steps can be skipped if there's nothing to map, and nothing is written until you hit Apply on the last step.</p>
+
+          <div id="bm-step-event">
+            <label>Event
+              <select id="bm-event-select" class="input"></select>
+            </label>
+            <div id="bm-new-event-fields" class="mt-2 space-y-2">
+              <label>New event name<input id="bm-new-name" class="input" placeholder="e.g. Defqon.1"></label>
+              <label>Year <span class="text-xs text-zinc-500">(optional)</span><input id="bm-new-year" type="number" class="input"></label>
+              <label>Organisation/Festival <span class="text-xs text-zinc-500">(optional)</span>
+                <select id="bm-new-festival-select" class="input"></select>
+              </label>
+            </div>
+            <div class="mt-3 flex justify-end gap-2">
+              <button type="button" class="btn" id="bm-event-cancel">Cancel</button>
+              <button type="button" class="btn primary" id="bm-event-next">Next</button>
+            </div>
+          </div>
+
+          <div id="bm-step-days" class="hidden">
+            <p class="mb-2 text-sm text-zinc-400">These subfolders were found directly inside the event folder. Give any of them a date if they represent a specific day - leave blank to skip a folder, or skip this step entirely if these aren't day folders (e.g. they're actually stages).</p>
+            <div id="bm-days-list" class="max-h-64 space-y-1 overflow-y-auto"></div>
+            <div class="mt-3 flex justify-end gap-2">
+              <button type="button" class="btn" id="bm-days-back">Back</button>
+              <button type="button" class="btn" id="bm-days-skip">Skip (not day folders)</button>
+              <button type="button" class="btn primary" id="bm-days-next">Next</button>
+            </div>
+          </div>
+
+          <div id="bm-step-stages" class="hidden">
+            <p class="mb-2 text-sm text-zinc-400">These subfolders look like stages. Adjust the display name for any of them, or skip to use each folder's own name as-is.</p>
+            <div id="bm-stages-list" class="max-h-64 space-y-1 overflow-y-auto"></div>
+            <div class="mt-3 flex justify-end gap-2">
+              <button type="button" class="btn" id="bm-stages-back">Back</button>
+              <button type="button" class="btn" id="bm-stages-skip">Skip</button>
+              <button type="button" class="btn primary" id="bm-stages-next">Next</button>
+            </div>
+          </div>
+
+          <div id="bm-step-preview" class="hidden">
+            <p id="bm-preview-status" class="mb-2 text-sm text-zinc-400"></p>
+            <div class="max-h-72 overflow-y-auto">
+              <table class="w-full text-sm">
+                <thead><tr class="text-left text-zinc-400"><th class="pr-3">File</th><th class="pr-3">Stage</th><th class="pr-3">Date</th><th>Artist (guessed)</th></tr></thead>
+                <tbody id="bm-preview-table"></tbody>
+              </table>
+            </div>
+            <div class="mt-3 flex justify-end gap-2">
+              <button type="button" class="btn" id="bm-preview-back">Back</button>
+              <button type="button" class="btn primary" id="bm-apply">Apply</button>
+            </div>
           </div>
         </div>
       </div>

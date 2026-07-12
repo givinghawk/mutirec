@@ -708,6 +708,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/explorer/fetch/jobs/", a.handleExplorerFetchJobItem)
 	mux.HandleFunc("/api/explorer/youtube", a.handleExplorerYouTubeDownload)
 	mux.HandleFunc("/api/explorer/youtube/jobs/", a.handleExplorerYouTubeJobItem)
+	mux.HandleFunc("/api/explorer/batch-match", a.handleBatchMatch)
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)

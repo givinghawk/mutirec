@@ -4604,6 +4604,182 @@ function renderExplorerYoutubeJob(job) {
   $('explorer-youtube-job-log').scrollTop = $('explorer-youtube-job-log').scrollHeight;
 }
 
+// --- Batch Match: mark a File Explorer folder as one event, then bulk-tag
+// day/stage/artist for every file inside it ---
+
+let bmState = null;
+let bmDayDirs = [];
+let bmStageDirs = [];
+let bmSkippedDays = false;
+
+function openBatchMatchModal() {
+  if (!explorerPath) { toast('Navigate into the folder for this event first', 'error'); return; }
+  bmState = { path: explorerPath, days: [], stages: [] };
+  bmDayDirs = [];
+  bmStageDirs = [];
+  bmSkippedDays = false;
+  $('bm-path').textContent = explorerPath;
+  populateBmEventSelect();
+  showBmStep('event');
+  $('explorer-batchmatch-overlay').classList.remove('hidden');
+}
+function closeBatchMatchModal() { $('explorer-batchmatch-overlay').classList.add('hidden'); }
+$('explorer-batchmatch-open').onclick = openBatchMatchModal;
+$('explorer-batchmatch-close').onclick = closeBatchMatchModal;
+$('bm-event-cancel').onclick = closeBatchMatchModal;
+$('explorer-batchmatch-overlay').addEventListener('click', (e) => { if (e.target.id === 'explorer-batchmatch-overlay') closeBatchMatchModal(); });
+
+function populateBmEventSelect() {
+  const sel = $('bm-event-select');
+  sel.innerHTML = '<option value="">+ Create new event…</option>' +
+    libraryEvents().map(e => `<option value="${escapeAttr(e.id)}">${escapeHtml(e.name)}${e.year ? ' ' + e.year : ''}</option>`).join('');
+  sel.value = '';
+  $('bm-new-name').value = '';
+  $('bm-new-year').value = '';
+  const festSel = $('bm-new-festival-select');
+  festSel.innerHTML = '<option value="">No organisation/festival link</option>' +
+    (config.festivals || []).map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(f.name)}</option>`).join('');
+  toggleBmNewEventFields();
+}
+$('bm-event-select').addEventListener('change', toggleBmNewEventFields);
+function toggleBmNewEventFields() {
+  $('bm-new-event-fields').classList.toggle('hidden', $('bm-event-select').value !== '');
+}
+
+function showBmStep(step) {
+  ['event', 'days', 'stages', 'preview'].forEach(s => $(`bm-step-${s}`).classList.toggle('hidden', s !== step));
+}
+
+$('bm-event-next').onclick = async () => {
+  const sel = $('bm-event-select').value;
+  if (!sel && !$('bm-new-name').value.trim()) { toast('Pick an event or enter a name for a new one', 'error'); return; }
+  bmState.eventId = sel;
+  bmState.newEventName = $('bm-new-name').value.trim();
+  bmState.newEventYear = Number($('bm-new-year').value) || 0;
+  bmState.newEventFestivalId = $('bm-new-festival-select').value;
+  await loadBmDayStep();
+};
+
+async function loadBmDayStep() {
+  let entries = [];
+  try {
+    const res = await api(`/api/explorer/list?path=${encodeURIComponent(bmState.path)}`);
+    entries = (res.entries || []).filter(e => e.isDir);
+  } catch { /* treated as no subfolders */ }
+  bmDayDirs = entries;
+  if (entries.length === 0) {
+    bmState.days = [];
+    bmSkippedDays = true;
+    await loadBmStageStep();
+    return;
+  }
+  $('bm-days-list').innerHTML = entries.map(e => `
+    <div class="flex items-center gap-2 py-1">
+      <span class="flex-1 text-sm">${escapeHtml(e.name)}</span>
+      <input type="date" class="input bm-day-date" style="max-width:180px" data-name="${escapeAttr(e.name)}">
+    </div>`).join('');
+  showBmStep('days');
+}
+
+$('bm-days-back').onclick = () => showBmStep('event');
+$('bm-days-skip').onclick = async () => {
+  bmState.days = [];
+  bmSkippedDays = true;
+  await loadBmStageStep();
+};
+$('bm-days-next').onclick = async () => {
+  bmState.days = [...document.querySelectorAll('.bm-day-date')].filter(i => i.value).map(i => ({ relPath: i.dataset.name, date: i.value }));
+  bmSkippedDays = false;
+  await loadBmStageStep();
+};
+
+async function loadBmStageStep() {
+  let candidates = [];
+  if (bmSkippedDays) {
+    candidates = bmDayDirs.map(e => ({ relPath: e.name, name: e.name }));
+  } else {
+    const seen = new Map();
+    for (const d of bmDayDirs) {
+      try {
+        const res = await api(`/api/explorer/list?path=${encodeURIComponent(bmState.path + '/' + d.name)}`);
+        (res.entries || []).filter(e => e.isDir).forEach(e => {
+          if (!seen.has(e.name)) seen.set(e.name, `${d.name}/${e.name}`);
+        });
+      } catch { /* that day folder just has no subfolders */ }
+    }
+    candidates = [...seen.entries()].map(([name, relPath]) => ({ relPath, name }));
+  }
+  bmStageDirs = candidates;
+  if (candidates.length === 0) {
+    bmState.stages = [];
+    await runBmPreview();
+    return;
+  }
+  $('bm-stages-list').innerHTML = candidates.map(c => `
+    <div class="flex items-center gap-2 py-1">
+      <span class="flex-1 text-sm text-zinc-400" title="${escapeAttr(c.relPath)}">${escapeHtml(c.relPath)}</span>
+      <input type="text" class="input bm-stage-name" data-relpath="${escapeAttr(c.relPath)}" value="${escapeAttr(c.name)}">
+    </div>`).join('');
+  showBmStep('stages');
+}
+
+$('bm-stages-back').onclick = () => showBmStep('days');
+$('bm-stages-skip').onclick = async () => { bmState.stages = []; await runBmPreview(); };
+$('bm-stages-next').onclick = async () => {
+  bmState.stages = [...document.querySelectorAll('.bm-stage-name')].map(i => ({ relPath: i.dataset.relpath, name: i.value.trim() || i.dataset.relpath.split('/').pop() }));
+  await runBmPreview();
+};
+
+function bmRequestBase() {
+  return {
+    path: bmState.path,
+    eventId: bmState.eventId || '',
+    newEventName: bmState.eventId ? '' : bmState.newEventName,
+    newEventYear: bmState.eventId ? 0 : bmState.newEventYear,
+    newEventFestivalId: bmState.eventId ? '' : bmState.newEventFestivalId,
+    days: bmState.days,
+    stages: bmState.stages,
+  };
+}
+
+async function runBmPreview() {
+  showBmStep('preview');
+  $('bm-preview-status').textContent = 'Scanning…';
+  $('bm-preview-table').innerHTML = '';
+  let res;
+  try {
+    res = await api('/api/explorer/batch-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...bmRequestBase(), dryRun: true }) });
+  } catch { $('bm-preview-status').textContent = 'Could not scan this folder.'; return; }
+  if (!res.ok) { $('bm-preview-status').textContent = res.error || 'Could not scan this folder.'; return; }
+  const files = res.files || [];
+  $('bm-preview-status').textContent = `${files.length} file(s) found`;
+  $('bm-preview-table').innerHTML = files.map(f => `
+    <tr>
+      <td class="pr-3">${escapeHtml(f.name)}</td>
+      <td class="pr-3">${escapeHtml(f.stage || '—')}</td>
+      <td class="pr-3">${escapeHtml(f.date || '—')}</td>
+      <td>${escapeHtml(f.artist || '—')}</td>
+    </tr>`).join('');
+}
+$('bm-preview-back').onclick = () => showBmStep(bmStageDirs.length ? 'stages' : 'days');
+
+$('bm-apply').onclick = async () => {
+  $('bm-apply').disabled = true;
+  let res;
+  try {
+    res = await api('/api/explorer/batch-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...bmRequestBase(), dryRun: false }) });
+  } catch { $('bm-apply').disabled = false; return; }
+  if (!res.ok) {
+    toast(res.error || 'Could not apply Batch Match', 'error');
+    $('bm-apply').disabled = false;
+    return;
+  }
+  toast(`Batch matched ${res.count} file(s)`, 'info');
+  $('bm-apply').disabled = false;
+  closeBatchMatchModal();
+  await refresh();
+};
+
 // Explorer only loads on demand (its tab click handler calls loadExplorer()
 // below, alongside the other per-tab loaders), not eagerly at page load.
 

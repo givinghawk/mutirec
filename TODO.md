@@ -1263,6 +1263,29 @@
   this" note. Deliberately scoped to the destination folder (not a whole-tree scan) to keep the
   cost bounded on a large library.
 
+## Done (this session, part 19) - Batch Match: manual folder-to-event wizard
+
+- **New `batchmatch.go`**: a guided, manual alternative to Smart Match for a folder of
+  already-downloaded sets that doesn't cleanly fit Smart Match's automatic
+  `<Event>/<Edition>/<Day>/<Stage>/<file>` folder-hint parsing (`folderEventHint`) - e.g.
+  something just pulled in via the YouTube download tool or a Stack/WebDAV fetch with its own
+  folder naming. `POST /api/explorer/batch-match` takes the File Explorer folder the user marked
+  as one event, an existing `eventId` or a `newEventName`/`newEventYear`/`newEventFestivalId`,
+  and optional `days`/`stages` arrays (each a `{relPath, ...}` mapping relative to the marked
+  folder, at whatever depth they actually are - the backend doesn't care whether stages sit
+  directly under the root or one level inside a day folder, it just does longest-prefix
+  matching). Walks every file under the folder, guesses each one's artist name via the same
+  `guessArtistFromName` Smart Match itself uses, and either just returns the preview
+  (`dryRun:true`) or actually creates the event (if new) and writes `RecordingMeta` for every
+  file (`dryRun:false`) - nothing is written until the wizard's last step.
+- **New wizard UI** (File Explorer -> "Batch Match…" button, only enabled once you've navigated
+  into a folder): step 1 picks/creates the LibraryEvent; step 2 lists the folder's immediate
+  subfolders and lets you assign each an optional date (or skip entirely if they're not day
+  folders); step 3 - built from real `/api/explorer/list` calls, one level deeper than the day
+  folders if step 2 wasn't skipped, or the same level if it was - lets you rename each candidate
+  stage folder (or skip to use its own name as-is); step 4 previews every file's resolved
+  stage/date/guessed-artist before Apply actually calls the endpoint for real.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)
