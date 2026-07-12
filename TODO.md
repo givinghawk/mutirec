@@ -1335,6 +1335,15 @@
   Transcode's whole custom-options form. Upload to YouTube offers a title override and a
   privacy dropdown, then polls the new job endpoint and shows the resulting video link inline.
 
+## Done (this session, part 22) - Watch tab: separate live/not-live sources
+
+- `populateWatchSourceDropdown` (`app.js`) now groups the Watch tab's source dropdown by live
+  status first ("Live now" vs "Not live" - `Source.status === 'recording'`), each group still
+  sorted by festival/event then name like before; the previous per-item "●" is kept as a visual
+  reinforcement but is no longer the only signal. Festival/event name, when a source has one, is
+  now folded into the option's own label ("FestivalName — SourceName") instead of being a
+  separate group header, since live/not-live is now the primary grouping axis.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

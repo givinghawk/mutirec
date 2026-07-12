@@ -1198,25 +1198,33 @@ function populateWatchSourceDropdown() {
   // watching here - without it, "watch live" just resolves the raw
   // streamlink URL, which usually isn't playable directly in a <video> tag.
   const sources = ((state && state.sources) || []).filter(s => s.liveRewind);
-  const groupFor = (s) => {
+  const festivalFor = (s) => {
     const f = (config.festivals || []).find(f => f.id === s.festivalId);
-    return f ? f.name : 'Ungrouped';
+    return f ? f.name : '';
   };
+  // Live-now sources always sort first as their own group, so it's obvious
+  // at a glance what's actually worth tuning into right now versus just
+  // configured - within each of those two groups, still sorted by
+  // festival/event (ungrouped last) then by name, same as before.
+  const isLive = (s) => s.status === 'recording';
   const sorted = [...sources].sort((a, b) => {
-    const ga = groupFor(a), gb = groupFor(b);
-    // "Ungrouped" always sorts last, other groups alphabetically.
-    if (ga !== gb) {
-      if (ga === 'Ungrouped') return 1;
-      if (gb === 'Ungrouped') return -1;
-      return ga.localeCompare(gb);
+    if (isLive(a) !== isLive(b)) return isLive(a) ? -1 : 1;
+    const fa = festivalFor(a), fb = festivalFor(b);
+    if (fa !== fb) {
+      if (fa === '') return 1;
+      if (fb === '') return -1;
+      return fa.localeCompare(fb);
     }
     return a.name.localeCompare(b.name);
   });
-  const options = sorted.map(s => ({
-    value: s.id,
-    label: s.name + (s.status === 'recording' ? ' ●' : ''),
-    group: groupFor(s),
-  }));
+  const options = sorted.map(s => {
+    const festival = festivalFor(s);
+    return {
+      value: s.id,
+      label: (festival ? festival + ' — ' : '') + s.name + (isLive(s) ? ' ●' : ''),
+      group: isLive(s) ? 'Live now' : 'Not live',
+    };
+  });
   setDropdownOptions('watch-source', options, { value: watchSourceId || '', placeholder: 'Choose a source' });
 }
 
