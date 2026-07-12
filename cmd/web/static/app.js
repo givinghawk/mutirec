@@ -668,6 +668,7 @@ function drawSourceEditor() {
               <input type="hidden" class="src-yt-privacy" value="${escapeAttr(s.youtubePrivacy || 'unlisted')}">
             </div>
           </label>
+          <label class="inline-flex items-center gap-2" title="Twitch only. Connects anonymously to chat for the duration of the recording and archives it alongside the video for later playback."><input class="src-twitch-chat" type="checkbox" ${s.archiveTwitchChat ? 'checked' : ''}> Archive Twitch chat</label>
         </div>
         <label class="mt-2 block" title="Only relevant for 'http' type sources whose stream needs an auth token/cookie/custom header - sent with both the recording (ffmpeg) and the live-preview proxy. One 'Key: Value' per line.">HTTP headers <span class="text-xs text-zinc-500">(token-gated HTTP streams only, one "Key: Value" per line)</span>
           <textarea class="input src-httpheaders codebox h-20" placeholder="Authorization: Bearer your-token-here">${escapeHtml((s.httpHeaders || []).join('\n'))}</textarea>
@@ -727,6 +728,7 @@ function readSourceCard(el) {
     liveRewind: el.querySelector('.src-liverewind').value !== 'none',
     youtubeUpload: el.querySelector('.src-yt-upload').checked,
     youtubePrivacy: el.querySelector('.src-yt-privacy').value,
+    archiveTwitchChat: el.querySelector('.src-twitch-chat').checked,
     timetableStage: el.querySelector('.src-ttstage').value,
     festivalId: el.querySelector('.src-festival').value,
     httpHeaders: el.querySelector('.src-httpheaders').value.split('\n').map(x => x.trim()).filter(Boolean)
@@ -898,6 +900,10 @@ function fillSettings() {
   $('youtubeClientId').value = yt.clientId || '';
   $('youtubeClientSecret').value = yt.clientSecret || '';
   $('youtubeRefreshToken').value = yt.refreshToken || '';
+  const tw = s.twitch || {};
+  $('twitchEnabled').checked = !!tw.enabled;
+  $('twitchClientId').value = tw.clientId || '';
+  $('twitchClientSecret').value = tw.clientSecret || '';
 
   if (ui.themeColors) {
     updateColorInputs(ui.themeColors);
@@ -928,6 +934,7 @@ function readSettings() {
   };
   s.discordOAuth = { enabled: $('discordOAuthEnabled').checked, clientId: $('discordOAuthClientId').value, clientSecret: $('discordOAuthClientSecret').value, redirectUrl: $('discordOAuthRedirectUrl').value };
   s.youtube = { enabled: $('youtubeEnabled').checked, clientId: $('youtubeClientId').value, clientSecret: $('youtubeClientSecret').value, refreshToken: $('youtubeRefreshToken').value };
+  s.twitch = { enabled: $('twitchEnabled').checked, clientId: $('twitchClientId').value, clientSecret: $('twitchClientSecret').value };
 }
 
 async function saveConfig() {
@@ -3284,6 +3291,7 @@ $('assign-save').onclick = async () => {
 // control bar, wired directly to the Player API instead of a raw <video>.
 
 let currentPlaybackUrl = '';
+let currentRecordingPath = '';
 
 function ensureRecPlayer() {
   if (recPlayer) return recPlayer;
@@ -3303,6 +3311,7 @@ function openRecordingPlayer(path, name) {
   switchToView('player');
 
   const player = ensureRecPlayer();
+  currentRecordingPath = path;
   currentPlaybackUrl = `/media/${encodeMediaPath(path)}`;
   player.src({ src: currentPlaybackUrl });
   player.currentTime(0);
@@ -3317,6 +3326,65 @@ function openRecordingPlayer(path, name) {
 
   // Recommendations sidebar
   renderRecordingRecommendations(r);
+
+  // Archived Twitch chat (if any) - synced to playback via the player's own
+  // timeupdate handler in setupCustomPlayerControls.
+  loadRecordingChat(path);
+}
+
+// --- Twitch chat replay ---
+//
+// Messages are timestamped in the sidecar as seconds since the recording
+// started (see TwitchChatMessage in twitchchat.go), so replaying them is
+// just "show every message whose t is <= the video's current playback
+// time" - same idea as a VOD chat replay on Twitch itself.
+
+let recChatMessages = [];
+let recChatRenderedUpTo = -1;
+
+async function loadRecordingChat(path) {
+  recChatMessages = [];
+  recChatRenderedUpTo = -1;
+  $('rec-chat-list').innerHTML = '';
+  $('rec-chat-panel').classList.add('hidden');
+  try {
+    const messages = await api(`/api/recordings/chat?path=${encodeURIComponent(path)}`);
+    if (!Array.isArray(messages) || messages.length === 0) return;
+    recChatMessages = messages;
+    $('rec-chat-panel').classList.remove('hidden');
+  } catch {
+    // No archived chat for this recording (most recordings won't have one) -
+    // leave the panel hidden, nothing to report to the user.
+  }
+}
+
+function renderChatUpToTime(currentTime) {
+  if (!recChatMessages.length) return;
+  let target = recChatMessages.length - 1;
+  while (target >= 0 && recChatMessages[target].t > currentTime) target--;
+  if (target < recChatRenderedUpTo) {
+    // The user seeked backward - rebuild from scratch rather than trying to
+    // remove already-rendered lines piecemeal.
+    $('rec-chat-list').innerHTML = '';
+    recChatRenderedUpTo = -1;
+  }
+  if (target <= recChatRenderedUpTo) return;
+  const list = $('rec-chat-list');
+  const frag = document.createDocumentFragment();
+  for (let i = recChatRenderedUpTo + 1; i <= target; i++) {
+    const m = recChatMessages[i];
+    const div = document.createElement('div');
+    div.className = 'truncate';
+    const userSpan = `<span style="color:${escapeAttr(m.color || '#a1a1aa')}">${escapeHtml(m.user || 'anon')}</span>`;
+    div.innerHTML = `${userSpan}: ${escapeHtml(m.text || '')}`;
+    frag.appendChild(div);
+  }
+  list.appendChild(frag);
+  // Cap how many rendered lines stick around so a long recording's chat log
+  // never turns the DOM into thousands of nodes.
+  while (list.children.length > 300) list.removeChild(list.firstChild);
+  list.scrollTop = list.scrollHeight;
+  recChatRenderedUpTo = target;
 }
 
 function renderRecordingDetails(r) {
@@ -3426,6 +3494,7 @@ function setupCustomPlayerControls(player) {
   fwd10.onclick = () => player.currentTime(Math.min(player.duration() || player.currentTime() + 10, player.currentTime() + 10));
 
   player.on('timeupdate', () => {
+    renderChatUpToTime(player.currentTime());
     const duration = player.duration();
     if (scrubbing || !isFinite(duration) || !duration) return;
     const pct = (player.currentTime() / duration) * 1000;
@@ -4602,6 +4671,293 @@ function renderExplorerYoutubeJob(job) {
   $('explorer-youtube-job-bar').style.width = `${Math.min(100, job.progressPct || 0)}%`;
   $('explorer-youtube-job-log').textContent = (job.log || []).map(l => `[${l.time}] ${l.text}`).join('\n');
   $('explorer-youtube-job-log').scrollTop = $('explorer-youtube-job-log').scrollHeight;
+}
+
+// --- Batch Match: mark a File Explorer folder as one event, then bulk-tag
+// day/stage/artist for every file inside it ---
+
+let bmState = null;
+let bmDayDirs = [];
+let bmStageDirs = [];
+let bmSkippedDays = false;
+
+function openBatchMatchModal() {
+  if (!explorerPath) { toast('Navigate into the folder for this event first', 'error'); return; }
+  bmState = { path: explorerPath, days: [], stages: [] };
+  bmDayDirs = [];
+  bmStageDirs = [];
+  bmSkippedDays = false;
+  $('bm-path').textContent = explorerPath;
+  populateBmEventSelect();
+  showBmStep('event');
+  $('explorer-batchmatch-overlay').classList.remove('hidden');
+}
+function closeBatchMatchModal() { $('explorer-batchmatch-overlay').classList.add('hidden'); }
+$('explorer-batchmatch-open').onclick = openBatchMatchModal;
+$('explorer-batchmatch-close').onclick = closeBatchMatchModal;
+$('bm-event-cancel').onclick = closeBatchMatchModal;
+$('explorer-batchmatch-overlay').addEventListener('click', (e) => { if (e.target.id === 'explorer-batchmatch-overlay') closeBatchMatchModal(); });
+
+function populateBmEventSelect() {
+  const sel = $('bm-event-select');
+  sel.innerHTML = '<option value="">+ Create new event…</option>' +
+    libraryEvents().map(e => `<option value="${escapeAttr(e.id)}">${escapeHtml(e.name)}${e.year ? ' ' + e.year : ''}</option>`).join('');
+  sel.value = '';
+  $('bm-new-name').value = '';
+  $('bm-new-year').value = '';
+  const festSel = $('bm-new-festival-select');
+  festSel.innerHTML = '<option value="">No organisation/festival link</option>' +
+    (config.festivals || []).map(f => `<option value="${escapeAttr(f.id)}">${escapeHtml(f.name)}</option>`).join('');
+  toggleBmNewEventFields();
+}
+$('bm-event-select').addEventListener('change', toggleBmNewEventFields);
+function toggleBmNewEventFields() {
+  $('bm-new-event-fields').classList.toggle('hidden', $('bm-event-select').value !== '');
+}
+
+function showBmStep(step) {
+  ['event', 'days', 'stages', 'preview'].forEach(s => $(`bm-step-${s}`).classList.toggle('hidden', s !== step));
+}
+
+$('bm-event-next').onclick = async () => {
+  const sel = $('bm-event-select').value;
+  if (!sel && !$('bm-new-name').value.trim()) { toast('Pick an event or enter a name for a new one', 'error'); return; }
+  bmState.eventId = sel;
+  bmState.newEventName = $('bm-new-name').value.trim();
+  bmState.newEventYear = Number($('bm-new-year').value) || 0;
+  bmState.newEventFestivalId = $('bm-new-festival-select').value;
+  await loadBmDayStep();
+};
+
+async function loadBmDayStep() {
+  let entries = [];
+  try {
+    const res = await api(`/api/explorer/list?path=${encodeURIComponent(bmState.path)}`);
+    entries = (res.entries || []).filter(e => e.isDir);
+  } catch { /* treated as no subfolders */ }
+  bmDayDirs = entries;
+  if (entries.length === 0) {
+    bmState.days = [];
+    bmSkippedDays = true;
+    await loadBmStageStep();
+    return;
+  }
+  $('bm-days-list').innerHTML = entries.map(e => `
+    <div class="flex items-center gap-2 py-1">
+      <span class="flex-1 text-sm">${escapeHtml(e.name)}</span>
+      <input type="date" class="input bm-day-date" style="max-width:180px" data-name="${escapeAttr(e.name)}">
+    </div>`).join('');
+  showBmStep('days');
+}
+
+$('bm-days-back').onclick = () => showBmStep('event');
+$('bm-days-skip').onclick = async () => {
+  bmState.days = [];
+  bmSkippedDays = true;
+  await loadBmStageStep();
+};
+$('bm-days-next').onclick = async () => {
+  bmState.days = [...document.querySelectorAll('.bm-day-date')].filter(i => i.value).map(i => ({ relPath: i.dataset.name, date: i.value }));
+  bmSkippedDays = false;
+  await loadBmStageStep();
+};
+
+async function loadBmStageStep() {
+  let candidates = [];
+  if (bmSkippedDays) {
+    candidates = bmDayDirs.map(e => ({ relPath: e.name, name: e.name }));
+  } else {
+    const seen = new Map();
+    for (const d of bmDayDirs) {
+      try {
+        const res = await api(`/api/explorer/list?path=${encodeURIComponent(bmState.path + '/' + d.name)}`);
+        (res.entries || []).filter(e => e.isDir).forEach(e => {
+          if (!seen.has(e.name)) seen.set(e.name, `${d.name}/${e.name}`);
+        });
+      } catch { /* that day folder just has no subfolders */ }
+    }
+    candidates = [...seen.entries()].map(([name, relPath]) => ({ relPath, name }));
+  }
+  bmStageDirs = candidates;
+  if (candidates.length === 0) {
+    bmState.stages = [];
+    await runBmPreview();
+    return;
+  }
+  $('bm-stages-list').innerHTML = candidates.map(c => `
+    <div class="flex items-center gap-2 py-1">
+      <span class="flex-1 text-sm text-zinc-400" title="${escapeAttr(c.relPath)}">${escapeHtml(c.relPath)}</span>
+      <input type="text" class="input bm-stage-name" data-relpath="${escapeAttr(c.relPath)}" value="${escapeAttr(c.name)}">
+    </div>`).join('');
+  showBmStep('stages');
+}
+
+$('bm-stages-back').onclick = () => showBmStep('days');
+$('bm-stages-skip').onclick = async () => { bmState.stages = []; await runBmPreview(); };
+$('bm-stages-next').onclick = async () => {
+  bmState.stages = [...document.querySelectorAll('.bm-stage-name')].map(i => ({ relPath: i.dataset.relpath, name: i.value.trim() || i.dataset.relpath.split('/').pop() }));
+  await runBmPreview();
+};
+
+function bmRequestBase() {
+  return {
+    path: bmState.path,
+    eventId: bmState.eventId || '',
+    newEventName: bmState.eventId ? '' : bmState.newEventName,
+    newEventYear: bmState.eventId ? 0 : bmState.newEventYear,
+    newEventFestivalId: bmState.eventId ? '' : bmState.newEventFestivalId,
+    days: bmState.days,
+    stages: bmState.stages,
+  };
+}
+
+async function runBmPreview() {
+  showBmStep('preview');
+  $('bm-preview-status').textContent = 'Scanning…';
+  $('bm-preview-table').innerHTML = '';
+  let res;
+  try {
+    res = await api('/api/explorer/batch-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...bmRequestBase(), dryRun: true }) });
+  } catch { $('bm-preview-status').textContent = 'Could not scan this folder.'; return; }
+  if (!res.ok) { $('bm-preview-status').textContent = res.error || 'Could not scan this folder.'; return; }
+  const files = res.files || [];
+  $('bm-preview-status').textContent = `${files.length} file(s) found`;
+  $('bm-preview-table').innerHTML = files.map(f => `
+    <tr>
+      <td class="pr-3">${escapeHtml(f.name)}</td>
+      <td class="pr-3">${escapeHtml(f.stage || '—')}</td>
+      <td class="pr-3">${escapeHtml(f.date || '—')}</td>
+      <td>${escapeHtml(f.artist || '—')}</td>
+    </tr>`).join('');
+}
+$('bm-preview-back').onclick = () => showBmStep(bmStageDirs.length ? 'stages' : 'days');
+
+$('bm-apply').onclick = async () => {
+  $('bm-apply').disabled = true;
+  let res;
+  try {
+    res = await api('/api/explorer/batch-match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...bmRequestBase(), dryRun: false }) });
+  } catch { $('bm-apply').disabled = false; return; }
+  if (!res.ok) {
+    toast(res.error || 'Could not apply Batch Match', 'error');
+    $('bm-apply').disabled = false;
+    return;
+  }
+  toast(`Batch matched ${res.count} file(s)`, 'info');
+  $('bm-apply').disabled = false;
+  closeBatchMatchModal();
+  await refresh();
+};
+
+// --- Transcode / Upload to YouTube (recording player) ---
+
+function openRecTranscodeModal() {
+  if (!currentRecordingPath) return;
+  const presets = config.settings.transcodePresets || [];
+  const sel = $('rec-transcode-preset');
+  sel.innerHTML = presets.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  $('rec-transcode-no-presets').classList.toggle('hidden', presets.length > 0);
+  sel.classList.toggle('hidden', presets.length === 0);
+  $('rec-transcode-start').disabled = presets.length === 0;
+  $('rec-transcode-status').textContent = '';
+  $('rec-transcode-overlay').classList.remove('hidden');
+}
+function closeRecTranscodeModal() { $('rec-transcode-overlay').classList.add('hidden'); }
+$('rec-player-transcode-open').onclick = openRecTranscodeModal;
+$('rec-transcode-close').onclick = closeRecTranscodeModal;
+$('rec-transcode-cancel').onclick = closeRecTranscodeModal;
+$('rec-transcode-overlay').addEventListener('click', (e) => { if (e.target.id === 'rec-transcode-overlay') closeRecTranscodeModal(); });
+
+$('rec-transcode-start').onclick = async () => {
+  const preset = (config.settings.transcodePresets || []).find(p => p.id === $('rec-transcode-preset').value);
+  if (!preset) return;
+  $('rec-transcode-start').disabled = true;
+  $('rec-transcode-status').textContent = 'Starting…';
+  let res;
+  try {
+    res = await api('/api/transcode/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paths: [currentRecordingPath], options: preset.options }) });
+  } catch { $('rec-transcode-start').disabled = false; $('rec-transcode-status').textContent = 'Could not start the transcode.'; return; }
+  pollRecTranscodeJob(res.jobId);
+};
+
+async function pollRecTranscodeJob(jobId) {
+  let job;
+  try {
+    job = await api(`/api/transcode/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    setTimeout(() => pollRecTranscodeJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('rec-transcode-status').textContent = `Transcoding… (${job.done || 0}/${job.totalFiles || 1})`;
+    setTimeout(() => pollRecTranscodeJob(jobId), 1500);
+    return;
+  }
+  $('rec-transcode-start').disabled = false;
+  if (job.failed > 0) {
+    const err = (job.results || []).find(r => r.status === 'error');
+    $('rec-transcode-status').textContent = (err && err.error) || 'Transcode failed.';
+    toast('Transcode failed', 'error');
+  } else {
+    $('rec-transcode-status').textContent = 'Done.';
+    toast('Transcode complete', 'info');
+    closeRecTranscodeModal();
+    await reloadLibraryData();
+  }
+}
+
+function openRecYoutubeModal() {
+  if (!currentRecordingPath) return;
+  $('rec-youtube-title').value = '';
+  $('rec-youtube-privacy').value = 'unlisted';
+  $('rec-youtube-status').textContent = '';
+  $('rec-youtube-overlay').classList.remove('hidden');
+}
+function closeRecYoutubeModal() { $('rec-youtube-overlay').classList.add('hidden'); }
+$('rec-player-youtube-open').onclick = openRecYoutubeModal;
+$('rec-youtube-close').onclick = closeRecYoutubeModal;
+$('rec-youtube-cancel').onclick = closeRecYoutubeModal;
+$('rec-youtube-overlay').addEventListener('click', (e) => { if (e.target.id === 'rec-youtube-overlay') closeRecYoutubeModal(); });
+
+$('rec-youtube-start').onclick = async () => {
+  $('rec-youtube-start').disabled = true;
+  $('rec-youtube-status').textContent = 'Uploading…';
+  let res;
+  try {
+    res = await api('/api/recordings/youtube-upload', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentRecordingPath, title: $('rec-youtube-title').value.trim(), privacy: $('rec-youtube-privacy').value }),
+    });
+  } catch { $('rec-youtube-start').disabled = false; $('rec-youtube-status').textContent = 'Could not start the upload.'; return; }
+  if (!res.ok) {
+    $('rec-youtube-start').disabled = false;
+    $('rec-youtube-status').textContent = res.error || 'Could not start the upload.';
+    return;
+  }
+  pollRecYoutubeUploadJob(res.jobId);
+};
+
+async function pollRecYoutubeUploadJob(jobId) {
+  let job;
+  try {
+    job = await api(`/api/recordings/youtube-upload/jobs/${encodeURIComponent(jobId)}`);
+  } catch {
+    setTimeout(() => pollRecYoutubeUploadJob(jobId), 2000);
+    return;
+  }
+  if (job.status === 'running') {
+    $('rec-youtube-status').textContent = 'Uploading…';
+    setTimeout(() => pollRecYoutubeUploadJob(jobId), 2000);
+    return;
+  }
+  $('rec-youtube-start').disabled = false;
+  if (job.status === 'error') {
+    $('rec-youtube-status').textContent = job.error || 'Upload failed.';
+    toast('YouTube upload failed', 'error');
+  } else {
+    $('rec-youtube-status').innerHTML = `Done: <a href="${escapeAttr(job.videoUrl)}" target="_blank" rel="noopener">${escapeHtml(job.videoUrl)}</a>`;
+    toast('Uploaded to YouTube', 'info');
+  }
 }
 
 // Explorer only loads on demand (its tab click handler calls loadExplorer()

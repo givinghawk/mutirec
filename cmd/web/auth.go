@@ -831,6 +831,7 @@ func redactSecrets(cfg *AppConfig) {
 	cfg.Settings.Backup.WebDAV.Password = ""
 	cfg.Settings.YouTube.ClientSecret = ""
 	cfg.Settings.YouTube.RefreshToken = ""
+	cfg.Settings.Twitch.ClientSecret = ""
 	// A configured proxy URL can carry embedded credentials (user:pass@host).
 	cfg.Settings.Sharing.ProxyURL = ""
 	// Share tokens are bearer credentials - never expose them (or the list of

@@ -146,6 +146,19 @@ type Settings struct {
 	TranscodePresets        []TranscodePreset  `json:"transcodePresets,omitempty"`
 	TranscodeRules          []TranscodeRule    `json:"transcodeRules,omitempty"`
 	Downloads               DownloadsConfig    `json:"downloads"`
+	Twitch                  TwitchConfig       `json:"twitch"`
+}
+
+// TwitchConfig holds this instance's Twitch application credentials, used to
+// look up a channel's current stream title (for the recording's NFO) via
+// the Helix API. Authenticates with an app access token obtained
+// automatically via the client-credentials grant (client ID + secret only,
+// no per-user OAuth consent) since everything read here - stream/channel
+// info - is public.
+type TwitchConfig struct {
+	Enabled      bool   `json:"enabled"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret,omitempty"`
 }
 
 // DownloadsConfig controls the shared worker pool that Fetch-from-URL and
@@ -255,6 +268,7 @@ type Source struct {
 	HTTPHeaders       []string `json:"httpHeaders,omitempty"`
 	YouTubeUpload     bool     `json:"youtubeUpload,omitempty"`
 	YouTubePrivacy    string   `json:"youtubePrivacy,omitempty"`
+	ArchiveTwitchChat bool     `json:"archiveTwitchChat,omitempty"`
 }
 
 // SourcePreset is one bundled, ready-to-add pack of sources - a DJ/streamer,
@@ -463,6 +477,13 @@ type recording struct {
 	done         chan struct{}
 	hlsDir       string
 	manualStop   atomic.Bool
+
+	// streamTitle is the channel's live stream title at record-start time
+	// (Twitch only, best-effort - see fetchTwitchStreamTitle), used as the
+	// NFO's Title instead of the source's own (often generic) display name
+	// when available. Written once before execute() starts and only read
+	// afterward, so - like tempPath/finalPath - it needs no locking.
+	streamTitle string
 }
 
 type App struct {
@@ -524,6 +545,9 @@ type App struct {
 	ytJobsMu sync.Mutex
 	ytJobs   map[string]*YouTubeDownloadJob
 
+	ytUploadJobsMu sync.Mutex
+	ytUploadJobs   map[string]*YouTubeUploadJob
+
 	// downloadQueue is a shared worker pool that both Fetch-from-URL and
 	// YouTube-download jobs are submitted to, so "start five downloads at
 	// once" queues the extras instead of hammering the network/disk with
@@ -531,6 +555,11 @@ type App struct {
 	// needs a config read to size itself.
 	downloadQueueOnce sync.Once
 	downloadQueue     chan func()
+
+	// twitchToken caches the app access token used to look up Twitch stream
+	// titles (see fetchTwitchStreamTitle in twitchapi.go) - never copied by
+	// value, only ever accessed through a's own pointer receiver methods.
+	twitchToken twitchAppToken
 
 	sourcePresets []SourcePreset
 }
@@ -607,6 +636,7 @@ func NewApp(configPath string) (*App, error) {
 		transcodeJobs:   map[string]*TranscodeJob{},
 		detectJobs:      map[string]*DetectJob{},
 		ytJobs:          map[string]*YouTubeDownloadJob{},
+		ytUploadJobs:    map[string]*YouTubeUploadJob{},
 		sourcePresets:   loadSourcePresets(),
 	}
 	for _, dir := range []string{cfg.Settings.FinishedDir, cfg.Settings.TempDir, cfg.Settings.LogDir, filepath.Dir(configPath)} {
@@ -680,6 +710,9 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/recordings/thumbnail/regenerate", a.handleRecordingThumbnailRegenerate)
 	mux.HandleFunc("/api/recordings/timecode", a.handleRecordingTimecode)
 	mux.HandleFunc("/api/recordings/waveform", a.handleRecordingWaveform)
+	mux.HandleFunc("/api/recordings/chat", a.handleRecordingChat)
+	mux.HandleFunc("/api/recordings/youtube-upload", a.handleRecordingYouTubeUpload)
+	mux.HandleFunc("/api/recordings/youtube-upload/jobs/", a.handleRecordingYouTubeUploadJobItem)
 	mux.HandleFunc("/api/recordings/backfill-timecodes", a.handleBackfillTimecodes)
 	mux.HandleFunc("/api/cutter/markers", a.handleCutterMarkers)
 	mux.HandleFunc("/api/cutter/preview", a.handleCutterPreview)
@@ -708,6 +741,7 @@ func (a *App) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/explorer/fetch/jobs/", a.handleExplorerFetchJobItem)
 	mux.HandleFunc("/api/explorer/youtube", a.handleExplorerYouTubeDownload)
 	mux.HandleFunc("/api/explorer/youtube/jobs/", a.handleExplorerYouTubeJobItem)
+	mux.HandleFunc("/api/explorer/batch-match", a.handleBatchMatch)
 	// Peer-to-peer sharing. /api/share/ping and /api/share/get/ are public
 	// (see isPublicPath) - the rest are admin-gated by requireAuth/rbacAllowed.
 	mux.HandleFunc("/api/share/ping", a.handleSharePing)
@@ -1056,6 +1090,7 @@ func (a *App) runRecording(rec *recording) {
 	hasOutput := statErr == nil && info.Size() > 0
 	if hasOutput && failed && info.Size() < minViableRecordingBytes {
 		_ = os.Remove(rec.tempPath)
+		_ = os.Remove(twitchChatSidecarPath(rec.tempPath))
 		hasOutput = false
 		a.event("error", fmt.Sprintf("[%s] discarded a %d-byte recording attempt with no usable media - see the log for why streamlink/ffmpeg failed", rec.source.Name, info.Size()))
 	}
@@ -1072,6 +1107,18 @@ func (a *App) runRecording(rec *recording) {
 		// change moves the file) - everything below needs to see that
 		// updated rec.finalPath, not the pre-transcode one.
 		a.autoTranscode(rec)
+		// The chat sidecar was being actively written (by captureTwitchChat,
+		// still keyed off rec.tempPath) throughout the recording, so it can
+		// only be moved to sit next to the media file once rec.finalPath has
+		// settled - i.e. after autoTranscode, not before, in case a matching
+		// rule just moved the media file itself to a new container/path.
+		if chatTemp := twitchChatSidecarPath(rec.tempPath); fileExists(chatTemp) {
+			chatFinal := twitchChatSidecarPath(rec.finalPath)
+			if err := os.Rename(chatTemp, chatFinal); err != nil {
+				_ = copyFile(chatTemp, chatFinal)
+				_ = os.Remove(chatTemp)
+			}
+		}
 		a.writeNFO(rec)
 		a.backup(rec)
 		go a.uploadYouTube(rec)
@@ -1166,6 +1213,19 @@ func prepareGracefulCmd(cmd *exec.Cmd) {
 func (a *App) execute(rec *recording) error {
 	src := rec.source
 	windowSeconds := a.snapshotConfig().Settings.LiveRewindWindowSeconds
+	if src.Type == "twitch" {
+		if channel, ok := twitchChannelFromURL(src.URL); ok {
+			// Blocks recording start by up to fetchTwitchStreamTitle's own
+			// HTTP timeout (worst case, e.g. Twitch is slow to respond) -
+			// deliberately synchronous rather than a goroutine, since
+			// rec.streamTitle is read later (in writeNFO) from a different
+			// goroutine with no other synchronization between them.
+			rec.streamTitle = a.fetchTwitchStreamTitle(channel)
+			if src.ArchiveTwitchChat {
+				go a.captureTwitchChat(rec, channel)
+			}
+		}
+	}
 	if src.Type == "http" {
 		args := ffmpegArgs(src, src.URL, rec.tempPath, rec.hlsDir, windowSeconds)
 		cmd := exec.CommandContext(rec.ctx, "ffmpeg", args...)
@@ -3971,6 +4031,13 @@ func (a *App) writeNFO(rec *recording) {
 	if !a.cfg.Settings.EnableNFO {
 		return
 	}
+	// A Twitch stream's title at record time (see fetchTwitchStreamTitle) is
+	// usually far more descriptive than the source's own display name (often
+	// just the channel name) - prefer it when one was actually fetched.
+	title := rec.source.Name
+	if rec.streamTitle != "" {
+		title = rec.streamTitle
+	}
 	nfo := strings.TrimSpace(fmt.Sprintf(`Title: %s
 Source: %s
 URL: %s
@@ -3979,7 +4046,7 @@ Finished: %s
 Recorder: MutiRec %s
 
 %s
-`, rec.source.Name, rec.source.Type, rec.source.URL, rec.startedAt.Format(time.RFC3339), time.Now().Format(time.RFC3339), version, rec.source.ExtraNFO))
+`, title, rec.source.Type, rec.source.URL, rec.startedAt.Format(time.RFC3339), time.Now().Format(time.RFC3339), version, rec.source.ExtraNFO))
 	_ = os.WriteFile(strings.TrimSuffix(rec.finalPath, filepath.Ext(rec.finalPath))+".nfo", []byte(nfo+"\n"), 0o644)
 }
 
@@ -4568,6 +4635,11 @@ func max(a, b int) int {
 }
 
 func gb(v uint64) float64 { return float64(v) / 1024 / 1024 / 1024 }
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
 
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)

@@ -1263,6 +1263,78 @@
   this" note. Deliberately scoped to the destination folder (not a whole-tree scan) to keep the
   cost bounded on a large library.
 
+## Done (this session, part 19) - Batch Match: manual folder-to-event wizard
+
+- **New `batchmatch.go`**: a guided, manual alternative to Smart Match for a folder of
+  already-downloaded sets that doesn't cleanly fit Smart Match's automatic
+  `<Event>/<Edition>/<Day>/<Stage>/<file>` folder-hint parsing (`folderEventHint`) - e.g.
+  something just pulled in via the YouTube download tool or a Stack/WebDAV fetch with its own
+  folder naming. `POST /api/explorer/batch-match` takes the File Explorer folder the user marked
+  as one event, an existing `eventId` or a `newEventName`/`newEventYear`/`newEventFestivalId`,
+  and optional `days`/`stages` arrays (each a `{relPath, ...}` mapping relative to the marked
+  folder, at whatever depth they actually are - the backend doesn't care whether stages sit
+  directly under the root or one level inside a day folder, it just does longest-prefix
+  matching). Walks every file under the folder, guesses each one's artist name via the same
+  `guessArtistFromName` Smart Match itself uses, and either just returns the preview
+  (`dryRun:true`) or actually creates the event (if new) and writes `RecordingMeta` for every
+  file (`dryRun:false`) - nothing is written until the wizard's last step.
+- **New wizard UI** (File Explorer -> "Batch Match…" button, only enabled once you've navigated
+  into a folder): step 1 picks/creates the LibraryEvent; step 2 lists the folder's immediate
+  subfolders and lets you assign each an optional date (or skip entirely if they're not day
+  folders); step 3 - built from real `/api/explorer/list` calls, one level deeper than the day
+  folders if step 2 wasn't skipped, or the same level if it was - lets you rename each candidate
+  stage folder (or skip to use its own name as-is); step 4 previews every file's resolved
+  stage/date/guessed-artist before Apply actually calls the endpoint for real.
+
+## Done (this session, part 20) - Twitch chat archive/playback + stream title in NFO
+
+- **New `twitchapi.go`**: looks up a Twitch channel's current live stream title via the Helix
+  "Get Streams" endpoint, authenticated with an app access token (client-credentials grant -
+  `Settings.Twitch{Enabled, ClientID, ClientSecret}`, new Settings -> Twitch panel) since
+  everything read is public - no per-user OAuth consent needed, unlike YouTube auto-upload's
+  pasted-refresh-token flow. Token cached on `App.twitchToken` until near expiry.
+  `twitchTokenURL`/`twitchStreamsURL` are package vars (not consts) so tests can point them at a
+  local `httptest.Server`.
+- **NFO title**: `execute()` (`main.go`) now fetches the stream title synchronously for a Twitch
+  source before starting streamlink/ffmpeg, stored on the new `recording.streamTitle` field;
+  `writeNFO` prefers it over `rec.source.Name` when non-empty (falls back to the old behavior
+  otherwise - channel offline, Twitch not configured, or the lookup just failed).
+- **New `twitchchat.go`**: `Source.ArchiveTwitchChat` (new Sources-tab toggle, Twitch only) makes
+  `execute()` spawn `captureTwitchChat`, which connects anonymously (a `justinfan<N>` IRC login -
+  no OAuth needed for read-only access) to `irc.chat.twitch.tv:6697`, joins the channel, and
+  appends every message to a `.chat.jsonl` sidecar (same "swap the extension" convention as
+  `.nfo`/`.timecode.json`; added to `isSidecarPath`) as `{t: secondsSinceStart, user, color,
+  text}`. Reconnects on a dropped connection every `twitchIRCReconnectDelay` until the recording
+  stops. The sidecar is written under `rec.tempPath` throughout capture (still live) and only
+  renamed next to `rec.finalPath` in `runRecording` **after** `autoTranscode` runs (a rule can
+  still move/rename the media file at that point) - doing the rename any earlier would leave the
+  chat sidecar orphaned under the pre-transcode filename.
+- **Playback**: `GET /api/recordings/chat?path=...` serves the sidecar as a JSON array. The
+  recording player (`app.js`) fetches it on open, keeps a running "rendered up to" index, and on
+  the existing `timeupdate` handler renders every message whose `t` is `<= player.currentTime()`
+  (rebuilding from scratch on a backward seek) - a VOD-chat-replay panel next to Details/More
+  recordings, capped to the last 300 rendered lines so a long recording's chat never bloats the DOM.
+
+## Done (this session, part 21) - Per-recording Transcode/Upload-to-YouTube buttons
+
+- **`youtubeUploadFile`** (`youtube.go`) is now generic over `(accessToken, path, title,
+  description, privacy string)` instead of taking a `*recording` directly - `uploadYouTube`
+  (the auto-upload-after-recording path) just passes `rec.finalPath`/`rec.source.Name`/etc
+  through, unchanged behavior. `youtubeTokenURL`/`youtubeUploadURL` became vars (not consts) so
+  tests can point them at a local `httptest.Server`.
+- **New `youtubemanual.go`**: `POST /api/recordings/youtube-upload` starts a one-off upload of
+  any already-finished recording (identified by its path relative to FinishedDir) as a background
+  `YouTubeUploadJob`, polled via `GET /api/recordings/youtube-upload/jobs/{id}` - same
+  job-map-with-view() pattern as every other background job in this codebase. Defaults the title
+  to `RecordingMeta`'s artist/channel if the file has been organized into the library, falling
+  back to the filename; privacy defaults to unlisted like the auto-upload path.
+- **Player buttons**: the recording player header now has "Transcode…" and "Upload to YouTube"
+  buttons (admin-only). Transcode reuses the existing `/api/transcode/start` (already accepted
+  an arbitrary path list, not just Mass Transcode's multi-select) with a saved preset - the modal
+  just points at "create one in Settings" if none exist yet, rather than duplicating Mass
+  Transcode's whole custom-options form. Upload to YouTube offers a title override and a
+  privacy dropdown, then polls the new job endpoint and shows the resulting video link inline.
+
 ## Remaining (in suggested order)
 
 ### 1. Smart Match follow-ups (optional, not blocking)

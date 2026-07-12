@@ -26,7 +26,10 @@ import (
 // blocks or fails the recording itself.
 // ============================================================================
 
-const (
+// youtubeTokenURL and youtubeUploadURL are package-level vars (not consts)
+// purely so a test can point them at a local httptest.Server instead of the
+// real Google/YouTube endpoints.
+var (
 	youtubeTokenURL  = "https://oauth2.googleapis.com/token"
 	youtubeUploadURL = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
 )
@@ -101,7 +104,9 @@ func (a *App) uploadYouTube(rec *recording) {
 		return
 	}
 
-	videoURL, err := youtubeUploadFile(token, rec, youtubePrivacyOrDefault(rec.source.YouTubePrivacy))
+	title := rec.source.Name
+	description := fmt.Sprintf("Recorded by MutiRec from %s\nSource: %s", rec.source.Type, rec.source.URL)
+	videoURL, err := youtubeUploadFile(token, rec.finalPath, title, description, youtubePrivacyOrDefault(rec.source.YouTubePrivacy))
 	if err != nil {
 		a.event("error", fmt.Sprintf("[%s] YouTube upload failed: %s", rec.source.Name, err))
 		return
@@ -111,23 +116,24 @@ func (a *App) uploadYouTube(rec *recording) {
 
 // youtubeUploadFile performs the two-step resumable upload: initiate a
 // session (returns a per-upload URL in the Location header), then PUT the
-// whole file to it in one shot.
-func youtubeUploadFile(accessToken string, rec *recording, privacy string) (string, error) {
-	info, err := os.Stat(rec.finalPath)
+// whole file to it in one shot. Generic over any file path so it covers
+// both the auto-upload-after-recording path (uploadYouTube above) and a
+// one-off manual upload of an already-finished recording (see
+// handleRecordingYouTubeUpload in youtubemanual.go).
+func youtubeUploadFile(accessToken, path, title, description, privacy string) (string, error) {
+	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	f, err := os.Open(rec.finalPath)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 
-	title := rec.source.Name
 	if len(title) > 100 {
 		title = title[:100]
 	}
-	description := fmt.Sprintf("Recorded by MutiRec from %s\nSource: %s", rec.source.Type, rec.source.URL)
 	meta := map[string]any{
 		"snippet": map[string]any{"title": title, "description": description},
 		"status":  map[string]any{"privacyStatus": privacy, "selfDeclaredMadeForKids": false},
@@ -137,7 +143,7 @@ func youtubeUploadFile(accessToken string, rec *recording, privacy string) (stri
 		return "", err
 	}
 
-	contentType := mime.TypeByExtension(filepath.Ext(rec.finalPath))
+	contentType := mime.TypeByExtension(filepath.Ext(path))
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
